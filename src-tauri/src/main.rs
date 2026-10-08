@@ -1,6 +1,9 @@
 #![cfg_attr(not(debug_assertions), windows_subsystem = "windows")]
+mod annotation_io;
 mod backend;
 mod native;
+mod roi;
+mod tiff_annotations;
 
 use backend::{Backend, ImageState};
 use std::sync::atomic::Ordering;
@@ -17,6 +20,45 @@ fn image_state(backend: State<'_, Backend>) -> Option<ImageState> {
 #[tauri::command]
 fn cancel_load(backend: State<'_, Backend>) {
     backend.cancel();
+}
+
+fn annotation_source(backend: &Backend, id: &str) -> Result<std::path::PathBuf, String> {
+    let job = backend
+        .current
+        .lock()
+        .unwrap()
+        .clone()
+        .ok_or("No image open")?;
+    if job.state.lock().unwrap().id != id {
+        return Err("The image has changed".into());
+    }
+    Ok(job.source.clone())
+}
+
+#[tauri::command]
+async fn load_annotations(
+    id: String,
+    backend: State<'_, Backend>,
+) -> Result<Vec<roi::PointRoi>, String> {
+    let source = annotation_source(&backend, &id)?;
+    tauri::async_runtime::spawn_blocking(move || annotation_io::load(&source))
+        .await
+        .map_err(|e| e.to_string())?
+}
+
+#[tauri::command]
+async fn save_annotations(
+    id: String,
+    path: String,
+    rois: Vec<roi::PointRoi>,
+    backend: State<'_, Backend>,
+) -> Result<(), String> {
+    let source = annotation_source(&backend, &id)?;
+    tauri::async_runtime::spawn_blocking(move || {
+        annotation_io::save(&source, std::path::Path::new(&path), rois)
+    })
+    .await
+    .map_err(|e| e.to_string())?
 }
 
 fn main() {
@@ -36,7 +78,9 @@ fn main() {
         .invoke_handler(tauri::generate_handler![
             open_image,
             image_state,
-            cancel_load
+            cancel_load,
+            load_annotations,
+            save_annotations
         ])
         .register_asynchronous_uri_scheme_protocol("aperture", |context, request, responder| {
             let app = context.app_handle().clone();

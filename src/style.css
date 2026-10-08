@@ -683,3 +683,11 @@ select:focus-visible {
   opacity: 1;
   pointer-events: auto;
 }
+
+#viewer.point-mode .openseadragon-canvas {
+  cursor: crosshair;
+}
+#filename.unsaved::after {
+  content: " •";
+  color: var(--focus);
+}

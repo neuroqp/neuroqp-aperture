@@ -74,6 +74,7 @@ export const toolPanels = `
 
 export function bindTools(
   onDisplayChange: (settings: DisplaySettings) => void,
+  onPointsChange: () => void = () => {},
 ) {
   const container = document.querySelector<HTMLElement>("#tool-panels")!;
   const names = ["brightness", "points"] as const;
@@ -87,6 +88,7 @@ export function bindTools(
     button.setAttribute("aria-pressed", String(open));
     button.setAttribute("aria-expanded", String(open));
     document.getElementById(`${name}-panel`)!.hidden = !open;
+    if (name === "points") onPointsChange();
   };
   const close = () => {
     // Escape closes the focused panel, otherwise the most recently opened one.
@@ -235,6 +237,7 @@ export function bindTools(
       button.addEventListener("click", () => {
         point = { ...point, [key]: choice.value } as PointSettings;
         refreshPoints();
+        onPointsChange();
       });
       group.append(button);
     }
@@ -251,5 +254,27 @@ export function bindTools(
     }
   }
   refreshPoints();
-  return { close, resetImage, setImageReady, setHistogram };
+  for (const id of ["point-labels", "point-all-slices", "point-counter"]) {
+    document.getElementById(id)!.addEventListener("change", onPointsChange);
+  }
+  return {
+    close,
+    resetImage,
+    setImageReady,
+    setHistogram,
+    pointsActive: () => openPanels.has("points"),
+    deactivatePoints: () => setOpen("points", false),
+    pointSettings: () => ({
+      ...point,
+      labels: (document.getElementById("point-labels") as HTMLInputElement)
+        .checked,
+      allSlices: (
+        document.getElementById("point-all-slices") as HTMLInputElement
+      ).checked,
+      counter: Number(
+        (document.querySelector("select#point-counter") as HTMLSelectElement)
+          .value,
+      ),
+    }),
+  };
 }

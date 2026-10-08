@@ -1,7 +1,9 @@
 import OpenSeadragon from "openseadragon";
 import { convertFileSrc, invoke, isTauri } from "@tauri-apps/api/core";
 import { getCurrentWindow } from "@tauri-apps/api/window";
-import { open } from "@tauri-apps/plugin-dialog";
+import { open, save, confirm } from "@tauri-apps/plugin-dialog";
+import { AnnotationViewer } from "./annotation-viewer";
+import { addPoint, counterCount, type PointRoi } from "./annotations";
 import appIcon from "../src-tauri/icons/icon.png";
 import { icon, type IconName } from "./icons";
 import { bindTools, toolPanels } from "./tools";
@@ -28,7 +30,7 @@ document.querySelector<HTMLDivElement>("#app")!.innerHTML = `
     </div>
     <div class="file-actions">
       <button id="open-button" class="file-button" type="button" title="Open image (Ctrl+O)">${icon("open")}<span>Open</span></button>
-      <button id="save-button" class="file-button" type="button" title="Saving is not available in this preview" disabled>${icon("save")}<span>Save</span></button>
+      <button id="save-button" class="file-button" type="button" title="Save annotated TIFF copy (Ctrl+S)" disabled>${icon("save")}<span>Save</span></button>
     </div>
     <button id="theme-button" class="tool theme-button" type="button" aria-label="Switch theme"></button>
     <div class="window-actions">
@@ -63,7 +65,7 @@ document.querySelector<HTMLDivElement>("#app")!.innerHTML = `
 
 const $ = <T extends HTMLElement = HTMLElement>(id: string) =>
   document.getElementById(id)! as T;
-const tools = bindTools(applyDisplay);
+const tools = bindTools(applyDisplay, updatePointTool);
 bindTheme();
 const native = isTauri();
 const windowHandle = native ? getCurrentWindow() : null;
@@ -84,6 +86,100 @@ const viewer = OpenSeadragon({
   maxZoomPixelRatio: 4,
   gestureSettingsMouse: { clickToZoom: false, dblClickToZoom: true },
 });
+
+let currentImage: ImageState | null = null;
+let rois: PointRoi[] = [];
+let annotationsReady = false;
+let annotationError: string | null = null;
+let dirty = false;
+let saving = false;
+const annotationViewer = new AnnotationViewer(
+  viewer,
+  (point) => {
+    if (!currentImage || !annotationsReady || saving) return;
+    const next = addPoint(rois, point, tools.pointSettings(), currentImage);
+    if (!next) return;
+    rois = next;
+    dirty = true;
+    annotationViewer.setRois(rois);
+    updatePointTool();
+  },
+  () => tools.pointsActive() && annotationsReady && !saving,
+);
+
+function updatePointTool() {
+  const active = tools.pointsActive();
+  for (const gestures of [
+    viewer.gestureSettingsByDeviceType("mouse"),
+    viewer.gestureSettingsByDeviceType("touch"),
+    viewer.gestureSettingsByDeviceType("pen"),
+  ]) {
+    gestures.dragToPan = !active;
+    gestures.dblClickToZoom = !active;
+  }
+  $("viewer").classList.toggle("point-mode", active);
+  $("pan-button").classList.toggle("selected", !active);
+  const count = counterCount(rois, tools.pointSettings().counter);
+  $("point-count").textContent = String(count);
+  $("point-count").title =
+    `${rois.reduce((sum, roi) => sum + roi.points.length, 0)} points total`;
+  $("filename").classList.toggle("unsaved", dirty);
+  $<HTMLButtonElement>("save-button").disabled =
+    !annotationsReady || !rois.some((roi) => roi.points.length > 0) || saving;
+}
+
+async function discardChanges() {
+  if (saving || dialogOpen) return false;
+  if (!dirty) return true;
+  dialogOpen = true;
+  try {
+    return await confirm(
+      "Discard unsaved point annotations? Save a TIFF copy first to keep them.",
+      {
+        title: "Unsaved annotations",
+        kind: "warning",
+        okLabel: "Discard",
+        cancelLabel: "Cancel",
+      },
+    );
+  } finally {
+    dialogOpen = false;
+  }
+}
+
+async function saveAnnotations() {
+  if (
+    !native ||
+    saving ||
+    dialogOpen ||
+    !currentId ||
+    $<HTMLButtonElement>("save-button").disabled
+  )
+    return;
+  dialogOpen = true;
+  try {
+    let path = await save({
+      title: "Save annotated TIFF copy",
+      defaultPath: `${(currentImage?.name || "image").replace(/\.[^.]+$/, "")}-annotated.tif`,
+      filters: [{ name: "TIFF image", extensions: ["tif", "tiff"] }],
+    });
+    if (!path) return;
+    if (!/\.tiff?$/i.test(path))
+      throw new Error("Use a .tif or .tiff filename for the annotated copy.");
+    saving = true;
+    updatePointTool();
+    $("status").textContent = "Saving annotated copy…";
+    await invoke("save_annotations", { id: currentId, path, rois });
+    dirty = false;
+    $("status").textContent = "Saved";
+  } catch (error) {
+    showError(String(error));
+  } finally {
+    saving = false;
+    dialogOpen = false;
+    updatePointTool();
+  }
+}
 
 let currentId: string | null = null;
 let previewAdded = false;
@@ -112,6 +208,14 @@ function setLoading(active: boolean, progress: number | null = null) {
 
 function resetViewer() {
   currentId = null;
+  currentImage = null;
+  rois = [];
+  annotationsReady = false;
+  annotationError = null;
+  dirty = false;
+  annotationViewer.setImage(null);
+  annotationViewer.setRois([]);
+  updatePointTool();
   previewAdded = false;
   pyramidAdded = false;
   tileError = null;
@@ -135,30 +239,53 @@ function showImage(state: ImageState) {
   if (currentId !== state.id) {
     resetViewer();
     currentId = state.id;
+    void invoke<PointRoi[]>("load_annotations", { id: state.id }).then(
+      (loaded) => {
+        if (currentId !== state.id) return;
+        rois = loaded;
+        annotationsReady = true;
+        annotationViewer.setRois(rois);
+        updatePointTool();
+      },
+      (error) => {
+        if (currentId !== state.id) return;
+        annotationError = `Annotations could not load: ${String(error)}`;
+        $("status").textContent = annotationError;
+        $("status").classList.add("error");
+      },
+    );
   }
+  currentImage = state;
+  if (state.width > 0) annotationViewer.setImage(state);
   $("filename").textContent = state.name;
+  $("filename").classList.toggle("unsaved", dirty);
   $("viewer").dataset.phase = state.phase;
   $("filename").title = state.name;
   setLoading(state.phase === "loading", state.progress);
   $("status").classList.toggle(
     "error",
     state.phase === "error" ||
+      annotationError !== null ||
       (tileError !== null && state.phase !== "cancelled"),
   );
   const status =
     state.phase === "error"
       ? state.error || "Could not load image"
-      : state.phase === "cancelled"
-        ? "Cancelled"
-        : tileError
-          ? tileError
-          : state.phase === "loading"
-            ? state.previewReady
-              ? "Loading detail…"
-              : state.width > 0
-                ? "Building preview…"
-                : "Reading image…"
-            : "";
+      : annotationError
+        ? annotationError
+        : saving
+          ? "Saving annotated copy…"
+          : state.phase === "cancelled"
+            ? "Cancelled"
+            : tileError
+              ? tileError
+              : state.phase === "loading"
+                ? state.previewReady
+                  ? "Loading detail…"
+                  : state.width > 0
+                    ? "Building preview…"
+                    : "Reading image…"
+                : "";
   if ($("status").textContent !== status) $("status").textContent = status;
   $("status").title = tileError || state.detail || status;
   const transform = orientation(state.orientation);
@@ -197,7 +324,7 @@ function showImage(state: ImageState) {
         document
           .querySelectorAll<HTMLButtonElement>("[data-image-control]")
           .forEach((button) => (button.disabled = false));
-        $("pan-button").classList.add("selected");
+        updatePointTool();
         if (state.tilesReady) addPyramid(state);
       },
       error: () => {
@@ -241,7 +368,8 @@ const loader = new ImageLoader(
   showError,
 );
 
-async function openPath(path: string) {
+async function openPath(path: string, checked = false) {
+  if (!checked && !(await discardChanges())) return;
   resetViewer();
   $("viewer").dataset.phase = "loading";
   $("filename").textContent = path.split(/[\\/]/).pop() || path;
@@ -252,7 +380,7 @@ async function openPath(path: string) {
 }
 
 async function chooseImage() {
-  if (!native || dialogOpen) return;
+  if (!native || dialogOpen || !(await discardChanges())) return;
   dialogOpen = true;
   try {
     const path = await open({
@@ -265,7 +393,7 @@ async function chooseImage() {
         },
       ],
     });
-    if (typeof path === "string") await openPath(path);
+    if (typeof path === "string") await openPath(path, true);
   } catch (error) {
     showError(String(error));
   } finally {
@@ -285,10 +413,14 @@ async function cancelLoad() {
   $<HTMLButtonElement>("cancel-button").disabled = false;
 }
 
+$("save-button").addEventListener("click", () => void saveAnnotations());
 $("open-button").addEventListener("click", () => void chooseImage());
 $("cancel-button").addEventListener("click", () => void cancelLoad());
 $("fit-button").addEventListener("click", () => viewer.viewport.goHome());
-$("pan-button").addEventListener("click", () => viewer.canvas.focus());
+$("pan-button").addEventListener("click", () => {
+  tools.deactivatePoints();
+  viewer.canvas.focus();
+});
 viewer.addHandler("tile-load-failed", (event) => {
   const message = tileFailure(
     currentId ? tileUrl(currentId) : null,
@@ -318,6 +450,12 @@ document.addEventListener("keydown", (event) => {
   if ((event.ctrlKey || event.metaKey) && event.key.toLowerCase() === "o") {
     event.preventDefault();
     void chooseImage();
+  } else if (
+    (event.ctrlKey || event.metaKey) &&
+    event.key.toLowerCase() === "s"
+  ) {
+    event.preventDefault();
+    void saveAnnotations();
   } else if (event.key === "Escape") {
     if (tools.close()) event.preventDefault();
     else void cancelLoad();
@@ -346,6 +484,17 @@ document.addEventListener("keydown", (event) => {
 });
 
 if (windowHandle) {
+  void windowHandle
+    .onCloseRequested(async (event) => {
+      if (dirty || saving || dialogOpen) {
+        event.preventDefault();
+        if (await discardChanges()) {
+          dirty = false;
+          await windowHandle.close();
+        }
+      }
+    })
+    .catch(showError);
   $("minimize-button").addEventListener(
     "click",
     () => void windowHandle.minimize().catch(showError),
@@ -388,5 +537,6 @@ if (windowHandle) {
 
 window.addEventListener("beforeunload", () => {
   loader.dispose();
+  annotationViewer.dispose();
   viewer.destroy();
 });

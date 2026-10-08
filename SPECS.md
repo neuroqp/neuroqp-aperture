@@ -12,9 +12,9 @@ preview as soon as possible, and stays responsive while loading large images.
 - Support ordinary images and large TIFFs, including BigTIFF. Exact compression,
   pixel-type, and multi-page coverage must be documented as support is added.
 - Keep the interface and implementation small. Image editing, analysis,
-  annotation placement, and specialist microscopy formats are outside the initial
-  scope. Display-range adjustment is display-only; multi-point options remain
-  a UI prototype.
+  specialist microscopy formats, and annotation movement/deletion are outside
+  the current scope. Display-range adjustment is display-only. Multi-point
+  annotations are editable metadata, kept separate from source image pixels.
 
 ## Technology decisions
 
@@ -60,9 +60,10 @@ Two thin horizontal header bars sit above the image viewer.
    zoom. Use nearest-neighbor scaling so magnified pixels have sharp boundaries.
    Fit the image to the available space when first opened.
 
-Open selects a local image and replaces the current image. Save is a visible
-control; its initial behavior and supported output formats remain to be decided.
-Disable Save until an image and a supported save operation are available.
+Open selects a local image and replaces the current image. Save creates a
+separate annotated TIFF copy with ImageJ ROI metadata; never overwrite the
+opened source image. Enable Save when annotations are available. Confirm before
+discarding unsaved annotations on Open or Close. Ctrl+S opens Save.
 
 ## Tool option panels
 
@@ -81,14 +82,40 @@ Disable Save until an image and a supported save operation are available.
   Reset the display range when opening another image.
 - Multi-point: icon toggle rows for Cross/Dot/Circle, color, and size. Each row
   previews its choices using the other two current selections. Include Label
-  points, Show on all slices, Counter, and point count. Annotation placement
-  and counting are not implemented yet.
+  points, Show on all slices, Counter, and the selected counter's point count.
+  With the tool active, primary clicks inside the image add points using the
+  selected configuration. Keep earlier marker styles when settings change.
+  Closing the panel or selecting Pan leaves point-placement mode. Do not add
+  movement, deletion, or custom pan gestures yet.
 - Preserve option values while closing and reopening panels during the session.
 - Use the approved T1/B2/C1/D1/S1/P2/M2 styling: recessed lavender toggles, tinted
   action buttons, solid purple checkboxes, raised dropdowns, fine round-handle
   sliders, and quiet compact panels. Use purple and orange accents in light and
   dark modes. Follow system appearance initially; a header theme button switches
   modes and remembers the choice.
+
+## ImageJ annotation interchange
+
+- Load active multi-point selections and point overlays embedded in ImageJ TIFFs.
+  Store positions in original-image pixel-center coordinates with subpixel precision.
+  Imported points participate in the same point groups as new annotations.
+- Preserve marker type, size, ARGB color, labels, counters, slice positions, ROI
+  names/properties, and unrelated metadata when saving. The newest group becomes
+  ImageJ's active selection; other groups remain editable ImageJ overlays.
+- Display the first page only. Preserve annotations for other slices/channels/time
+  points without displaying or reassigning them. Show on all slices sets new
+  points' position to zero; it does not add stack navigation.
+- TIFF saving copies the original file and appends replacement metadata without
+  decoding or changing its pixels, compression, pages, or pyramid. Copying still
+  costs disk space and I/O proportional to the source file size.
+- Other supported image formats convert to a lossless, stripped classic TIFF.
+  Display-range adjustments and marker graphics must not be baked into pixels.
+- Stock ImageJ cannot directly read all tiled TIFFs or BigTIFFs. Metadata remains
+  ImageJ ROI-compatible, but opening those images requires a suitable ImageJ
+  reader. Classic TIFF output cannot exceed its 4 GiB addressing limit.
+- Reject malformed or excessive annotation metadata with a visible error. The
+  initial metadata limit is 32 MiB. ROI sets larger than 65,535 points have an
+  ImageJ limitation on per-point counter/position persistence.
 
 ## Loading and performance
 
@@ -118,14 +145,11 @@ using representative Linux files, including tiled and strip-based TIFFs.
 
 ## Future scope and open decisions
 
-- Add cell annotation tools with click-to-mark points, labels/categories, and
-  an overview of marked cells and counts. Store annotations in image coordinates
-  separately from source pixels so they remain aligned through pan and zoom.
+- Add point movement/deletion and a richer overview of marked cells and counts.
 - Add specialist microscopy formats as needed, preserving the meaning of
   scenes, channels, Z slices, timepoints, and image metadata.
 - Validate and package the application for Windows and macOS.
-- Define Save behavior, output formats, and any conversion settings before
-  implementing saving.
+- Expand annotation export formats and conversion options when needed.
 - Define initial multi-page TIFF behavior and supported pixel types without
   silently interpreting pages as channels or flattening scientific dimensions.
 - Set numerical performance targets after measuring representative files on

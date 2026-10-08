@@ -85,14 +85,35 @@ operate the real file chooser and capture the application window. It uses the
 keyboard, clipboard, and window focus while running. Results and screenshots
 stay in ignored `test-data/`.
 
+## ImageJ annotation validation
+
+Run the optional interoperability check against a local ImageJ installation:
+
+```bash
+python3 scripts/check-imagej-interop.py /path/to/ImageJ/ij.jar --java-home /path/to/jdk
+```
+
+It generates synthetic TIFFs, round-trips editable ROIs through Aperture and
+ImageJ, and checks coordinates, metadata, and exact image pixel preservation.
+No microscopy source files are modified.
+
 ## Proof-of-concept boundaries
 
 - Linux is the current development and validation target. Windows and macOS
   packaging and testing are pending.
-- Save is disabled. Display-range sliders and percentile presets adjust only
+- Save creates an annotated TIFF copy with ImageJ-compatible point ROI metadata.
+  It never overwrites the opened source. Click with Multi-point active to add
+  points; closing the panel or selecting Pan leaves placement mode. Imported
+  ImageJ point selections and overlays remain editable annotations.
+- Display-range sliders and percentile presets adjust only
   the displayed image. The approximate histogram samples the 8-bit preview, with
   linear counts by default and an optional Log toggle on hover. Original images
-  and cached tiles stay unchanged. Multi-point options do not yet place points.
+  and cached tiles stay unchanged.
+- TIFF copies preserve their original layout. Stock ImageJ cannot directly open
+  all tiled TIFFs or BigTIFFs; those need a suitable image reader. Other formats
+  convert to a classic stripped TIFF, subject to its 4 GiB addressing limit.
+- Point movement and deletion are not implemented. Different marker styles save
+  as separate ROI groups; the latest is active in ImageJ and others are overlays.
 - Multi-page images display their first page. Specialist microscopy metadata,
   channels, Z stacks, and timepoints are not interpreted.
 - Supported display pixels are unsigned 8/16-bit grayscale, RGB, and RGBA in

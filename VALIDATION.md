@@ -156,3 +156,44 @@ Histogram values are an approximation from a preview downsampled to at most
 256 by 256 pixels. They describe the 8-bit display luminance, not original
 16-bit intensities. The renderer filters only the image canvas; file data and
 cached tiles are not rewritten.
+
+## Editable multi-point annotations and ImageJ TIFF copies
+
+Eighteen frontend and sixteen Rust tests pass. Frontend checks cover immutable
+point additions, style grouping, outside-image rejection, and pixel-center/flip
+transforms. Backend checks cover real ImageJ ROI bytes, malformed metadata,
+classic/BigTIFF in both byte orders, unknown metadata retention, atomic copies,
+source/symlink/hardlink overwrite rejection, and pixel-identical PNG conversion.
+Prettier, rustfmt, Clippy, TypeScript/Vite, and the standalone debug build pass.
+
+`python3 scripts/check-imagej-interop.py /path/to/ij.jar --java-home /path/to/jdk`
+passed against the locally installed ImageJ 1.54g. It generates synthetic TIFFs,
+uses ImageJ's own encoders/decoders, edits through Aperture's ROI/TIFF modules,
+reopens with ImageJ, adds another point, and reimports the saved result. It
+checks exact pixel values, original source bytes, counters, subpixels, active
+selection and overlay styles, ROI properties, calibration and image metadata.
+The headless check bypasses ImageJ toolbar activation, which requires a GUI.
+Its float-image case tests metadata interchange only; Aperture's viewer still
+rejects floating-point images.
+
+Browser interaction with the production frontend and mocked native IPC verified
+imported marks, active-only placement, outside-image rejection, separate style
+groups, counters, label/all-slice configuration, save payloads, and unchanged
+marker screen size through zoom. T3 covered initial interactions; after its
+explicit automation-host-unavailable response, isolated Chromium completed zoom
+and pan checks. Validation harnesses remain ignored under `test-data/`.
+
+A separate Linux Tauri/WebDriver instance verified native point placement over
+a loaded image, marker rendering, counter updates, Save enablement, the native
+Save dialog opening, successful native save command execution, and reloading the
+saved TIFF with its marker. ImageJ independently reopened that native PNG-to-TIFF
+output, verified all 3,185 source RGB pixels exactly, and added another point to
+the editable selection. Native dialog filename entry and confirmation were
+not automated; save-command tests and browser Save-flow checks cover those
+surrounding paths separately. No global desktop mouse or keyboard injection was
+used. Local screenshots include `test-data/points-native-added.png` and
+`test-data/points-native-imported.png`.
+
+TIFF copies retain their layout, so stock ImageJ's existing tiled-TIFF/BigTIFF
+reader limits still apply. Movement, deletion, stack navigation, and large-point-
+set performance benchmarks remain outside this change.
