@@ -97,14 +97,18 @@ fn main() {
         assert_eq!(read.overlays, overlays);
     }
     let source = directory.join("gray16-stack.tif");
-    let loaded = annotation_io::load(&source).unwrap();
+    let basis = annotation_io::load_basis(&source).unwrap();
+    let loaded = &basis.points;
     let mut cleared = loaded.clone();
     for selection in &mut cleared {
         selection.points.clear();
     }
     let cleared_target = directory.join("saved-cleared.tif");
-    annotation_io::save(&source, &cleared_target, cleared, &loaded, true).unwrap();
-    assert!(annotation_io::load(&cleared_target).unwrap().is_empty());
+    annotation_io::save(&source, &cleared_target, cleared, &basis, true).unwrap();
+    assert!(annotation_io::load_basis(&cleared_target)
+        .unwrap()
+        .points
+        .is_empty());
     let mut split = vec![];
     for (index, counter) in [(1, 2), (0, 4), (1, 4), (0, 2)] {
         let mut group = loaded[index].clone();
@@ -127,13 +131,13 @@ fn main() {
     }];
     split.push(added);
     let target = directory.join("saved-split.tif");
-    annotation_io::save(&source, &target, split, &loaded, true).unwrap();
-    let reopened = annotation_io::load(&target).unwrap();
-    assert_eq!(reopened.len(), 5);
+    annotation_io::save(&source, &target, split, &basis, true).unwrap();
+    let reopened = annotation_io::load_basis(&target).unwrap();
+    assert_eq!(reopened.points.len(), 5);
     annotation_io::save(
         &target,
         &directory.join("saved-split-reopened.tif"),
-        reopened.clone(),
+        reopened.points.clone(),
         &reopened,
         true,
     )

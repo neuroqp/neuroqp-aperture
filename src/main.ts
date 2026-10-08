@@ -114,6 +114,7 @@ let currentImage: ImageState | null = null;
 let rois: PointRoi[] = [];
 let annotationsReady = false;
 let annotationError: string | null = null;
+let saveError: string | null = null;
 let dirty = false;
 let saving = false;
 let savedPath: string | null = null;
@@ -163,7 +164,7 @@ function updatePointTool(key?: keyof AnnotationSettings) {
   }
   document
     .querySelectorAll<HTMLButtonElement | HTMLInputElement | HTMLSelectElement>(
-      ".point-choice, #point-labels, #point-all-slices, #point-counter, [data-counter]",
+      ".point-choice, #point-labels, #point-all-slices, #point-counter, #point-counter-options button[data-counter]",
     )
     .forEach((control) => {
       control.disabled = saving || !annotationsReady;
@@ -212,7 +213,10 @@ async function saveAnnotations() {
     return;
   dialogOpen = true;
   saving = true;
+  saveError = null;
   updatePointTool();
+  if (currentImage) showImage(currentImage);
+  let completed = false;
   try {
     const target = await invoke<{
       path: string;
@@ -255,13 +259,18 @@ async function saveAnnotations() {
     await invoke("save_annotations", { id: currentId, path, rois, overwrite });
     savedPath = path;
     dirty = false;
-    $("status").textContent = "Saved";
+    completed = true;
   } catch (error) {
-    showError(String(error));
+    saveError = String(error);
   } finally {
     saving = false;
     dialogOpen = false;
     updatePointTool();
+    if (currentImage) showImage(currentImage);
+    if (completed && !$("status").classList.contains("error")) {
+      $("status").textContent = "Saved";
+      $("status").title = "Saved";
+    }
   }
 }
 
@@ -298,6 +307,7 @@ function resetViewer() {
   tools.setPointSettings(settingsForRois([], 0));
   annotationsReady = false;
   annotationError = null;
+  saveError = null;
   dirty = false;
   annotationViewer.setImage(null);
   annotationViewer.setRois([]);
@@ -316,8 +326,8 @@ function resetViewer() {
 function showError(message: string) {
   setLoading(false);
   $("viewer").dataset.phase = "error";
-  $("status").textContent = message;
-  $("status").title = message;
+  $("status").textContent = saveError || message;
+  $("status").title = saveError || message;
   $("status").classList.add("error");
 }
 
@@ -354,11 +364,13 @@ function showImage(state: ImageState) {
   $("status").classList.toggle(
     "error",
     state.phase === "error" ||
+      saveError !== null ||
       annotationError !== null ||
       (tileError !== null && state.phase !== "cancelled"),
   );
   const status =
-    state.phase === "error"
+    saveError ||
+    (state.phase === "error"
       ? state.error || "Could not load image"
       : annotationError
         ? annotationError
@@ -374,9 +386,9 @@ function showImage(state: ImageState) {
                   : state.width > 0
                     ? "Building preview…"
                     : "Reading image…"
-                : "";
+                : "");
   if ($("status").textContent !== status) $("status").textContent = status;
-  $("status").title = tileError || state.detail || status;
+  $("status").title = saveError || tileError || state.detail || status;
   const transform = orientation(state.orientation);
   const [displayWidth, displayHeight] =
     transform.degrees % 180 === 0
@@ -523,6 +535,7 @@ viewer.addHandler("tile-load-failed", (event) => {
   )
     return;
   tileError = message;
+  if (saveError) return;
   $("status").textContent = message;
   $("status").title = message;
   $("status").classList.add("error");

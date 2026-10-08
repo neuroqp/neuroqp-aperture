@@ -144,6 +144,13 @@ const counterColors = [
   "#c0c0c0",
 ];
 
+function colorForRoi(color: number | null) {
+  if (color === null) return "#ffff00";
+  const rgb = (color & 0xffffff).toString(16).padStart(6, "0");
+  const alpha = color >>> 24;
+  return `#${rgb}${alpha === 0xff ? "" : alpha.toString(16).padStart(2, "0")}`;
+}
+
 export function pointAppearance(
   roi: PointRoi,
   index: number,
@@ -156,11 +163,7 @@ export function pointAppearance(
     counterColors[counter] = `#${color.toString(16).padStart(6, "0")}`;
   }
   return {
-    color: multiple
-      ? counterColors[counter]
-      : roi.color === null
-        ? "#ffff00"
-        : `#${(roi.color & 0xffffff).toString(16).padStart(6, "0")}`,
+    color: multiple ? counterColors[counter] : colorForRoi(roi.color),
     label:
       roi.showLabels && roi.points.length > 1
         ? String(multiple ? counter : index + 1)

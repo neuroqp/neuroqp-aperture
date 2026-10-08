@@ -347,3 +347,29 @@ The native filename-picker response was supplied by the test harness; native
 filename entry itself was not automated. Ignored screenshots include
 test-data/save-choice-{light,dark}.native.png and
 test-data/save-real-copy-reopened.native.png.
+
+## PR review regressions
+
+Thirty-eight frontend and twenty-eight Rust tests pass. Ordered overlay tests
+cover interleaved point/nonpoint ROIs, split groups, deletion, active-selection
+demotion and repeated saves. The ImageJ interoperability script verifies the
+same source-slot order and ROI metadata after export and reopen.
+
+The TIFF reader checks the combined 32 MiB tag budget before reading either
+payload, and both reader and writer bound item/container allocation. Sparse
+fixtures cover oversized combined tags and millions of zero-length items;
+ordinary empty items and a large individual ROI still round-trip.
+
+Production-browser regression checks verified that save errors survive six
+loading polls with dirty annotations and progress intact, then clear on retry or
+opening another image. Counter controls disable during saving without adding
+disabled properties to rendered SVG markers. Unit coverage includes opaque,
+translucent and transparent imported ARGB colors.
+
+Native keyboard checks verified that Tab-focused toolbar and Counter buttons
+ignore E and retain Space activation while the pointer stays over the image.
+Mouse selection of tool, type, size or Counter returns focus on canvas entry,
+allowing E placement without an extra click; keyboard and typing focus remain
+intact. Save-dialog Escape and Tab/Space cancellation retain dirty edits.
+Imported TIFF marker and label attributes retain half alpha and zero alpha,
+including the black label halo.

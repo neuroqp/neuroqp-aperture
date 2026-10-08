@@ -448,3 +448,31 @@ test("a new selection demotes the previous active ROI even when the new selectio
   assert.equal(counterCount(deleted, 2), 0);
   assert.equal(original.overlay, false);
 });
+
+test("imported ARGB colors keep alpha in CSS without changing opaque color values", () => {
+  const roi = {
+    ...mixed,
+    points: [
+      { ...mixed.points[0], counter: 0 },
+      { ...mixed.points[1], counter: 0 },
+    ],
+    showLabels: true,
+  };
+  assert.equal(
+    pointAppearance({ ...roi, color: 0x80123456 }, 0).color,
+    "#12345680",
+  );
+  assert.equal(
+    pointAppearance({ ...roi, color: 0x00123456 }, 0).color,
+    "#12345600",
+  );
+  assert.equal(
+    pointAppearance({ ...roi, color: 0xff123456 }, 0).color,
+    "#123456",
+  );
+  assert.equal(pointAppearance({ ...roi, color: null }, 0).color, "#ffff00");
+  assert.equal(
+    pointAppearance({ ...roi, color: 0x80123456, nCounters: 2 }, 0).color,
+    "#ffff00",
+  );
+});

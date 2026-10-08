@@ -57,55 +57,85 @@ fn points(annotations: &TiffAnnotations) -> Result<Vec<PointRoi>, String> {
     Ok(rois)
 }
 
-pub fn load(source: &Path) -> Result<Vec<PointRoi>, String> {
-    if is_tiff(source)? {
-        points(&tiff_annotations::read(source)?)
-    } else {
-        Ok(vec![])
+pub struct AnnotationBasis {
+    pub points: Vec<PointRoi>,
+    original: TiffAnnotations,
+}
+
+impl AnnotationBasis {
+    fn from_annotations(original: TiffAnnotations) -> Result<Self, String> {
+        Ok(Self {
+            points: points(&original)?,
+            original,
+        })
     }
 }
 
+pub fn load_basis(source: &Path) -> Result<AnnotationBasis, String> {
+    let original = if is_tiff(source)? {
+        tiff_annotations::read(source)?
+    } else {
+        TiffAnnotations::default()
+    };
+    AnnotationBasis::from_annotations(original)
+}
+
 fn edited_metadata(
-    original: TiffAnnotations,
+    basis: &AnnotationBasis,
     rois: Vec<PointRoi>,
-    basis: Option<&[PointRoi]>,
 ) -> Result<(Vec<u8>, Vec<Vec<u8>>), String> {
-    let live = points(&original)?;
-    let existing = basis.unwrap_or(&live);
-    let mut overlays = vec![];
-    for bytes in original.overlays {
-        if roi::decode(&bytes)?.is_none() {
-            overlays.push(bytes);
-        }
-    }
-    let mut active = original
-        .active_roi
-        .filter(|bytes| matches!(roi::decode(bytes), Ok(None)))
-        .unwrap_or_default();
     let active_index = rois.iter().rposition(|roi| !roi.overlay);
-    let mut encoded = vec![];
+    let mut active = vec![];
+    let mut replacements = vec![Vec::new(); basis.points.len()];
+    let mut added = vec![];
     for (index, mut current) in rois.into_iter().enumerate() {
-        // Restore source metadata without accepting arbitrary ROI bytes through IPC.
+        // The immutable sourceIndex basis supplies metadata and overlay slots
+        // through deletions, counter splits, and repeated in-place saves.
         current.raw = match current.source_index {
-            Some(index) => existing
-                .get(index)
+            Some(source_index) => basis
+                .points
+                .get(source_index)
                 .ok_or("Original point ROI index is out of range")?
                 .raw
                 .clone(),
             None => vec![],
         };
-        if !current.points.is_empty() {
-            encoded.push((Some(index) != active_index, roi::encode(&current)?));
+        if current.points.is_empty() {
+            continue;
+        }
+        let encoded = roi::encode(&current)?;
+        if Some(index) == active_index {
+            active = encoded;
+        } else if let Some(source_index) = current.source_index {
+            replacements[source_index].push(encoded);
+        } else {
+            added.push(encoded);
         }
     }
-    if let Some(index) = encoded.iter().rposition(|(overlay, _)| !overlay) {
-        let (_, last) = encoded.remove(index);
-        if !active.is_empty() {
-            overlays.push(active);
+    let mut overlays = vec![];
+    let mut source_index = 0;
+    for bytes in &basis.original.overlays {
+        if roi::decode(bytes)?.is_some() {
+            overlays.append(&mut replacements[source_index]);
+            source_index += 1;
+        } else {
+            overlays.push(bytes.clone());
         }
-        active = last;
     }
-    overlays.extend(encoded.into_iter().map(|(_, bytes)| bytes));
+    if let Some(bytes) = &basis.original.active_roi {
+        if roi::decode(bytes)?.is_some() {
+            // An original active point selection demoted by a newer selection
+            // follows all original overlays, including its split counter groups.
+            overlays.append(&mut replacements[source_index]);
+        } else if active_index.is_some() {
+            // Even an empty point selection supersedes the original active ROI.
+            // Rebuilding from the same basis prevents duplicates on later saves.
+            overlays.push(bytes.clone());
+        } else {
+            active = bytes.clone();
+        }
+    }
+    overlays.extend(added);
     Ok((active, overlays))
 }
 
@@ -144,17 +174,16 @@ pub fn save(
     source: &Path,
     target: &Path,
     rois: Vec<PointRoi>,
-    basis: &[PointRoi],
+    basis: &AnnotationBasis,
     overwrite: bool,
 ) -> Result<(), String> {
     let source_is_tiff = is_tiff(source)?;
     check_target(source, target, source_is_tiff, overwrite)?;
     if source_is_tiff {
-        let (active, overlays) =
-            edited_metadata(tiff_annotations::read(source)?, rois, Some(basis))?;
+        let (active, overlays) = edited_metadata(basis, rois)?;
         return tiff_annotations::save_copy(source, target, active, overlays, overwrite);
     }
-    let (active, overlays) = edited_metadata(TiffAnnotations::default(), rois, Some(basis))?;
+    let (active, overlays) = edited_metadata(basis, rois)?;
     let source = fs::canonicalize(source).map_err(|e| e.to_string())?;
     let extension = source
         .extension()
@@ -226,11 +255,15 @@ mod tests {
         original: TiffAnnotations,
         rois: Vec<PointRoi>,
     ) -> Result<(Vec<u8>, Vec<Vec<u8>>), String> {
-        super::edited_metadata(original, rois, None)
+        super::edited_metadata(&AnnotationBasis::from_annotations(original)?, rois)
     }
 
     fn save(source: &Path, target: &Path, rois: Vec<PointRoi>) -> Result<(), String> {
-        super::save(source, target, rois, &load(source)?, true)
+        super::save(source, target, rois, &load_basis(source)?, true)
+    }
+
+    fn load(source: &Path) -> Result<Vec<PointRoi>, String> {
+        Ok(load_basis(source)?.points)
     }
 
     fn point() -> PointRoi {
@@ -278,7 +311,7 @@ mod tests {
             roi::decode(&active).unwrap().unwrap().points,
             new_selection.points
         );
-        assert_eq!(overlays, vec![nonpoint, bytes]);
+        assert_eq!(overlays, vec![bytes, nonpoint]);
     }
 
     #[test]
@@ -411,7 +444,10 @@ mod tests {
         };
         let saved = points(&reopened).unwrap();
         assert_eq!(saved.len(), 4);
-        for (actual, expected) in saved.iter().zip(&submitted) {
+        for (actual, expected) in saved
+            .iter()
+            .zip([1, 0, 2, 3].map(|index| &submitted[index]))
+        {
             assert_eq!(actual.points, expected.points);
             assert_eq!(actual.point_type, expected.point_type);
             assert_eq!(actual.size, expected.size);
@@ -427,7 +463,7 @@ mod tests {
                 as usize;
             raw[start..start + len * 2].to_vec()
         };
-        for (group, source) in [(0, 1), (1, 0), (2, 1)] {
+        for (group, source) in [(0, 0), (1, 1), (2, 1)] {
             assert_eq!(text(&saved[group].raw, 16), text(&loaded[source].raw, 16));
             assert_eq!(text(&saved[group].raw, 40), text(&loaded[source].raw, 40));
         }
@@ -489,11 +525,11 @@ mod tests {
             fs::read(dir.join("original.raw")).unwrap(),
             fs::read(dir.join("saved.raw")).unwrap()
         );
-        let basis = load(&target).unwrap();
+        let basis = load_basis(&target).unwrap();
         let target_before = fs::read(&target).unwrap();
-        assert!(super::save(&target, &target, basis.clone(), &basis, false).is_err());
+        assert!(super::save(&target, &target, basis.points.clone(), &basis, false).is_err());
         assert_eq!(fs::read(&target).unwrap(), target_before);
-        super::save(&target, &target, basis.clone(), &basis, true).unwrap();
+        super::save(&target, &target, basis.points.clone(), &basis, true).unwrap();
         run(&["rawsave", "copy.tiff", "saved.raw"]);
         assert_eq!(
             fs::read(dir.join("original.raw")).unwrap(),
@@ -512,51 +548,133 @@ mod tests {
     }
 
     #[test]
-    fn repeated_overwrites_use_initial_metadata_after_deletion_and_reordering() {
-        let first_bytes = include_bytes!("fixtures/imagej-points.roi").to_vec();
-        let mut second = roi::decode(&first_bytes).unwrap().unwrap();
-        second.raw.clear();
-        second.points[0].x = 80.25;
-        let second_bytes = roi::encode(&second).unwrap();
+    fn interleaved_overlays_keep_slots_through_edits_deletion_and_repeated_saves() {
+        let point_one = include_bytes!("fixtures/imagej-points.roi").to_vec();
+        let mut other = point();
+        other.raw.clear();
+        other.points[0].x = 80.25;
+        let point_two = roi::encode(&other).unwrap();
+        let mut before = point_one.clone();
+        before[6] = 1;
+        let mut between = point_one.clone();
+        between[6] = 2;
+        let mut after = point_one.clone();
+        after[6] = 3;
+        let original_overlays = vec![
+            before.clone(),
+            point_one,
+            between.clone(),
+            point_two,
+            after.clone(),
+        ];
         let original = TiffAnnotations {
-            active_roi: Some(second_bytes),
-            overlays: vec![first_bytes.clone()],
+            active_roi: None,
+            overlays: original_overlays.clone(),
         };
-        let basis = points(&original).unwrap();
-        let mut reordered = basis.clone();
-        reordered.swap(0, 1);
-        let (active, overlays) =
-            super::edited_metadata(original, reordered.clone(), Some(&basis)).unwrap();
-        let live = TiffAnnotations {
-            active_roi: Some(active),
-            overlays,
-        };
-        let (active, overlays) = super::edited_metadata(live, reordered, Some(&basis)).unwrap();
-        let live = TiffAnnotations {
-            active_roi: Some(active),
-            overlays,
-        };
-        // Clearing the earlier source group leaves only sourceIndex=1 on disk.
-        let mut deleted = basis[0].clone();
+        let basis = AnnotationBasis::from_annotations(original).unwrap();
+        let (active, overlays) = super::edited_metadata(&basis, basis.points.clone()).unwrap();
+        assert!(active.is_empty());
+        assert_eq!(overlays, original_overlays);
+
+        // Load the immutable layout through the actual file API and save in place.
+        let stamp = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .unwrap()
+            .as_nanos();
+        let path = std::env::temp_dir().join(format!("aperture-overlay-order-{stamp}.tif"));
+        fs::write(&path, [b'I', b'I', 42, 0, 8, 0, 0, 0, 0, 0, 0, 0, 0, 0]).unwrap();
+        tiff_annotations::save_copy(&path, &path, active, overlays, true).unwrap();
+        let basis = load_basis(&path).unwrap();
+        let mut edited = basis.points[0].clone();
+        edited.points[0].x += 0.5;
+        let edited_bytes = roi::encode(&edited).unwrap();
+        let mut deleted = basis.points[1].clone();
         deleted.points.clear();
-        let survivor = basis[1].clone();
-        let submitted = vec![deleted, survivor.clone()];
-        let (active, overlays) =
-            super::edited_metadata(live, submitted.clone(), Some(&basis)).unwrap();
-        assert!(overlays.is_empty());
-        let live = TiffAnnotations {
-            active_roi: Some(active),
-            overlays,
-        };
-        assert_eq!(points(&live).unwrap()[0].source_index, Some(0));
-        let (active, overlays) = super::edited_metadata(live, submitted, Some(&basis)).unwrap();
-        assert!(overlays.is_empty());
+        let mut added = point();
+        added.overlay = true;
+        added.points[0].x = 25.5;
+        added.raw.clear();
+        let added_bytes = roi::encode(&added).unwrap();
+        // The submitted array order must not move existing overlays across a shape.
+        let submitted = vec![deleted, added, edited];
+        let expected = vec![
+            before.clone(),
+            edited_bytes,
+            between.clone(),
+            after.clone(),
+            added_bytes,
+        ];
+        for _ in 0..2 {
+            super::save(&path, &path, submitted.clone(), &basis, true).unwrap();
+            let written = tiff_annotations::read(&path).unwrap();
+            assert!(written.active_roi.is_none());
+            assert_eq!(written.overlays, expected);
+        }
+        // Clear the last original group and save again, leaving only the new group.
+        let mut cleared = submitted.clone();
+        cleared[2].points.clear();
+        super::save(&path, &path, cleared, &basis, true).unwrap();
+        let written = tiff_annotations::read(&path).unwrap();
         assert_eq!(
-            roi::decode(&active).unwrap().unwrap().points,
-            survivor.points
+            written.overlays,
+            vec![before, between, after, expected[4].clone()]
         );
-        assert_eq!(active, basis[1].raw);
-        assert_ne!(active, first_bytes);
+        fs::remove_file(path).unwrap();
+    }
+
+    #[test]
+    fn nonpoint_active_demotion_is_ordered_and_not_restored_after_clearing_points() {
+        let bytes = include_bytes!("fixtures/imagej-points.roi").to_vec();
+        let mut shape = bytes.clone();
+        shape[6] = 1;
+        let mut selected_shape = bytes.clone();
+        selected_shape[6] = 2;
+        let basis = AnnotationBasis::from_annotations(TiffAnnotations {
+            active_roi: Some(selected_shape.clone()),
+            overlays: vec![bytes.clone(), shape.clone()],
+        })
+        .unwrap();
+        let mut submitted = basis.points.clone();
+        let mut new = point();
+        new.points[0].x = 50.5;
+        submitted.push(new);
+        for _ in 0..2 {
+            let (active, overlays) = super::edited_metadata(&basis, submitted.clone()).unwrap();
+            assert_eq!(roi::decode(&active).unwrap().unwrap().points[0].x, 50.5);
+            assert_eq!(
+                overlays,
+                vec![bytes.clone(), shape.clone(), selected_shape.clone()]
+            );
+        }
+        submitted.last_mut().unwrap().points.clear();
+        let (active, overlays) = super::edited_metadata(&basis, submitted).unwrap();
+        assert!(active.is_empty());
+        assert_eq!(overlays, vec![bytes, shape, selected_shape]);
+    }
+
+    #[test]
+    fn demoted_active_point_and_new_overlays_follow_the_original_overlay_sequence() {
+        let bytes = include_bytes!("fixtures/imagej-points.roi").to_vec();
+        let mut shape = bytes.clone();
+        shape[6] = 1;
+        let basis = AnnotationBasis::from_annotations(TiffAnnotations {
+            active_roi: Some(bytes.clone()),
+            overlays: vec![shape.clone(), bytes.clone()],
+        })
+        .unwrap();
+        let mut submitted = basis.points.clone();
+        let mut added = point();
+        added.overlay = true;
+        added.points[0].x = 60.5;
+        added.raw.clear();
+        let added_bytes = roi::encode(&added).unwrap();
+        submitted.push(added);
+        let mut active = point();
+        active.points[0].x = 70.5;
+        submitted.push(active);
+        let (active, overlays) = super::edited_metadata(&basis, submitted).unwrap();
+        assert_eq!(roi::decode(&active).unwrap().unwrap().points[0].x, 70.5);
+        assert_eq!(overlays, vec![shape, bytes.clone(), bytes, added_bytes]);
     }
 
     #[test]

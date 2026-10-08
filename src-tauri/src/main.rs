@@ -78,9 +78,9 @@ async fn load_annotations(
     tauri::async_runtime::spawn_blocking(move || {
         let mut annotations = job.annotations.lock().unwrap();
         if annotations.is_none() {
-            *annotations = Some(annotation_io::load(&job.source)?);
+            *annotations = Some(annotation_io::load_basis(&job.source)?);
         }
-        Ok(annotations.as_ref().unwrap().clone())
+        Ok(annotations.as_ref().unwrap().points.clone())
     })
     .await
     .map_err(|e| e.to_string())?
@@ -100,7 +100,7 @@ async fn save_annotations(
         // splitting groups in a previous overwrite of this image.
         let mut annotations = job.annotations.lock().unwrap();
         if annotations.is_none() {
-            *annotations = Some(annotation_io::load(&job.source)?);
+            *annotations = Some(annotation_io::load_basis(&job.source)?);
         }
         annotation_io::save(
             &job.source,

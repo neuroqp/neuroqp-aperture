@@ -142,9 +142,11 @@ class ImageJInterop {
             check(Arrays.equals(added.getCounters(), new int[]{2}), "new group counter changed");
             Overlay overlay = saved.getOverlay();
             check(overlay.size() == 5 && overlay.get(0).getName().equals("untouched-rectangle"), "split overlays missing");
-            int[] counters = {2, 4, 4, 2};
-            int[] positions = {0, 1, 0, 2};
-            String[] names = {"synthetic-active", "editable-overlay", "synthetic-active", "editable-overlay"};
+            // Split groups retain their original overlay slots. The demoted
+            // active selection follows the existing overlay sequence.
+            int[] counters = {4, 2, 2, 4};
+            int[] positions = {1, 2, 0, 0};
+            String[] names = {"editable-overlay", "editable-overlay", "synthetic-active", "synthetic-active"};
             for (int i = 0; i < counters.length; i++) {
                 PointRoi group = (PointRoi)overlay.get(i + 1);
                 FloatPolygon xy = group.getFloatPolygon();

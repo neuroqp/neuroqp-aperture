@@ -43,7 +43,7 @@ pub struct Job {
     pub input: PathBuf,
     pub source: PathBuf,
     /// Initial metadata remains the sourceIndex basis through repeated saves.
-    pub annotations: Mutex<Option<Vec<crate::roi::PointRoi>>>,
+    pub annotations: Mutex<Option<crate::annotation_io::AnnotationBasis>>,
     work: PathBuf,
     pub native: Mutex<Vec<NativeLevel>>,
     root: PathBuf,

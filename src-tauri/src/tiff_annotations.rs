@@ -12,6 +12,24 @@ const ROI: u32 = 0x726f6920;
 const OVERLAY: u32 = 0x6f766572;
 // ponytail: bound annotation metadata to 32 MiB; increase only for measured demand.
 const LIMIT: u64 = 32 * 1024 * 1024;
+const ITEM_SIZE: u64 = std::mem::size_of::<Vec<u8>>() as u64;
+const BLOCK_SIZE: u64 = std::mem::size_of::<(u32, Vec<Vec<u8>>)>() as u64;
+
+// Bound both the encoded tags together and the payload/container allocations.
+// A large ROI remains one item; this ceiling targets tiny/empty item amplification.
+fn metadata_sizes(payload: u64, items: u64, blocks: u64) -> Result<(u64, u64), String> {
+    let sizes = (|| {
+        let data = payload
+            .checked_add(4)?
+            .checked_add(blocks.checked_mul(8)?)?;
+        let counts = items.checked_add(1)?.checked_mul(4)?;
+        let materialized = payload
+            .checked_add(items.checked_mul(ITEM_SIZE)?)?
+            .checked_add(blocks.checked_mul(BLOCK_SIZE)?)?;
+        (data.checked_add(counts)? <= LIMIT && materialized <= LIMIT).then_some((data, counts))
+    })();
+    sizes.ok_or_else(|| "Annotations exceed TIFF metadata size limit".into())
+}
 
 #[derive(Default, Debug)]
 pub struct TiffAnnotations {
@@ -118,19 +136,14 @@ impl Tiff {
     fn tag(&self, entry: &[u8]) -> u64 {
         self.number(&entry[..2])
     }
-    fn value(&mut self, tag: u64, kind: u64, unit: u64) -> Result<Option<Vec<u8>>, String> {
-        let found: Vec<_> = self
-            .entries
-            .iter()
-            .filter(|e| self.tag(e) == tag)
-            .cloned()
-            .collect();
-        if found.len() > 1 {
-            return Err("Duplicate ImageJ TIFF metadata tag".into());
-        }
-        let Some(e) = found.first() else {
+    fn descriptor(&self, tag: u64, kind: u64, unit: u64) -> Result<Option<(&[u8], u64)>, String> {
+        let mut found = self.entries.iter().filter(|e| self.tag(e) == tag);
+        let Some(e) = found.next() else {
             return Ok(None);
         };
+        if found.next().is_some() {
+            return Err("Duplicate ImageJ TIFF metadata tag".into());
+        }
         if self.number(&e[2..4]) != kind {
             return Err("Unsupported ImageJ TIFF metadata field type".into());
         }
@@ -139,9 +152,22 @@ impl Tiff {
             .number(&e[4..pos])
             .checked_mul(unit)
             .ok_or("Invalid TIFF metadata count")?;
-        if length > LIMIT {
+        Ok(Some((e, length)))
+    }
+    fn value(
+        &mut self,
+        tag: u64,
+        kind: u64,
+        unit: u64,
+        limit: u64,
+    ) -> Result<Option<Vec<u8>>, String> {
+        let Some((e, length)) = self.descriptor(tag, kind, unit)? else {
+            return Ok(None);
+        };
+        if length > limit {
             return Err("ImageJ TIFF metadata exceeds annotation size limit".into());
         }
+        let pos = if self.big { 12 } else { 8 };
         if length <= if self.big { 8 } else { 4 } {
             Ok(Some(e[pos..pos + length as usize].to_vec()))
         } else {
@@ -150,40 +176,55 @@ impl Tiff {
         }
     }
     fn blocks(&mut self) -> Result<MetadataBlocks, String> {
-        let counts = self.value(COUNTS, 4, 4)?;
-        let data = self.value(METADATA, 1, 1)?;
+        // Even zero-byte items need a Vec header. Reject excessive counts before
+        // reading their tag, then leave only the remaining shared byte budget.
+        let counts_size = self.descriptor(COUNTS, 4, 4)?.map_or(0, |(_, size)| size);
+        let data_size = self.descriptor(METADATA, 1, 1)?.map_or(0, |(_, size)| size);
+        if counts_size
+            .checked_add(data_size)
+            .is_none_or(|size| size > LIMIT)
+            || counts_size > (LIMIT / ITEM_SIZE + 1) * 4
+        {
+            return Err("ImageJ TIFF metadata exceeds annotation size limit".into());
+        }
+        let counts = self.value(COUNTS, 4, 4, LIMIT)?;
+        let data = self.value(METADATA, 1, 1, LIMIT - counts_size)?;
         let (counts, data) = match (counts, data) {
             (None, None) => return Ok(vec![]),
             (Some(c), Some(d)) => (c, d),
             _ => return Err("Incomplete ImageJ TIFF metadata".into()),
         };
-        let counts: Vec<_> = counts
-            .as_chunks::<4>()
-            .0
-            .iter()
-            .map(|b| self.number(b) as usize)
-            .collect();
-        let hdr = *counts
-            .first()
-            .ok_or("Missing ImageJ metadata header count")?;
+        let counts = counts.as_chunks::<4>().0;
+        let hdr = self.number(
+            counts
+                .first()
+                .ok_or("Missing ImageJ metadata header count")?,
+        ) as usize;
         if hdr < 4
             || hdr > data.len()
-            || (hdr - 4) % 8 != 0
+            || !(hdr - 4).is_multiple_of(8)
             || self.number(&data[..4]) != 0x494a494a
         {
             return Err("Invalid ImageJ metadata header".into());
         }
+        let block_count = (hdr - 4) / 8;
+        metadata_sizes(
+            (data.len() - hdr) as u64,
+            (counts.len() - 1) as u64,
+            block_count as u64,
+        )?;
         let mut count_index = 1;
         let mut offset = hdr;
-        let mut blocks = vec![];
+        let mut blocks = Vec::with_capacity(block_count);
         for e in data[4..hdr].as_chunks::<8>().0 {
             let kind = self.number(&e[..4]) as u32;
             let n = self.number(&e[4..]) as usize;
             if n > counts.len().saturating_sub(count_index) {
                 return Err("Invalid ImageJ metadata block count".into());
             }
-            let mut items = vec![];
-            for &length in &counts[count_index..count_index + n] {
+            let mut items = Vec::with_capacity(n);
+            for length in &counts[count_index..count_index + n] {
+                let length = self.number(length) as usize;
                 let end = offset
                     .checked_add(length)
                     .ok_or("ImageJ metadata length overflow")?;
@@ -222,7 +263,12 @@ pub fn read(path: &Path) -> Result<TiffAnnotations, String> {
             }
             annotations.active_roi = items.into_iter().next();
         } else if kind == OVERLAY {
-            annotations.overlays.extend(items);
+            if annotations.overlays.is_empty() {
+                annotations.overlays = items;
+            } else {
+                annotations.overlays.reserve_exact(items.len());
+                annotations.overlays.extend(items);
+            }
         }
     }
     Ok(annotations)
@@ -273,24 +319,23 @@ pub fn save_copy(
     if !overlays.is_empty() {
         blocks.push((OVERLAY, overlays));
     }
-    let payload_size =
-        blocks
-            .iter()
-            .flat_map(|(_, items)| items)
-            .try_fold(0u64, |total, item| {
-                total
-                    .checked_add(item.len() as u64)
-                    .ok_or("Annotation size overflow")
-            })?;
-    let item_count = blocks
-        .iter()
-        .map(|(_, items)| items.len() as u64)
-        .sum::<u64>();
-    if payload_size + 4 + blocks.len() as u64 * 8 > LIMIT || (item_count + 1) * 4 > LIMIT {
-        return Err("Annotations exceed TIFF metadata size limit".into());
-    }
-    let mut data = t.bytes(0x494a494a, 4)?;
-    let mut counts = t.bytes(4 + blocks.len() as u64 * 8, 4)?;
+    let (payload_size, item_count) = blocks.iter().flat_map(|(_, items)| items).try_fold(
+        (0u64, 0u64),
+        |(size, count), item| {
+            Ok::<_, String>((
+                size.checked_add(item.len() as u64)
+                    .ok_or("Annotation size overflow")?,
+                count
+                    .checked_add(1)
+                    .ok_or("Annotation item count overflow")?,
+            ))
+        },
+    )?;
+    let (data_size, counts_size) = metadata_sizes(payload_size, item_count, blocks.len() as u64)?;
+    let mut data = Vec::with_capacity(data_size as usize);
+    data.extend(t.bytes(0x494a494a, 4)?);
+    let mut counts = Vec::with_capacity(counts_size as usize);
+    counts.extend(t.bytes(4 + blocks.len() as u64 * 8, 4)?);
     for (kind, items) in &blocks {
         data.extend(t.bytes(u64::from(*kind), 4)?);
         data.extend(t.bytes(items.len() as u64, 4)?);
@@ -300,9 +345,6 @@ pub fn save_copy(
             counts.extend(t.bytes(item.len() as u64, 4)?);
             data.extend(item);
         }
-    }
-    if data.len() as u64 > LIMIT || counts.len() as u64 > LIMIT {
-        return Err("Annotations exceed TIFF metadata size limit".into());
     }
     let alignment = if t.big { 8u64 } else { 2u64 };
     let padded = t
@@ -592,6 +634,99 @@ mod tests {
             .starts_with(".aperture-save-")));
         fs::remove_dir_all(dir).unwrap();
     }
+    // Sparse tags reproduce malicious declarations without allocating their
+    // claimed item containers or metadata payload in the test itself.
+    fn metadata_fixture(path: &Path, items: u64, data_size: u64) {
+        fixture(path, true, false);
+        let t = Tiff::open(path).unwrap();
+        let counts_size = (items + 1) * 4;
+        let counts_offset = t.len;
+        let data_offset = counts_offset + counts_size;
+        let ifd_offset = data_offset + data_size;
+        let mut file = OpenOptions::new().write(true).open(path).unwrap();
+        file.set_len(ifd_offset + 2 + 24 + 4).unwrap();
+        file.seek(SeekFrom::Start(counts_offset)).unwrap();
+        file.write_all(&t.bytes(12, 4).unwrap()).unwrap();
+        file.seek(SeekFrom::Start(data_offset)).unwrap();
+        for value in [0x494a494a, u64::from(OVERLAY), items] {
+            file.write_all(&t.bytes(value, 4).unwrap()).unwrap();
+        }
+        file.seek(SeekFrom::Start(ifd_offset)).unwrap();
+        file.write_all(&t.bytes(2, 2).unwrap()).unwrap();
+        file.write_all(
+            &t.entry(COUNTS, 4, items + 1, &t.bytes(counts_offset, 4).unwrap())
+                .unwrap(),
+        )
+        .unwrap();
+        file.write_all(
+            &t.entry(METADATA, 1, data_size, &t.bytes(data_offset, 4).unwrap())
+                .unwrap(),
+        )
+        .unwrap();
+        file.write_all(&t.bytes(0, 4).unwrap()).unwrap();
+        file.seek(SeekFrom::Start(4)).unwrap();
+        file.write_all(&t.bytes(ifd_offset, 4).unwrap()).unwrap();
+    }
+
+    #[test]
+    fn combined_tag_bytes_and_zero_length_item_allocations_are_bounded() {
+        let stamp = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .unwrap()
+            .as_nanos();
+        let path = std::env::temp_dir().join(format!("aperture-tiff-budget-{stamp}.tif"));
+        metadata_fixture(&path, 1, LIMIT - 4);
+        assert!(read(&path).unwrap_err().contains("size limit"));
+        // Counts/data total only about 5 MiB, but the claimed empty Vec headers
+        // alone would consume the entire 32 MiB allocation budget.
+        metadata_fixture(&path, LIMIT / ITEM_SIZE, 12);
+        assert!(read(&path).unwrap_err().contains("size limit"));
+        // A few empty unknown items still round-trip as ImageJ metadata.
+        metadata_fixture(&path, 2, 12);
+        assert_eq!(
+            read(&path).unwrap().overlays,
+            vec![Vec::<u8>::new(), Vec::<u8>::new()]
+        );
+        fs::remove_file(path).unwrap();
+    }
+
+    #[test]
+    fn writer_limits_match_reader_without_capping_points_in_one_roi() {
+        // One large ROI remains near the byte limit after container/header costs.
+        assert_eq!(
+            metadata_sizes(LIMIT - ITEM_SIZE - BLOCK_SIZE, 1, 1).unwrap(),
+            (LIMIT - ITEM_SIZE - BLOCK_SIZE + 12, 8)
+        );
+        assert!(metadata_sizes(LIMIT - 19, 1, 1).is_err());
+        assert!(metadata_sizes(0, LIMIT / ITEM_SIZE, 1).is_err());
+        assert!(metadata_sizes(0, 0, LIMIT / BLOCK_SIZE + 1).is_err());
+        assert!(metadata_sizes(u64::MAX, 1, 1).is_err());
+        assert!(metadata_sizes(0, u64::MAX, 1).is_err());
+        let stamp = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .unwrap()
+            .as_nanos();
+        let dir = std::env::temp_dir().join(format!("aperture-tiff-writer-budget-{stamp}"));
+        fs::create_dir(&dir).unwrap();
+        let source = dir.join("source.tif");
+        let target = dir.join("target.tif");
+        fixture(&source, true, false);
+        let before = fs::read(&source).unwrap();
+        let overlays = vec![vec![]; (LIMIT / ITEM_SIZE) as usize];
+        assert!(save_copy(&source, &target, vec![], overlays, false)
+            .unwrap_err()
+            .contains("size limit"));
+        assert_eq!(fs::read(&source).unwrap(), before);
+        assert!(!target.exists());
+        assert_eq!(fs::read_dir(&dir).unwrap().count(), 1);
+        // Large selections stay one item, so no small per-ROI point ceiling is
+        // imposed by the metadata container guard.
+        let active = vec![7; 2 * 1024 * 1024];
+        save_copy(&source, &target, active.clone(), vec![], false).unwrap();
+        assert_eq!(read(&target).unwrap().active_roi, Some(active));
+        fs::remove_dir_all(dir).unwrap();
+    }
+
     #[test]
     fn malformed_offsets_are_rejected() {
         let stamp = SystemTime::now()

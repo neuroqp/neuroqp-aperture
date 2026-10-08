@@ -18,6 +18,9 @@ import {
   type ScreenPoint,
 } from "./point-interaction";
 
+const controls =
+  "input, select, textarea, button, a[href], [contenteditable], [role=button], [role=link], [role=listbox], [role=combobox], [role=option], [role=checkbox], [role=radio], [role=switch], [role=slider], [role=spinbutton]";
+
 const ns = "http://www.w3.org/2000/svg";
 const element = (name: string, attributes: Record<string, string | number>) => {
   const node = document.createElementNS(ns, name);
@@ -41,6 +44,7 @@ export class AnnotationViewer {
   private alt = false;
   private pressed = false;
   private buttons = 0;
+  private mouseControl: HTMLElement | null = null;
   private dragged:
     (PointReference & { offsetX: number; offsetY: number }) | null = null;
   private editedGesture = false;
@@ -73,6 +77,8 @@ export class AnnotationViewer {
     viewer.addHandler("canvas-nonprimary-press", this.buttonsChange);
     viewer.addHandler("canvas-nonprimary-release", this.buttonsChange);
     viewer.canvas.addEventListener("pointermove", this.pointerMove);
+    viewer.canvas.addEventListener("pointerenter", this.enter);
+    document.addEventListener("pointerdown", this.controlPress, true);
     viewer.canvas.addEventListener("pointercancel", this.resetInteraction);
     document.addEventListener("keydown", this.keyDown, true);
     document.addEventListener("keyup", this.keyUp, true);
@@ -185,14 +191,38 @@ export class AnnotationViewer {
     this.buttons = event.buttons;
   };
 
+  private controlPress = (event: PointerEvent) => {
+    const button =
+      event.target instanceof Element
+        ? event.target.closest<HTMLElement>("button, [role=button]")
+        : null;
+    this.mouseControl =
+      event.pointerType === "mouse" &&
+      event.button === 0 &&
+      button?.closest(".quick-bar, #tool-panels")
+        ? button.hasAttribute("data-counter")
+          ? document.getElementById("point-counter")
+          : button
+        : null;
+  };
+
+  private enter = () => {
+    if (
+      this.mouseControl &&
+      document.activeElement === this.mouseControl &&
+      !document.querySelector("dialog[open]")
+    ) {
+      this.viewer.canvas.focus({ preventScroll: true });
+    }
+    this.mouseControl = null;
+  };
+
   private keyDown = (event: KeyboardEvent) => {
+    this.mouseControl = null;
     if (document.querySelector("dialog[open]")) return;
     if (event.key.toLowerCase() === "e") {
       const typing =
-        event.target instanceof Element &&
-        !!event.target.closest(
-          "input, select, textarea, [contenteditable], [role=listbox], [role=combobox]",
-        );
+        event.target instanceof Element && !!event.target.closest(controls);
       if (
         keyPlacementAllowed({
           active: this.actions.active(),
@@ -229,20 +259,7 @@ export class AnnotationViewer {
     if (
       event.code === "Space" &&
       event.target instanceof Element &&
-      event.target.closest("[role=listbox]")
-    )
-      return;
-    const control =
-      event.target instanceof Element
-        ? event.target.closest(
-            "input, select, textarea, button, [contenteditable], [role=listbox]",
-          )
-        : null;
-    if (
-      event.code === "Space" &&
-      control &&
-      (!this.pointer ||
-        control.matches("input, select, textarea, [contenteditable]"))
+      event.target.closest(controls)
     )
       return;
     if (event.code === "Space") {
@@ -264,6 +281,7 @@ export class AnnotationViewer {
   private resetInteraction = () => {
     this.space = this.ctrl = this.alt = this.pressed = false;
     this.buttons = 0;
+    this.mouseControl = null;
     this.dragged = null;
     this.pointer = null;
     this.updateInteraction();
@@ -361,7 +379,7 @@ export class AnnotationViewer {
             x: radius + 4,
             y: -radius - 2,
             fill: color,
-            stroke: "#000",
+            stroke: color.length === 9 ? `#000000${color.slice(7)}` : "#000",
             "stroke-width": 2.5,
             "paint-order": "stroke",
             "font-size": 12,
@@ -387,6 +405,9 @@ export class AnnotationViewer {
     this.viewer.removeHandler("canvas-nonprimary-press", this.buttonsChange);
     this.viewer.removeHandler("canvas-nonprimary-release", this.buttonsChange);
     this.viewer.canvas.removeEventListener("pointermove", this.pointerMove);
+    this.viewer.canvas.removeEventListener("pointerenter", this.enter);
+    document.removeEventListener("pointerdown", this.controlPress, true);
+    this.mouseControl = null;
     this.viewer.canvas.removeEventListener(
       "pointercancel",
       this.resetInteraction,
