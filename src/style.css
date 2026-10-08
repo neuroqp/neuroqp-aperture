@@ -52,7 +52,7 @@ svg {
   height: 18px;
   fill: none;
   stroke: currentColor;
-  stroke-width: 1.35;
+  stroke-width: 1.6;
   stroke-linecap: round;
   stroke-linejoin: round;
   flex-shrink: 0;
@@ -78,12 +78,6 @@ svg {
   flex: 1;
   min-width: 0;
   height: 100%;
-}
-.image-title > svg {
-  width: 15px;
-  height: 15px;
-  color: #6b7467;
-  pointer-events: none;
 }
 #filename {
   font-size: 12px;
@@ -163,12 +157,6 @@ svg {
 .tool.selected:not(:disabled) {
   color: #506953;
   background: #dde4d7;
-}
-.separator {
-  height: 17px;
-  width: 1px;
-  flex-shrink: 0;
-  background: #d1d7ca;
 }
 .load-status {
   margin-left: auto;
@@ -272,4 +260,215 @@ svg {
     width: 100%;
     opacity: 0.55;
   }
+}
+
+/* Tool palettes sit over the image without changing its pan/zoom geometry. */
+.viewer-workspace {
+  position: relative;
+  display: flex;
+  flex: 1;
+  min-height: 0;
+}
+.viewer-controls {
+  padding-left: 8px;
+  border-left: 1px solid var(--line);
+  flex-shrink: 0;
+}
+.tool[aria-pressed="true"] {
+  color: #506953;
+  background: #dde4d7;
+  box-shadow: inset 0 -2px #637c66;
+}
+#tool-panels {
+  position: absolute;
+  z-index: 2;
+  top: 10px;
+  left: 10px;
+  width: 276px;
+  max-height: calc(100% - 20px);
+  overflow-y: auto;
+  overscroll-behavior: contain;
+  border: 1px solid #c5cbbf;
+  border-radius: 5px;
+  background: var(--paper);
+  box-shadow: 0 4px 16px #171d1726;
+}
+.tool-panel {
+  padding: 0 12px 10px;
+}
+.panel-heading {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  height: 34px;
+  margin-bottom: 4px;
+}
+.panel-heading h2 {
+  margin: 0;
+  font-size: 12px;
+  font-weight: 600;
+}
+.panel-close {
+  width: 23px;
+  height: 23px;
+  margin-right: -5px;
+}
+.panel-close svg {
+  width: 14px;
+  height: 14px;
+}
+.range-graph {
+  width: 100%;
+  height: 54px;
+  border: 1px solid var(--line);
+  border-radius: 2px;
+  color: var(--accent);
+  background: #fafaf6;
+}
+.range-graph path {
+  vector-effect: non-scaling-stroke;
+}
+.range-graph .graph-grid {
+  stroke: #e9ebe3;
+  stroke-width: 1;
+}
+.range-labels {
+  display: flex;
+  justify-content: space-between;
+  margin-top: 3px;
+  font-size: 10px;
+  color: #74796e;
+  font-variant-numeric: tabular-nums;
+}
+.adjustment {
+  display: grid;
+  grid-template-columns: 1fr auto;
+  gap: 4px;
+  margin-top: 7px;
+  font-size: 11px;
+}
+.adjustment output {
+  color: #69745f;
+  font-variant-numeric: tabular-nums;
+}
+.adjustment input {
+  grid-column: 1 / -1;
+  width: 100%;
+  height: 13px;
+  margin: 0;
+  accent-color: var(--accent);
+}
+input:focus-visible,
+select:focus-visible {
+  outline: 2px solid var(--accent);
+  outline-offset: 2px;
+}
+.panel-footer {
+  display: flex;
+  justify-content: flex-end;
+  margin-top: 8px;
+}
+.text-button {
+  display: flex;
+  align-items: center;
+  gap: 5px;
+  border: 1px solid var(--line);
+  border-radius: 3px;
+  padding: 4px 8px;
+  font-size: 11px;
+}
+.text-button svg {
+  width: 12px;
+  height: 12px;
+}
+.point-appearance {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+}
+.point-fields {
+  flex: 1;
+  min-width: 0;
+  display: grid;
+  gap: 8px;
+}
+.point-fields label {
+  display: grid;
+  grid-template-columns: 32px 1fr;
+  align-items: center;
+  gap: 7px;
+  font-size: 11px;
+}
+.tool-panel select {
+  width: 100%;
+  min-width: 0;
+  height: 26px;
+  padding: 0 4px;
+  font: inherit;
+  color: var(--ink);
+  border: 1px solid #cdd2c6;
+  border-radius: 3px;
+  background: #fafaf6;
+}
+.point-preview {
+  width: 58px;
+  height: 58px;
+  display: grid;
+  place-items: center;
+  flex-shrink: 0;
+  border: 1px solid var(--line);
+  border-radius: 3px;
+  background: #e5e8e0;
+}
+.point-preview svg {
+  width: 48px;
+  height: 48px;
+  stroke-width: 1.5;
+}
+.point-preview text {
+  fill: currentColor;
+  stroke: none;
+  font-size: 10px;
+}
+.point-flags {
+  display: grid;
+  gap: 9px;
+  margin: 17px 0;
+  font-size: 11px;
+}
+.point-flags label {
+  display: flex;
+  align-items: center;
+  gap: 7px;
+}
+.point-flags input {
+  width: 13px;
+  height: 13px;
+  margin: 0;
+  accent-color: var(--accent);
+}
+.point-counter {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+  padding-top: 10px;
+  border-top: 1px solid var(--line);
+  font-size: 11px;
+}
+.point-counter label {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+}
+.point-counter select {
+  width: 48px;
+}
+.point-counter > span {
+  color: #74796e;
+}
+.point-counter output {
+  margin-left: 7px;
+  color: var(--ink);
+  font-variant-numeric: tabular-nums;
 }

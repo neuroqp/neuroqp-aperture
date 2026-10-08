@@ -84,8 +84,9 @@ stay in ignored `test-data/`.
 
 - Linux is the current development and validation target. Windows and macOS
   packaging and testing are pending.
-- Save and annotation tools are placeholders. Viewing does not modify the
-  original image.
+- Save is disabled. Brightness and multi-point panels are UI-only: sliders and
+  marker options can be adjusted, but do not change the image or place points.
+  Viewing does not modify the original image.
 - Multi-page images display their first page. Specialist microscopy metadata,
   channels, Z stacks, and timepoints are not interpreted.
 - Supported display pixels are unsigned 8/16-bit grayscale, RGB, and RGBA in

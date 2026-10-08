@@ -91,3 +91,22 @@ The selected six-blade aperture icon was verified in the native header and inclu
 in a successful standalone debug build. The seven frontend tests and formatting
 check passed. JPEG display tiles remain lossy; nearest-neighbor scaling does not
 make them pixel-exact scientific data.
+
+## Lucide toolbar and tool panels
+
+The toolbar now uses Lucide icons plus a matching custom multi-point symbol.
+Browser interaction checks passed at 1280 by 800 and 640 by 400: right-aligned
+viewer controls, mutually exclusive tool panels, toggle-to-close, Escape with
+focus restoration, slider changes and Reset, point-type and checkbox changes,
+and retained options when switching tools. Both panels fit the smaller viewport
+without internal scrolling. A loaded checkerboard canvas and its viewport zoom
+remained identical after brightness and point-option changes; the point count
+stayed zero.
+
+Direct mouse interaction in the running Linux Tauri app verified both palettes
+and a brightness slider change from 0 to 54 over a loaded microscopy TIFF.
+Native screenshots are ignored under `test-data/brightness-panel.native.png`,
+`brightness-adjusted.native.png`, and `points-panel.native.png`. These controls
+only manage UI state: no image processing, annotation placement, or source-file
+writes were added. Nine frontend tests pass, including display-range bounds and
+independent adjustment state.

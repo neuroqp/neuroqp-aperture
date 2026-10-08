@@ -12,7 +12,8 @@ preview as soon as possible, and stays responsive while loading large images.
 - Support ordinary images and large TIFFs, including BigTIFF. Exact compression,
   pixel-type, and multi-page coverage must be documented as support is added.
 - Keep the interface and implementation small. Image editing, analysis,
-  annotations, and specialist microscopy formats are outside the initial scope.
+  annotation placement, and specialist microscopy formats are outside the initial
+  scope. Brightness and multi-point option panels are UI-only prototypes.
 
 ## Technology decisions
 
@@ -50,7 +51,9 @@ Two thin horizontal header bars sit above the image viewer.
    Integrate window controls into this bar so the design does not need a third
    title bar.
 2. **Quick toolbar:** a compact row of icon buttons inspired by ImageJ. These
-   are placeholders initially, visibly inactive with descriptive tooltips.
+   use Lucide icons, with a matching custom multi-point icon. Brightness and
+   multi-point toggles sit on the left; pan, zoom, and fit controls sit on the
+   right. Remove unused placeholder tools.
 3. **Image viewer:** fill all remaining window space. Show the image against a
    neutral background, preserve its aspect ratio, and support smooth pan and
    zoom. Use nearest-neighbor scaling so magnified pixels have sharp boundaries.
@@ -59,6 +62,18 @@ Two thin horizontal header bars sit above the image viewer.
 Open selects a local image and replaces the current image. Save is a visible
 control; its initial behavior and supported output formats remain to be decided.
 Disable Save until an image and a supported save operation are available.
+
+## Tool option panels
+
+- Show a compact panel beneath the toolbar for the selected tool. Toggle the
+  button again, press Escape, or use its close button to dismiss it.
+- Brightness: display-range graph, Minimum, Maximum, Brightness, and Contrast
+  sliders with values and Reset. Controls currently update local UI state only.
+  Future brightness adjustments must affect display only, never source pixels.
+- Multi-point: Type, Color, Size, Label points, Show on all slices, Counter, and
+  point count. Show a small marker appearance preview. Annotation placement and
+  counting are not implemented yet.
+- Preserve option values while switching panels during the current session.
 
 ## Loading and performance
 

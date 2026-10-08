@@ -3,6 +3,8 @@ import { convertFileSrc, invoke, isTauri } from "@tauri-apps/api/core";
 import { getCurrentWindow } from "@tauri-apps/api/window";
 import { open } from "@tauri-apps/plugin-dialog";
 import appIcon from "../src-tauri/icons/icon.png";
+import { icon, type IconName } from "./icons";
+import { bindTools, toolPanels } from "./tools";
 import {
   ImageLoader,
   orientation,
@@ -13,31 +15,8 @@ import {
 } from "./image";
 import "./style.css";
 
-const icons: Record<string, string> = {
-  open: '<path d="M3 7V4h5l2 2h7v3M3 7h15l-3 9H2Z"/>',
-  save: '<path d="M4 2h10l3 3v13H3V2Z"/><path d="M6 2v5h7V2M6 18v-7h8v7"/>',
-  rectangle:
-    '<rect x="3" y="4" width="14" height="12" stroke-dasharray="2 2"/>',
-  oval: '<ellipse cx="10" cy="10" rx="7" ry="6" stroke-dasharray="2 2"/>',
-  polygon: '<path d="m4 3 12 2 1 9-8 3-6-7Z" stroke-dasharray="2 2"/>',
-  line: '<path d="m3 17 14-14"/><path d="M3 14v3h3M14 3h3v3"/>',
-  point: '<path d="M10 2v16M2 10h16"/><circle cx="10" cy="10" r="3"/>',
-  wand: '<path d="m3 17 10-10M11 9l2 2M13 2v2M18 7h-2M17 3l-2 2M8 3l2 2"/>',
-  text: '<path d="M3 5V3h14v2M10 3v14M7 17h6"/>',
-  hand: '<path d="M5 10V5.5a1.25 1.25 0 0 1 2.5 0V9 3.5a1.25 1.25 0 0 1 2.5 0V9 4.5a1.25 1.25 0 0 1 2.5 0V9 6.5a1.25 1.25 0 0 1 2.5 0V12c0 4-2 6-5 6H8c-2 0-3-1-4-3l-2-4a1.5 1.5 0 0 1 2-2Z"/>',
-  zoomIn: '<circle cx="8" cy="8" r="5.5"/><path d="m12 12 5 5M5 8h6M8 5v6"/>',
-  zoomOut: '<circle cx="8" cy="8" r="5.5"/><path d="m12 12 5 5M5 8h6"/>',
-  fit: '<path d="M7 3H3v4M13 3h4v4M3 13v4h4M17 13v4h-4"/><rect x="6" y="6" width="8" height="8"/>',
-  cancel: '<path d="m5 5 10 10M15 5 5 15"/>',
-  minimize: '<path d="M4 13h12"/>',
-  maximize: '<rect x="4" y="4" width="12" height="12"/>',
-  restore:
-    '<path d="M7 5V3h10v10h-2"/><rect x="3" y="7" width="10" height="10"/>',
-};
-const icon = (name: string) =>
-  `<svg viewBox="0 0 20 20" aria-hidden="true">${icons[name]}</svg>`;
-const tool = (id: string, name: string, label: string, placeholder = false) =>
-  `<button id="${id}" class="tool" type="button" title="${label}${placeholder ? ": not available yet" : ""}" aria-label="${label}" ${placeholder ? "disabled" : "data-image-control disabled"}>${icon(name)}</button>`;
+const tool = (id: string, name: IconName, label: string, panel = false) =>
+  `<button id="${id}" class="tool" type="button" title="${label}" aria-label="${label}" ${panel ? `aria-pressed="false" aria-expanded="false" aria-controls="${name}-panel"` : "data-image-control disabled"}>${icon(name)}</button>`;
 
 document.querySelector<HTMLDivElement>("#app")!.innerHTML = `
   <header class="image-bar">
@@ -56,34 +35,32 @@ document.querySelector<HTMLDivElement>("#app")!.innerHTML = `
     </div>
   </header>
   <nav class="quick-bar" aria-label="Image tools">
-    <div class="tool-group">
-      ${tool("rectangle-tool", "rectangle", "Rectangle selection", true)}
-      ${tool("oval-tool", "oval", "Oval selection", true)}
-      ${tool("polygon-tool", "polygon", "Polygon selection", true)}
-      ${tool("line-tool", "line", "Line", true)}
-      ${tool("point-tool", "point", "Point", true)}
-      ${tool("wand-tool", "wand", "Wand selection", true)}
-      ${tool("text-tool", "text", "Text", true)}
-    </div>
-    <span class="separator" aria-hidden="true"></span>
-    <div class="tool-group">
-      ${tool("pan-button", "hand", "Pan image")}
-      ${tool("zoom-in-button", "zoomIn", "Zoom in (+)")}
-      ${tool("zoom-out-button", "zoomOut", "Zoom out (-)")}
-      ${tool("fit-button", "fit", "Fit image (F)")}
+    <div class="tool-group" role="group" aria-label="Image adjustments and annotation tools">
+      ${tool("brightness-button", "brightness", "Brightness & contrast", true)}
+      ${tool("points-button", "points", "Multi-point", true)}
     </div>
     <div class="load-status">
       <span id="status" role="status" aria-live="polite"></span>
       <button id="cancel-button" class="tool" type="button" title="Cancel loading (Escape)" aria-label="Cancel loading" hidden>${icon("cancel")}</button>
       <span id="dimensions"></span>
     </div>
+    <div class="tool-group viewer-controls" role="group" aria-label="Viewer controls">
+      ${tool("pan-button", "hand", "Pan image")}
+      ${tool("zoom-in-button", "zoomIn", "Zoom in (+)")}
+      ${tool("zoom-out-button", "zoomOut", "Zoom out (-)")}
+      ${tool("fit-button", "fit", "Fit image (F)")}
+    </div>
     <div id="progress" role="progressbar" aria-label="Image loading" hidden><span></span></div>
   </nav>
-  <section id="viewer" aria-label="Image viewer"></section>
+  <div class="viewer-workspace">
+    <section id="viewer" aria-label="Image viewer"></section>
+    ${toolPanels}
+  </div>
 `;
 
 const $ = <T extends HTMLElement = HTMLElement>(id: string) =>
   document.getElementById(id)! as T;
+const tools = bindTools();
 const native = isTauri();
 const windowHandle = native ? getCurrentWindow() : null;
 const viewer = OpenSeadragon({
@@ -327,8 +304,14 @@ document.addEventListener("keydown", (event) => {
   if ((event.ctrlKey || event.metaKey) && event.key.toLowerCase() === "o") {
     event.preventDefault();
     void chooseImage();
-  } else if (event.key === "Escape") void cancelLoad();
-  else if (
+  } else if (event.key === "Escape") {
+    if (tools.close()) event.preventDefault();
+    else void cancelLoad();
+  } else if (
+    !(
+      event.target instanceof Element &&
+      event.target.closest("input, select, textarea, [contenteditable]")
+    ) &&
     !event.ctrlKey &&
     !event.metaKey &&
     !event.altKey &&
