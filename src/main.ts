@@ -40,7 +40,7 @@ document.querySelector<HTMLDivElement>("#app")!.innerHTML = `
     </div>
     <div class="file-actions">
       <button id="open-button" class="file-button" type="button" title="Open image (Ctrl+O)">${icon("open")}<span>Open</span></button>
-      <button id="save-button" class="file-button" type="button" title="Save annotated TIFF copy (Ctrl+S)" disabled>${icon("save")}<span>Save</span></button>
+      <button id="save-button" class="file-button" type="button" title="Save annotated TIFF (Ctrl+S)" disabled>${icon("save")}<span>Save</span></button>
     </div>
     <button id="theme-button" class="tool theme-button" type="button" aria-label="Switch theme"></button>
     <div class="window-actions">
@@ -71,6 +71,18 @@ document.querySelector<HTMLDivElement>("#app")!.innerHTML = `
     <section id="viewer" aria-label="Image viewer"></section>
     ${toolPanels}
   </div>
+  <dialog id="save-dialog" aria-labelledby="save-dialog-title" aria-describedby="save-dialog-description save-dialog-path">
+    <form method="dialog">
+      <h2 id="save-dialog-title">Save annotated TIFF</h2>
+      <p id="save-dialog-description">Overwrite this TIFF or save to another file. Image pixels stay unchanged.</p>
+      <p id="save-dialog-path" class="save-target"></p>
+      <div class="save-actions">
+        <button id="save-overwrite-button" class="file-button save-primary" type="submit" value="overwrite">Overwrite</button>
+        <button id="save-as-button" class="file-button" type="submit" value="save-as">Save as...</button>
+        <button id="save-cancel-button" class="file-button" type="submit" value="cancel" autofocus>Cancel</button>
+      </div>
+    </form>
+  </dialog>
 `;
 
 const $ = <T extends HTMLElement = HTMLElement>(id: string) =>
@@ -94,7 +106,7 @@ const viewer = OpenSeadragon({
   visibilityRatio: 0.2,
   constrainDuringPan: false,
   maxZoomPixelRatio: 4,
-  pixelsPerArrowPress: 600,
+  pixelsPerArrowPress: 300,
   gestureSettingsMouse: { clickToZoom: false, dblClickToZoom: true },
 });
 
@@ -104,6 +116,8 @@ let annotationsReady = false;
 let annotationError: string | null = null;
 let dirty = false;
 let saving = false;
+let savedPath: string | null = null;
+const saveDialog = $<HTMLDialogElement>("save-dialog");
 function editAnnotations(next: PointRoi[] | null) {
   if (!next || next === rois || !annotationsReady || saving) return;
   rois = next;
@@ -174,7 +188,7 @@ async function discardChanges() {
   dialogOpen = true;
   try {
     return await confirm(
-      "Discard unsaved point annotations? Save a TIFF copy first to keep them.",
+      "Discard unsaved point annotations? Save first to keep them.",
       {
         title: "Unsaved annotations",
         kind: "warning",
@@ -197,19 +211,49 @@ async function saveAnnotations() {
   )
     return;
   dialogOpen = true;
+  saving = true;
+  updatePointTool();
   try {
-    let path = await save({
-      title: "Save annotated TIFF copy",
-      defaultPath: `${(currentImage?.name || "image").replace(/\.[^.]+$/, "")}-annotated.tif`,
-      filters: [{ name: "TIFF image", extensions: ["tif", "tiff"] }],
+    const target = await invoke<{
+      path: string;
+      exists: boolean;
+      isTiff: boolean;
+    }>("annotation_target", {
+      id: currentId,
+      path: savedPath,
     });
-    if (!path) return;
-    if (!/\.tiff?$/i.test(path))
-      throw new Error("Use a .tif or .tiff filename for the annotated copy.");
-    saving = true;
-    updatePointTool();
-    $("status").textContent = "Saving annotated copy…";
-    await invoke("save_annotations", { id: currentId, path, rois });
+    let path = target.path;
+    let overwrite = false;
+    if (target.isTiff || target.exists) {
+      $("save-dialog-path").textContent = target.path;
+      saveDialog.returnValue = "cancel";
+      const choice = await new Promise<string>((resolve) => {
+        saveDialog.addEventListener(
+          "close",
+          () => resolve(saveDialog.returnValue),
+          { once: true },
+        );
+        saveDialog.showModal();
+      });
+      if (choice === "overwrite") overwrite = true;
+      else if (choice === "save-as") {
+        const selected = await save({
+          title: "Save annotated TIFF as",
+          defaultPath: target.path,
+          filters: [{ name: "TIFF image", extensions: ["tif", "tiff"] }],
+        });
+        if (!selected) return;
+        path = selected;
+        // The native save picker confirms replacement of an existing file.
+        overwrite = true;
+      } else return;
+    }
+    if (!/\.tiff?$/i.test(path) && !(target.isTiff && path === target.path))
+      throw new Error("Use a .tif or .tiff filename for the annotated TIFF.");
+    $("status").classList.remove("error");
+    $("status").textContent = "Saving annotations…";
+    await invoke("save_annotations", { id: currentId, path, rois, overwrite });
+    savedPath = path;
     dirty = false;
     $("status").textContent = "Saved";
   } catch (error) {
@@ -249,6 +293,7 @@ function setLoading(active: boolean, progress: number | null = null) {
 function resetViewer() {
   currentId = null;
   currentImage = null;
+  savedPath = null;
   rois = [];
   tools.setPointSettings(settingsForRois([], 0));
   annotationsReady = false;
@@ -318,7 +363,7 @@ function showImage(state: ImageState) {
       : annotationError
         ? annotationError
         : saving
-          ? "Saving annotated copy…"
+          ? "Saving annotations…"
           : state.phase === "cancelled"
             ? "Cancelled"
             : tileError
@@ -491,6 +536,7 @@ $("zoom-out-button").addEventListener("click", () => {
   viewer.viewport.applyConstraints();
 });
 document.addEventListener("keydown", (event) => {
+  if (dialogOpen || saving) return;
   if ((event.ctrlKey || event.metaKey) && event.key.toLowerCase() === "o") {
     event.preventDefault();
     void chooseImage();

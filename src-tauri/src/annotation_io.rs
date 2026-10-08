@@ -4,16 +4,34 @@ use crate::{
     tiff_annotations::{self, TiffAnnotations},
 };
 use std::{
-    fs,
+    fs::{self, File},
+    io::Read,
     path::Path,
     process::Command,
     time::{SystemTime, UNIX_EPOCH},
 };
 
-fn is_tiff(path: &Path) -> bool {
+fn tiff_extension(path: &Path) -> bool {
     path.extension()
         .and_then(|s| s.to_str())
         .is_some_and(|s| s.eq_ignore_ascii_case("tif") || s.eq_ignore_ascii_case("tiff"))
+}
+
+pub fn is_tiff(path: &Path) -> Result<bool, String> {
+    let mut header = Vec::with_capacity(4);
+    File::open(path)
+        .map_err(|e| e.to_string())?
+        .take(4)
+        .read_to_end(&mut header)
+        .map_err(|e| e.to_string())?;
+    if header.starts_with(b"II") || header.starts_with(b"MM") {
+        // Let the TIFF parser reject unsupported or malformed TIFF headers.
+        Ok(true)
+    } else if tiff_extension(path) {
+        Err("The source has a TIFF extension but an invalid TIFF header".into())
+    } else {
+        Ok(false)
+    }
 }
 
 fn points(annotations: &TiffAnnotations) -> Result<Vec<PointRoi>, String> {
@@ -40,7 +58,7 @@ fn points(annotations: &TiffAnnotations) -> Result<Vec<PointRoi>, String> {
 }
 
 pub fn load(source: &Path) -> Result<Vec<PointRoi>, String> {
-    if is_tiff(source) {
+    if is_tiff(source)? {
         points(&tiff_annotations::read(source)?)
     } else {
         Ok(vec![])
@@ -50,8 +68,10 @@ pub fn load(source: &Path) -> Result<Vec<PointRoi>, String> {
 fn edited_metadata(
     original: TiffAnnotations,
     rois: Vec<PointRoi>,
+    basis: Option<&[PointRoi]>,
 ) -> Result<(Vec<u8>, Vec<Vec<u8>>), String> {
-    let existing = points(&original)?;
+    let live = points(&original)?;
+    let existing = basis.unwrap_or(&live);
     let mut overlays = vec![];
     for bytes in original.overlays {
         if roi::decode(&bytes)?.is_none() {
@@ -89,12 +109,17 @@ fn edited_metadata(
     Ok((active, overlays))
 }
 
-fn check_target(source: &Path, target: &Path) -> Result<(), String> {
-    if !is_tiff(target) {
-        return Err("Save the annotated copy with a .tif or .tiff extension".into());
-    }
+fn check_target(
+    source: &Path,
+    target: &Path,
+    source_is_tiff: bool,
+    overwrite: bool,
+) -> Result<(), String> {
     let source_path = fs::canonicalize(source).map_err(|e| e.to_string())?;
     let same_path = fs::canonicalize(target).ok().as_ref() == Some(&source_path);
+    if !tiff_extension(target) && !(source_is_tiff && same_path) {
+        return Err("Save annotations with a .tif or .tiff extension".into());
+    }
     #[cfg(unix)]
     let same_file = {
         use std::os::unix::fs::MetadataExt;
@@ -104,21 +129,32 @@ fn check_target(source: &Path, target: &Path) -> Result<(), String> {
     };
     #[cfg(not(unix))]
     let same_file = false;
-    if same_path || same_file {
+    if !source_is_tiff && (same_path || same_file) {
         return Err(
-            "Save annotations to a different TIFF; source images cannot be overwritten".into(),
+            "Save annotations to a TIFF; the original non-TIFF image cannot be overwritten".into(),
         );
+    }
+    if !overwrite && fs::symlink_metadata(target).is_ok() {
+        return Err("The destination exists. Confirm overwrite before saving.".into());
     }
     Ok(())
 }
 
-pub fn save(source: &Path, target: &Path, rois: Vec<PointRoi>) -> Result<(), String> {
-    check_target(source, target)?;
-    if is_tiff(source) {
-        let (active, overlays) = edited_metadata(tiff_annotations::read(source)?, rois)?;
-        return tiff_annotations::save_copy(source, target, active, overlays);
+pub fn save(
+    source: &Path,
+    target: &Path,
+    rois: Vec<PointRoi>,
+    basis: &[PointRoi],
+    overwrite: bool,
+) -> Result<(), String> {
+    let source_is_tiff = is_tiff(source)?;
+    check_target(source, target, source_is_tiff, overwrite)?;
+    if source_is_tiff {
+        let (active, overlays) =
+            edited_metadata(tiff_annotations::read(source)?, rois, Some(basis))?;
+        return tiff_annotations::save_copy(source, target, active, overlays, overwrite);
     }
-    let (active, overlays) = edited_metadata(TiffAnnotations::default(), rois)?;
+    let (active, overlays) = edited_metadata(TiffAnnotations::default(), rois, Some(basis))?;
     let source = fs::canonicalize(source).map_err(|e| e.to_string())?;
     let extension = source
         .extension()
@@ -169,8 +205,14 @@ pub fn save(source: &Path, target: &Path, rois: Vec<PointRoi>) -> Result<(), Str
                 String::from_utf8_lossy(&output.stderr).trim()
             ));
         }
-        check_target(&source, target)?;
-        tiff_annotations::save_copy(&temp.join("converted.tif"), target, active, overlays)
+        check_target(&source, target, false, overwrite)?;
+        tiff_annotations::save_copy(
+            &temp.join("converted.tif"),
+            target,
+            active,
+            overlays,
+            overwrite,
+        )
     })();
     let _ = fs::remove_dir_all(&temp);
     result
@@ -179,6 +221,17 @@ pub fn save(source: &Path, target: &Path, rois: Vec<PointRoi>) -> Result<(), Str
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    fn edited_metadata(
+        original: TiffAnnotations,
+        rois: Vec<PointRoi>,
+    ) -> Result<(Vec<u8>, Vec<Vec<u8>>), String> {
+        super::edited_metadata(original, rois, None)
+    }
+
+    fn save(source: &Path, target: &Path, rois: Vec<PointRoi>) -> Result<(), String> {
+        super::save(source, target, rois, &load(source)?, true)
+    }
 
     fn point() -> PointRoi {
         roi::decode(include_bytes!("fixtures/imagej-points.roi"))
@@ -436,18 +489,90 @@ mod tests {
             fs::read(dir.join("original.raw")).unwrap(),
             fs::read(dir.join("saved.raw")).unwrap()
         );
+        let basis = load(&target).unwrap();
         let target_before = fs::read(&target).unwrap();
-        assert!(save(&target, &target, vec![point()]).is_err());
+        assert!(super::save(&target, &target, basis.clone(), &basis, false).is_err());
         assert_eq!(fs::read(&target).unwrap(), target_before);
+        super::save(&target, &target, basis.clone(), &basis, true).unwrap();
+        run(&["rawsave", "copy.tiff", "saved.raw"]);
+        assert_eq!(
+            fs::read(dir.join("original.raw")).unwrap(),
+            fs::read(dir.join("saved.raw")).unwrap()
+        );
         #[cfg(unix)]
         {
             let alias = dir.join("alias.tif");
-            std::os::unix::fs::symlink(&target, &alias).unwrap();
-            assert!(save(&target, &alias, vec![point()]).is_err());
+            std::os::unix::fs::symlink(&source, &alias).unwrap();
+            assert!(save(&source, &alias, vec![point()]).is_err());
             fs::remove_file(&alias).unwrap();
-            fs::hard_link(&target, &alias).unwrap();
-            assert!(save(&target, &alias, vec![point()]).is_err());
+            fs::hard_link(&source, &alias).unwrap();
+            assert!(save(&source, &alias, vec![point()]).is_err());
         }
         fs::remove_dir_all(dir).unwrap();
+    }
+
+    #[test]
+    fn repeated_overwrites_use_initial_metadata_after_deletion_and_reordering() {
+        let first_bytes = include_bytes!("fixtures/imagej-points.roi").to_vec();
+        let mut second = roi::decode(&first_bytes).unwrap().unwrap();
+        second.raw.clear();
+        second.points[0].x = 80.25;
+        let second_bytes = roi::encode(&second).unwrap();
+        let original = TiffAnnotations {
+            active_roi: Some(second_bytes),
+            overlays: vec![first_bytes.clone()],
+        };
+        let basis = points(&original).unwrap();
+        let mut reordered = basis.clone();
+        reordered.swap(0, 1);
+        let (active, overlays) =
+            super::edited_metadata(original, reordered.clone(), Some(&basis)).unwrap();
+        let live = TiffAnnotations {
+            active_roi: Some(active),
+            overlays,
+        };
+        let (active, overlays) = super::edited_metadata(live, reordered, Some(&basis)).unwrap();
+        let live = TiffAnnotations {
+            active_roi: Some(active),
+            overlays,
+        };
+        // Clearing the earlier source group leaves only sourceIndex=1 on disk.
+        let mut deleted = basis[0].clone();
+        deleted.points.clear();
+        let survivor = basis[1].clone();
+        let submitted = vec![deleted, survivor.clone()];
+        let (active, overlays) =
+            super::edited_metadata(live, submitted.clone(), Some(&basis)).unwrap();
+        assert!(overlays.is_empty());
+        let live = TiffAnnotations {
+            active_roi: Some(active),
+            overlays,
+        };
+        assert_eq!(points(&live).unwrap()[0].source_index, Some(0));
+        let (active, overlays) = super::edited_metadata(live, submitted, Some(&basis)).unwrap();
+        assert!(overlays.is_empty());
+        assert_eq!(
+            roi::decode(&active).unwrap().unwrap().points,
+            survivor.points
+        );
+        assert_eq!(active, basis[1].raw);
+        assert_ne!(active, first_bytes);
+    }
+
+    #[test]
+    fn tiff_header_detection_does_not_convert_malformed_tiffs() {
+        let stamp = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .unwrap()
+            .as_nanos();
+        let path = std::env::temp_dir().join(format!("aperture-header-{stamp}.tif"));
+        fs::write(&path, b"not a TIFF").unwrap();
+        assert!(load(&path).unwrap_err().contains("invalid TIFF header"));
+        let disguised = path.with_extension("png");
+        fs::write(&disguised, b"II\x2a\0\xff\xff\xff\xff").unwrap();
+        assert!(is_tiff(&disguised).unwrap());
+        assert!(load(&disguised).is_err());
+        fs::remove_file(path).unwrap();
+        fs::remove_file(disguised).unwrap();
     }
 }

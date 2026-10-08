@@ -228,20 +228,40 @@ pub fn read(path: &Path) -> Result<TiffAnnotations, String> {
     Ok(annotations)
 }
 
-/// Writes a distinct TIFF copy. The caller supplies all overlays to retain.
+/// Writes a TIFF atomically, including replacement of the source when authorized.
+/// The caller supplies all overlays to retain.
 pub fn save_copy(
     source: &Path,
     target: &Path,
     active: Vec<u8>,
     overlays: Vec<Vec<u8>>,
+    overwrite: bool,
 ) -> Result<(), String> {
-    let original = fs::canonicalize(source).map_err(|e| e.to_string())?;
-    if fs::canonicalize(target).ok().as_ref() == Some(&original) {
-        return Err(
-            "Save annotations to a different TIFF; source images cannot be overwritten".into(),
-        );
+    if !overwrite && fs::symlink_metadata(target).is_ok() {
+        return Err("The destination exists. Confirm overwrite before saving.".into());
+    }
+    // Resolve existing symlinks so an overwrite preserves the selected link.
+    let target_path = match fs::canonicalize(target) {
+        Ok(path) => path,
+        Err(error)
+            if error.kind() == std::io::ErrorKind::NotFound
+                && !fs::symlink_metadata(target)
+                    .is_ok_and(|metadata| metadata.file_type().is_symlink()) =>
+        {
+            target.to_path_buf()
+        }
+        Err(error) => return Err(format!("Cannot resolve the destination: {error}")),
+    };
+    let target = target_path.as_path();
+    if fs::metadata(target).is_ok_and(|metadata| metadata.permissions().readonly()) {
+        return Err("The destination is read-only. Choose Save as to write another file.".into());
     }
     let mut t = Tiff::open(source)?;
+    // New Save-as files use the creation mode and umask. Only an existing
+    // destination carries its permissions through atomic replacement.
+    let permissions = fs::metadata(target)
+        .ok()
+        .map(|metadata| metadata.permissions());
     if !t.big && t.len > u32::MAX as u64 {
         return Err("Source already exceeds classic TIFF's 4 GiB offset limit".into());
     }
@@ -283,6 +303,41 @@ pub fn save_copy(
     }
     if data.len() as u64 > LIMIT || counts.len() as u64 > LIMIT {
         return Err("Annotations exceed TIFF metadata size limit".into());
+    }
+    let alignment = if t.big { 8u64 } else { 2u64 };
+    let padded = t
+        .len
+        .checked_add(alignment - 1)
+        .ok_or("TIFF file size overflow")?
+        / alignment
+        * alignment;
+    let metadata_end = padded
+        .checked_add(counts.len() as u64)
+        .and_then(|size| size.checked_add(data.len() as u64))
+        .ok_or("TIFF file size overflow")?;
+    let ifd_offset = metadata_end
+        .checked_add(alignment - 1)
+        .ok_or("TIFF file size overflow")?
+        / alignment
+        * alignment;
+    let entry_count = t
+        .entries
+        .iter()
+        .filter(|e| ![COUNTS, METADATA].contains(&t.tag(e)))
+        .count()
+        + 2;
+    let final_size = ifd_offset
+        .checked_add(if t.big {
+            8 + entry_count as u64 * 20 + 8
+        } else {
+            2 + entry_count as u64 * 12 + 4
+        })
+        .ok_or("TIFF file size overflow")?;
+    if !t.big && final_size > u32::MAX as u64 {
+        return Err(
+            "Annotations would exceed classic TIFF's 4 GiB offset limit; use a BigTIFF source"
+                .into(),
+        );
     }
     let stamp = SystemTime::now()
         .duration_since(UNIX_EPOCH)
@@ -359,12 +414,24 @@ pub fn save_copy(
             .map_err(|e| e.to_string())?;
         out.write_all(&t.bytes(ifd_offset, offset_width)?)
             .map_err(|e| e.to_string())?;
-        out.sync_all().map_err(|e| e.to_string())?;
-        // Recheck aliases before the atomic replacement, including source symlinks.
-        if fs::canonicalize(target).ok().as_ref() == Some(&original) {
-            return Err("Cannot overwrite source TIFF".into());
+        if let Some(permissions) = permissions {
+            out.set_permissions(permissions)
+                .map_err(|e| e.to_string())?;
         }
-        fs::rename(&temp, target).map_err(|e| e.to_string())?;
+        out.sync_all().map_err(|e| e.to_string())?;
+        if overwrite {
+            fs::rename(&temp, target).map_err(|e| e.to_string())?;
+        } else {
+            // Creating the destination link is atomic and fails if it appeared
+            // after the dialog. A rename would silently replace that file.
+            fs::hard_link(&temp, target).map_err(|e| {
+                format!("Cannot create the destination without overwriting it: {e}")
+            })?;
+            let _ = fs::remove_file(&temp);
+        }
+        // The file is already committed; best effort directory fsync also
+        // persists the rename/link on filesystems which support it.
+        let _ = File::open(parent).and_then(|directory| directory.sync_all());
         Ok(())
     })();
     if result.is_err() {
@@ -421,7 +488,14 @@ mod tests {
                 fixture(&source, little, big);
                 let before = fs::read(&source).unwrap();
                 assert!(read(&source).unwrap().active_roi.is_none());
-                save_copy(&source, &target, vec![1, 2, 3], vec![vec![4, 5], vec![6]]).unwrap();
+                save_copy(
+                    &source,
+                    &target,
+                    vec![1, 2, 3],
+                    vec![vec![4, 5], vec![6]],
+                    true,
+                )
+                .unwrap();
                 let a = read(&target).unwrap();
                 assert_eq!(a.active_roi, Some(vec![1, 2, 3]));
                 assert_eq!(a.overlays, vec![vec![4, 5], vec![6]]);
@@ -429,7 +503,62 @@ mod tests {
                 let header = if big { 16 } else { 8 };
                 assert_eq!(&after[header..before.len()], &before[header..]);
                 assert_eq!(fs::read(&source).unwrap(), before);
-                assert!(save_copy(&source, &source, vec![], vec![]).is_err());
+                assert!(save_copy(&source, &source, vec![], vec![], false).is_err());
+                #[cfg(unix)]
+                {
+                    use std::os::unix::fs::PermissionsExt;
+                    fs::set_permissions(&source, fs::Permissions::from_mode(0o640)).unwrap();
+                }
+                save_copy(&source, &source, vec![7], vec![], true).unwrap();
+                let replaced = fs::read(&source).unwrap();
+                assert_eq!(&replaced[header..before.len()], &before[header..]);
+                assert_eq!(read(&source).unwrap().active_roi, Some(vec![7]));
+                #[cfg(unix)]
+                {
+                    use std::os::unix::fs::PermissionsExt;
+                    assert_eq!(
+                        fs::metadata(&source).unwrap().permissions().mode() & 0o777,
+                        0o640
+                    );
+                }
+                assert!(
+                    save_copy(&source, &source, vec![0; LIMIT as usize], vec![], true).is_err()
+                );
+                assert_eq!(fs::read(&source).unwrap(), replaced);
+                #[cfg(unix)]
+                {
+                    use std::os::unix::fs::PermissionsExt;
+                    fs::set_permissions(&source, fs::Permissions::from_mode(0o444)).unwrap();
+                    assert!(save_copy(&source, &source, vec![8], vec![], true)
+                        .unwrap_err()
+                        .contains("read-only"));
+                    assert_eq!(fs::read(&source).unwrap(), replaced);
+                    let copy = dir.join("readonly-copy.tif");
+                    fs::remove_file(&copy).ok();
+                    save_copy(&source, &copy, vec![8], vec![], false).unwrap();
+                    assert!(!fs::metadata(&copy).unwrap().permissions().readonly());
+                    save_copy(&copy, &copy, vec![9], vec![], true).unwrap();
+                    assert_eq!(read(&copy).unwrap().active_roi, Some(vec![9]));
+                    fs::remove_file(copy).unwrap();
+                    let alias = dir.join("linked-source.tif");
+                    std::os::unix::fs::symlink(&source, &alias).unwrap();
+                    fs::set_permissions(&source, fs::Permissions::from_mode(0o640)).unwrap();
+                    save_copy(&source, &alias, vec![10], vec![], true).unwrap();
+                    assert!(fs::symlink_metadata(&alias)
+                        .unwrap()
+                        .file_type()
+                        .is_symlink());
+                    assert_eq!(read(&source).unwrap().active_roi, Some(vec![10]));
+                    fs::remove_file(alias).unwrap();
+                    let dangling = dir.join("dangling.tif");
+                    std::os::unix::fs::symlink(dir.join("missing.tif"), &dangling).unwrap();
+                    assert!(save_copy(&source, &dangling, vec![11], vec![], true).is_err());
+                    assert!(fs::symlink_metadata(&dangling)
+                        .unwrap()
+                        .file_type()
+                        .is_symlink());
+                    fs::remove_file(dangling).unwrap();
+                }
                 // Turn the active block into an unknown block; the next save must retain it.
                 let t = Tiff::open(&target).unwrap();
                 let entry = t.entries.iter().find(|e| t.tag(e) == METADATA).unwrap();
@@ -440,13 +569,27 @@ mod tests {
                 f.write_all(&t.bytes(0x12345678, 4).unwrap()).unwrap();
                 drop(f);
                 let second = dir.join("second.tif");
-                save_copy(&target, &second, vec![9], vec![vec![8]]).unwrap();
+                save_copy(&target, &second, vec![9], vec![vec![8]], true).unwrap();
                 let blocks = Tiff::open(&second).unwrap().blocks().unwrap();
                 assert!(blocks
                     .iter()
                     .any(|(kind, items)| *kind == 0x12345678 && *items == vec![vec![1, 2, 3]]));
+                // Fail during the final rename, after writing a complete temp
+                // copy, and verify cleanup and the original remain intact.
+                let failed_target = dir.join("directory-target.tif");
+                fs::create_dir(&failed_target).unwrap();
+                let source_before_failure = fs::read(&source).unwrap();
+                assert!(save_copy(&source, &failed_target, vec![11], vec![], true).is_err());
+                assert_eq!(fs::read(&source).unwrap(), source_before_failure);
+                assert!(failed_target.is_dir());
+                fs::remove_dir(failed_target).unwrap();
             }
         }
+        assert!(!fs::read_dir(&dir).unwrap().any(|entry| entry
+            .unwrap()
+            .file_name()
+            .to_string_lossy()
+            .starts_with(".aperture-save-")));
         fs::remove_dir_all(dir).unwrap();
     }
     #[test]
@@ -458,6 +601,30 @@ mod tests {
         let path = std::env::temp_dir().join(format!("aperture-tiff-bad-{stamp}.tif"));
         fs::write(&path, [b'I', b'I', 42, 0, 255, 255, 255, 255]).unwrap();
         assert!(read(&path).is_err());
+        fs::remove_file(path).unwrap();
+    }
+
+    #[test]
+    fn classic_tiff_offset_overflow_fails_before_copying_or_changing_source() {
+        let stamp = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .unwrap()
+            .as_nanos();
+        let path = std::env::temp_dir().join(format!("aperture-tiff-limit-{stamp}.tif"));
+        fixture(&path, true, false);
+        let before = fs::read(&path).unwrap();
+        OpenOptions::new()
+            .write(true)
+            .open(&path)
+            .unwrap()
+            .set_len(u32::MAX as u64 - 8)
+            .unwrap();
+        let error = save_copy(&path, &path, vec![1, 2, 3], vec![], true).unwrap_err();
+        assert!(error.contains("4 GiB offset limit"), "{error}");
+        assert_eq!(fs::metadata(&path).unwrap().len(), u32::MAX as u64 - 8);
+        let mut prefix = vec![0; before.len()];
+        File::open(&path).unwrap().read_exact(&mut prefix).unwrap();
+        assert_eq!(prefix, before);
         fs::remove_file(path).unwrap();
     }
 }

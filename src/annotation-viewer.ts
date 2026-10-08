@@ -186,6 +186,7 @@ export class AnnotationViewer {
   };
 
   private keyDown = (event: KeyboardEvent) => {
+    if (document.querySelector("dialog[open]")) return;
     if (event.key.toLowerCase() === "e") {
       const typing =
         event.target instanceof Element &&

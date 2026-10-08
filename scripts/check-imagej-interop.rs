@@ -81,12 +81,17 @@ fn main() {
             })
             .collect();
         let encoded = roi::encode(&active).unwrap();
-        assert!(
-            tiff_annotations::save_copy(&source, &source, encoded.clone(), overlays.clone())
-                .is_err()
-        );
+        assert!(tiff_annotations::save_copy(
+            &source,
+            &source,
+            encoded.clone(),
+            overlays.clone(),
+            false
+        )
+        .is_err());
         let target = directory.join(format!("saved-{name}"));
-        tiff_annotations::save_copy(&source, &target, encoded.clone(), overlays.clone()).unwrap();
+        tiff_annotations::save_copy(&source, &target, encoded.clone(), overlays.clone(), true)
+            .unwrap();
         let read = tiff_annotations::read(&target).unwrap();
         assert_eq!(read.active_roi.unwrap(), encoded);
         assert_eq!(read.overlays, overlays);
@@ -98,7 +103,7 @@ fn main() {
         selection.points.clear();
     }
     let cleared_target = directory.join("saved-cleared.tif");
-    annotation_io::save(&source, &cleared_target, cleared).unwrap();
+    annotation_io::save(&source, &cleared_target, cleared, &loaded, true).unwrap();
     assert!(annotation_io::load(&cleared_target).unwrap().is_empty());
     let mut split = vec![];
     for (index, counter) in [(1, 2), (0, 4), (1, 4), (0, 2)] {
@@ -122,13 +127,15 @@ fn main() {
     }];
     split.push(added);
     let target = directory.join("saved-split.tif");
-    annotation_io::save(&source, &target, split).unwrap();
+    annotation_io::save(&source, &target, split, &loaded, true).unwrap();
     let reopened = annotation_io::load(&target).unwrap();
     assert_eq!(reopened.len(), 5);
     annotation_io::save(
         &target,
         &directory.join("saved-split-reopened.tif"),
-        reopened,
+        reopened.clone(),
+        &reopened,
+        true,
     )
     .unwrap();
 }

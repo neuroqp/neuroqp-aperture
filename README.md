@@ -101,8 +101,12 @@ No microscopy source files are modified.
 
 - Linux is the current development and validation target. Windows and macOS
   packaging and testing are pending.
-- Save creates an annotated TIFF copy with ImageJ-compatible point ROI metadata.
-  It never overwrites the opened source. Click with Multi-point active to add
+- Save/Ctrl+S offers Overwrite, Save as…, or Cancel for TIFFs. Overwrite updates
+  ImageJ-compatible annotations at the current path while preserving pixels and
+  unrelated metadata. Other formats default to a sibling file with the same
+  name and a .tif extension; existing destinations require confirmation.
+  Save as… opens the file picker and remembers the chosen path for later saves.
+  Click with Multi-point active to add
   points; closing the panel or selecting Pan leaves placement mode. Imported
   ImageJ point selections and overlays remain editable annotations.
 - Display-range sliders and percentile presets adjust only
@@ -121,7 +125,7 @@ No microscopy source files are modified.
   0 to 99. In multi-point mode, mouse-down or E adds a point at the cursor,
   dragging an existing point moves it, and Alt-click removes it. The hit radius
   is five screen pixels regardless of marker size. Hold Space or Ctrl to
-  temporarily pan without leaving the tool; WASD/arrows move at fifteen times
+  temporarily pan without leaving the tool; WASD/arrows move at 7.5 times
   the viewer's default speed. The panel header's help explains the controls.
   Saved ROIs use ImageJ's active selection and overlays.
 - Multi-page images display their first page. Specialist microscopy metadata,

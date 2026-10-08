@@ -58,13 +58,17 @@ Two thin horizontal header bars sit above the image viewer.
    neutral background, preserve its aspect ratio, and support smooth pan and
    zoom. Use nearest-neighbor scaling so magnified pixels have sharp boundaries.
    Fit the image to the available space when first opened. WASD and arrow keys
-   pan at fifteen times OpenSeadragon's default speed and tap distance.
+   pan at 7.5 times OpenSeadragon's default speed and tap distance.
 
-Open selects a local image and replaces the current image. Save creates a
-separate annotated TIFF copy with ImageJ ROI metadata; never overwrite the
-opened source image. Enable Save when annotations are available or deletions
-need saving, including after removing the final point. Confirm before
-discarding unsaved annotations on Open or Close. Ctrl+S opens Save.
+Open selects a local image and replaces the current image. Save and Ctrl+S use
+the same flow. For a TIFF, offer Overwrite, Save as…, and Cancel. Overwrite saves
+annotations directly at that path without a file picker. Other formats default
+to the same filename with a .tif extension in the source directory and leave
+the original unchanged; confirm before replacing an existing destination.
+Save as… opens a file picker and remembers the chosen path for subsequent saves.
+Enable Save when annotations are available or deletions need saving, including
+after removing the final point. Confirm before discarding unsaved annotations
+on Open or Close. Cancellation or save failure must retain unsaved edits.
 
 ## Tool option panels
 
@@ -132,7 +136,10 @@ discarding unsaved annotations on Open or Close. Ctrl+S opens Save.
   points' position to zero; it does not add stack navigation.
 - TIFF saving copies the original file and appends replacement metadata without
   decoding or changing its pixels, compression, pages, or pyramid. Copying still
-  costs disk space and I/O proportional to the source file size.
+  costs disk space and I/O proportional to the source file size. Write to a
+  temporary file and atomically replace the destination only after successful
+  completion. Overwriting changes annotation metadata, not image pixels.
+  Repeated saves must retain each imported ROI's original metadata association.
 - Other supported image formats convert to a lossless, stripped classic TIFF.
   Display-range adjustments and marker graphics must not be baked into pixels.
 - Stock ImageJ cannot directly read all tiled TIFFs or BigTIFFs. Metadata remains

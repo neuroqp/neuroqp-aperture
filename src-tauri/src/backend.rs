@@ -42,6 +42,8 @@ pub struct Job {
     pub dir: Mutex<PathBuf>,
     pub input: PathBuf,
     pub source: PathBuf,
+    /// Initial metadata remains the sourceIndex basis through repeated saves.
+    pub annotations: Mutex<Option<Vec<crate::roi::PointRoi>>>,
     work: PathBuf,
     pub native: Mutex<Vec<NativeLevel>>,
     root: PathBuf,
@@ -167,6 +169,7 @@ impl Backend {
             dir: Mutex::new(dir.clone()),
             input,
             source,
+            annotations: Mutex::new(None),
             work: dir,
             native: Mutex::new(Vec::new()),
             root: self.root.clone(),

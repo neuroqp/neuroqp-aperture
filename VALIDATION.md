@@ -308,3 +308,42 @@ and Maximum 180 and updates the display filter. Reset restores 0–255 and the
 identity filter. The source file hash remains unchanged. All five footer buttons
 fit on one row inside the panel in both themes. Local screenshots remain ignored
 under test-data/brightness-full-sampled-{light,dark}.native.png.
+
+## Confirmed overwrite and Save as
+
+Supersedes the earlier restriction against overwriting a TIFF source. Save and
+Ctrl+S now offer Overwrite, Save as…, and Cancel for TIFFs. Keyboard navigation
+is halved from the previous setting: 300 instead of 600, yielding 270 CSS pixels
+per native tap. The frontend's 37 tests, production build and formatting pass.
+
+Rust coverage includes authorized same-path replacement in classic TIFF and
+BigTIFF, both byte orders, retained permissions, symlink targets, read-only
+destinations, failed rename cleanup, and the classic TIFF 4 GiB offset limit.
+New Save-as files use normal creation permissions even when the source is
+read-only. Stable per-image ROI metadata references prevent later overwrites
+from attaching the wrong metadata after deletion or reordering.
+
+All 97 TIFFs from manual_counting_pascal/tiffs passed actual backend load,
+annotation addition, same-path save, reopen, deletion/reordering/editing and a
+second overwrite on disposable copies. The first save retained every original
+byte except the first-IFD pointer and appended annotation metadata. Every
+original's SHA-256, size and modification time matched before and after testing.
+No format-specific failure was found in that set.
+
+All 24 Rust tests, strict Clippy, rustfmt and the installed ImageJ interoperability
+script pass. Native desktop checks verified Save/Ctrl+S, Overwrite without a
+picker, Save-as destination recall, cancellation and write-failure dirty-state
+retention, and both dialog themes. Repeated native overwrites after deleting an
+imported point overlay retained calibration, Info, ROI names/properties and a
+rectangle overlay; ImageJ independently verified exact pixels and edited points.
+
+PNG saving created the matching sibling TIFF directly and prompted on an
+existing destination. The original PNG hash and decoded pixels stayed unchanged.
+A disposable copy of 1321_BLA_20X_DAPI_-1.16_bottom_left_512px.tif was opened,
+annotated, overwritten through the dialog and reopened with its new point and
+identical decoded pixels. Native Escape, Tab and Space operated the dialog while
+the cursor remained over the viewer. The source file hash remained unchanged.
+The native filename-picker response was supplied by the test harness; native
+filename entry itself was not automated. Ignored screenshots include
+test-data/save-choice-{light,dark}.native.png and
+test-data/save-real-copy-reopened.native.png.

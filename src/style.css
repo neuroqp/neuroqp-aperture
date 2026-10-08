@@ -364,6 +364,49 @@ svg {
   background: var(--soft);
   color: var(--accent-ink);
 }
+#save-dialog {
+  width: min(420px, calc(100vw - 32px));
+  padding: 18px;
+  border: 1px solid var(--field-border);
+  border-radius: 8px;
+  color: var(--ink);
+  background: var(--panel);
+  box-shadow: 0 6px 24px var(--shadow);
+  font: inherit;
+  line-height: 1.5;
+}
+#save-dialog::backdrop {
+  background: #19161e70;
+}
+#save-dialog h2 {
+  margin: 0;
+  color: var(--accent-ink);
+  font-size: 14px;
+}
+.save-target {
+  padding: 8px 10px;
+  border: 1px solid var(--line);
+  border-radius: 4px;
+  color: var(--muted);
+  background: var(--paper);
+  overflow-wrap: anywhere;
+}
+.save-actions {
+  display: flex;
+  flex-wrap: wrap;
+  justify-content: flex-end;
+  gap: 8px;
+  margin-top: 18px;
+}
+.save-actions .file-button {
+  height: 30px;
+  padding: 0 12px;
+}
+.save-primary {
+  color: var(--accent-ink);
+  background: var(--soft);
+  border-color: var(--accent);
+}
 /* Right-anchored row; wraps only when another panel cannot fit. */
 #tool-panels {
   position: absolute;

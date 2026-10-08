@@ -22,7 +22,7 @@ fn cancel_load(backend: State<'_, Backend>) {
     backend.cancel();
 }
 
-fn annotation_source(backend: &Backend, id: &str) -> Result<std::path::PathBuf, String> {
+fn annotation_job(backend: &Backend, id: &str) -> Result<std::sync::Arc<backend::Job>, String> {
     let job = backend
         .current
         .lock()
@@ -32,7 +32,41 @@ fn annotation_source(backend: &Backend, id: &str) -> Result<std::path::PathBuf, 
     if job.state.lock().unwrap().id != id {
         return Err("The image has changed".into());
     }
-    Ok(job.source.clone())
+    Ok(job)
+}
+
+#[derive(serde::Serialize)]
+#[serde(rename_all = "camelCase")]
+struct AnnotationTarget {
+    path: String,
+    exists: bool,
+    is_tiff: bool,
+}
+
+#[tauri::command]
+async fn annotation_target(
+    id: String,
+    path: Option<String>,
+    backend: State<'_, Backend>,
+) -> Result<AnnotationTarget, String> {
+    let job = annotation_job(&backend, &id)?;
+    tauri::async_runtime::spawn_blocking(move || {
+        let is_tiff = annotation_io::is_tiff(&job.source)?;
+        let target = path.map(std::path::PathBuf::from).unwrap_or_else(|| {
+            if is_tiff {
+                job.source.clone()
+            } else {
+                job.source.with_extension("tif")
+            }
+        });
+        Ok(AnnotationTarget {
+            exists: std::fs::symlink_metadata(&target).is_ok(),
+            path: target.to_string_lossy().into_owned(),
+            is_tiff,
+        })
+    })
+    .await
+    .map_err(|e| e.to_string())?
 }
 
 #[tauri::command]
@@ -40,10 +74,16 @@ async fn load_annotations(
     id: String,
     backend: State<'_, Backend>,
 ) -> Result<Vec<roi::PointRoi>, String> {
-    let source = annotation_source(&backend, &id)?;
-    tauri::async_runtime::spawn_blocking(move || annotation_io::load(&source))
-        .await
-        .map_err(|e| e.to_string())?
+    let job = annotation_job(&backend, &id)?;
+    tauri::async_runtime::spawn_blocking(move || {
+        let mut annotations = job.annotations.lock().unwrap();
+        if annotations.is_none() {
+            *annotations = Some(annotation_io::load(&job.source)?);
+        }
+        Ok(annotations.as_ref().unwrap().clone())
+    })
+    .await
+    .map_err(|e| e.to_string())?
 }
 
 #[tauri::command]
@@ -51,11 +91,24 @@ async fn save_annotations(
     id: String,
     path: String,
     rois: Vec<roi::PointRoi>,
+    overwrite: bool,
     backend: State<'_, Backend>,
 ) -> Result<(), String> {
-    let source = annotation_source(&backend, &id)?;
+    let job = annotation_job(&backend, &id)?;
     tauri::async_runtime::spawn_blocking(move || {
-        annotation_io::save(&source, std::path::Path::new(&path), rois)
+        // Serialize saves and keep sourceIndex stable even after deleting or
+        // splitting groups in a previous overwrite of this image.
+        let mut annotations = job.annotations.lock().unwrap();
+        if annotations.is_none() {
+            *annotations = Some(annotation_io::load(&job.source)?);
+        }
+        annotation_io::save(
+            &job.source,
+            std::path::Path::new(&path),
+            rois,
+            annotations.as_ref().unwrap(),
+            overwrite,
+        )
     })
     .await
     .map_err(|e| e.to_string())?
@@ -80,6 +133,7 @@ fn main() {
             image_state,
             cancel_load,
             load_annotations,
+            annotation_target,
             save_annotations
         ])
         .register_asynchronous_uri_scheme_protocol("aperture", |context, request, responder| {
