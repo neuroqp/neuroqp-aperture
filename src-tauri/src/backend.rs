@@ -333,7 +333,10 @@ fn load(job: &Arc<Job>) -> Result<(), String> {
         return Err("Loading cancelled.".into());
     }
     let complete = job.root.join(&job.cache_key);
-    if complete.join("complete").is_file() && complete.join("preview.jpg").is_file() {
+    if complete.join("complete").is_file()
+        && complete.join("preview.jpg").is_file()
+        && (!job.native.lock().unwrap().is_empty() || complete.join("tiles_files").is_dir())
+    {
         fs::write(complete.join("access"), b"").map_err(|e| e.to_string())?;
         *job.dir.lock().unwrap() = complete;
         job.update(|s| {
@@ -506,12 +509,12 @@ pub(crate) fn run(job: &Job, program: &str, args: &[OsString]) -> Result<String,
         .take(65536)
         .read_to_string(&mut output)
         .map_err(|e| e.to_string())?;
-    let mut errors = String::new();
-    File::open(&stderr_path)
-        .map_err(|e| e.to_string())?
-        .take(8192)
-        .read_to_string(&mut errors)
-        .map_err(|e| e.to_string())?;
+    if !status.success() {
+        eprintln!("{program} exited with {status}:");
+        if let Ok(mut errors) = File::open(&stderr_path) {
+            let _ = std::io::copy(&mut errors, &mut std::io::stderr().lock());
+        }
+    }
     let _ = fs::remove_file(stdout_path);
     let _ = fs::remove_file(stderr_path);
     if tree_size(&job.root) > CACHE_LIMIT {
@@ -520,10 +523,7 @@ pub(crate) fn run(job: &Job, program: &str, args: &[OsString]) -> Result<String,
     if status.success() {
         Ok(output)
     } else {
-        Err(format!(
-            "{program} could not decode this image: {}",
-            errors.trim()
-        ))
+        Err("Could not read this image. It may be damaged or use an unsupported format.".into())
     }
 }
 
@@ -790,6 +790,14 @@ mod tests {
                 thread::sleep(Duration::from_millis(20));
             }
         };
+        let corrupt = Path::new(env!("CARGO_MANIFEST_DIR")).join("../tests/fixtures/corrupt.tif");
+        backend.open(&corrupt).unwrap();
+        let failed = wait();
+        assert_eq!(failed.phase, "error");
+        assert_eq!(
+            failed.error.as_deref(),
+            Some("Could not read this image. It may be damaged or use an unsupported format.")
+        );
         let first = backend.open(&fixture).unwrap();
         let state = wait();
         assert_eq!(state.phase, "ready", "{:?}", state);
@@ -805,6 +813,23 @@ mod tests {
         )
         .unwrap();
         assert!(bytes.starts_with(&[255, 216]));
+        // A native-only cache cannot satisfy generated tiles when native
+        // metadata support disappears after changing the installed tools.
+        fs::remove_dir_all(job.dir.lock().unwrap().join("tiles_files")).unwrap();
+        backend.open(&fixture).unwrap();
+        let rebuilt = wait();
+        assert_eq!(rebuilt.phase, "ready");
+        assert!(!rebuilt.detail.contains("Reused"));
+        let rebuilt_job = backend.current.lock().unwrap().clone().unwrap();
+        assert!(read_asset(
+            &rebuilt_job,
+            Asset::Tile {
+                level: 7,
+                x: 0,
+                y: 0
+            }
+        )
+        .is_ok());
         let second = backend.open(&fixture).unwrap();
         assert_ne!(first.id, second.id);
         let state = wait();

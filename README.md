@@ -19,7 +19,7 @@ On Ubuntu 24.04:
 
 ```sh
 sudo apt-get install build-essential libgtk-3-dev libwebkit2gtk-4.1-dev \
-  libayatana-appindicator3-dev librsvg2-dev libvips-tools
+  libayatana-appindicator3-dev librsvg2-dev libvips-tools libtiff-tools
 ```
 
 ```sh
@@ -95,8 +95,9 @@ and focus while running. Results and screenshots stay in ignored `test-data/`.
   reused, old entries are evicted, and generation stops when its 2 GiB soft disk
   limit is reached. libvips cache settings limit working storage but are not a
   hard process-memory ceiling.
-- Existing tiled TIFF pyramids can be read on demand. Optional `tiffinfo` from
-  libtiff tools enables recognition of pyramids stored as separate TIFF pages;
+- Existing tiled TIFF pyramids can be read on demand. `tiffinfo` from libtiff
+  tools enables recognition of pyramids stored as separate TIFF pages and supplies
+  tile-layout metadata for libvips versions before 8.18. With libvips 8.18 or newer,
   SubIFD pyramids do not require it.
 - Hundreds-of-GB images remain a future scale target. Initial validation uses
   locally available images, including multi-GB TIFFs.

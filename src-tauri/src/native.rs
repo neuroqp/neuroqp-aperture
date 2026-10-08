@@ -16,13 +16,16 @@ fn number(header: &str, key: &str) -> Option<u32> {
     field(header, key)?.parse().ok()
 }
 
-fn level(header: &str, options: String) -> Option<NativeLevel> {
+fn level(header: &str, options: String, tiled_fallback: bool) -> Option<NativeLevel> {
     let width = number(header, "width")?;
     let height = number(header, "height")?;
     if width == 0
         || height == 0
-        || number(header, "tile-width").unwrap_or(0) == 0
-        || number(header, "tile-height").unwrap_or(0) == 0
+        || !match (number(header, "tile-width"), number(header, "tile-height")) {
+            (Some(width), Some(height)) => width > 0 && height > 0,
+            (None, None) => tiled_fallback,
+            _ => false,
+        }
     {
         return None;
     }
@@ -43,6 +46,46 @@ fn reduced(base: &NativeLevel, candidate: &NativeLevel) -> bool {
             && (base.width / factor..=base.width.div_ceil(factor)).contains(&candidate.width)
             && (base.height / factor..=base.height.div_ceil(factor)).contains(&candidate.height)
     })
+}
+
+// libvips before 8.18 omits tile dimensions in vipsheader. libtiff's metadata
+// report supplies layout without pixel decoding; never infer tiled layout from
+// reduced dimensions alone. Only the first descriptor of each SubIFD chain maps
+// to libvips' subifd array index.
+fn tiled_directories(info: &str) -> Vec<(u32, Option<u32>)> {
+    let mut page = None;
+    let mut directory = None;
+    let mut tiled = Vec::new();
+    for line in info.lines().map(str::trim) {
+        if let Some(rest) = line.strip_prefix("=== TIFF directory ") {
+            page = rest
+                .split_whitespace()
+                .next()
+                .and_then(|value| value.parse().ok());
+            directory = page.map(|page| (page, None));
+        } else if let Some(rest) = line.strip_prefix("--- SubIFD ") {
+            let words: Vec<_> = rest.split_whitespace().collect();
+            if words.len() >= 5 && words[1] == "of" && words[2] == "chain" {
+                directory = if words[0] == "0" {
+                    words[3]
+                        .parse()
+                        .ok()
+                        .and_then(|subifd| page.map(|page| (page, Some(subifd))))
+                } else {
+                    None
+                };
+            }
+        } else if let Some(rest) = line.strip_prefix("Tile Width: ") {
+            if let Some((width, height)) = rest.split_once(" Tile Length: ") {
+                if width.parse::<u32>().unwrap_or(0) > 0 && height.parse::<u32>().unwrap_or(0) > 0 {
+                    if let Some(directory) = directory {
+                        tiled.push(directory);
+                    }
+                }
+            }
+        }
+    }
+    tiled
 }
 
 // TIFF page numbers carry no scene/channel meaning. Only pages explicitly marked
@@ -79,14 +122,24 @@ pub fn discover(
     if field(header, "vips-loader") != Some("tiffload") {
         return Vec::new();
     }
-    let Some(base) = level(header, "[page=0,n=1,access=random]".into()) else {
+    let tiled = tiled_directories(tiffinfo.unwrap_or(""));
+    let Some(base) = level(
+        header,
+        "[page=0,n=1,access=random]".into(),
+        tiled.contains(&(0, None)),
+    ) else {
         return Vec::new();
     };
     let mut levels = vec![base.clone()];
     let subifds = number(header, "n-subifds").unwrap_or(0);
     let options: Vec<_> = if (1..=28).contains(&subifds) {
         (0..subifds)
-            .map(|index| format!("[page=0,n=1,subifd={index},access=random]"))
+            .map(|index| {
+                (
+                    format!("[page=0,n=1,subifd={index},access=random]"),
+                    (0, Some(index)),
+                )
+            })
             .collect()
     } else {
         let count = number(header, "n-pages").unwrap_or(1);
@@ -95,10 +148,10 @@ pub fn discover(
         reduced_pages(tiffinfo.unwrap_or(""))
             .into_iter()
             .filter(|index| *index < count.min(256))
-            .map(|index| format!("[page={index},n=1,access=random]"))
+            .map(|index| (format!("[page={index},n=1,access=random]"), (index, None)))
             .collect()
     };
-    for options in options {
+    for (options, directory) in options {
         let Ok(candidate_header) = inspect(&options) else {
             continue;
         };
@@ -110,7 +163,7 @@ pub fn discover(
         {
             continue;
         }
-        let Some(candidate) = level(&candidate_header, options) else {
+        let Some(candidate) = level(&candidate_header, options, tiled.contains(&directory)) else {
             continue;
         };
         if reduced(&base, &candidate)
@@ -156,6 +209,34 @@ mod tests {
         assert!(levels[1].options.contains("subifd=0"));
     }
 
+    #[test]
+    fn older_vips_requires_explicit_tiff_layout_metadata() {
+        let without_tiles = |width, height, extra| {
+            header(width, height, extra).replace("tile-width: 16\ntile-height: 16\n", "")
+        };
+        let base = without_tiles(129, 97, "n-subifds: 2\n");
+        let inspect = |options: &str| {
+            Ok(if options.contains("subifd=0") {
+                without_tiles(65, 49, "")
+            } else {
+                without_tiles(33, 25, "")
+            })
+        };
+        let info="=== TIFF directory 0 ===\n  Tile Width: 16 Tile Length: 16\n--- SubIFD image descriptor tag within TIFF directory 0 with array of 2 SubIFD chains ---\n--- SubIFD 0 of chain 0 at offset 0x10 (16):\n  Tile Width: 16 Tile Length: 16\n--- SubIFD 1 of chain 0 at offset 0x20 (32):\n  Tile Width: 16 Tile Length: 16\n--- SubIFD 0 of chain 1 at offset 0x30 (48):\n  Rows/Strip: 25\n";
+        assert!(discover(&base, &inspect, None).is_empty());
+        let levels = discover(&base, &inspect, Some(info));
+        assert_eq!(levels.len(), 2);
+        assert_eq!(levels[1].width, 65);
+        assert!(discover(
+            &base.replace(
+                "n-subifds: 2",
+                "tile-width: 0\ntile-height: 0\nn-subifds: 2"
+            ),
+            &inspect,
+            Some(info)
+        )
+        .is_empty());
+    }
     #[test]
     fn ordinary_pages_are_not_pyramids_even_when_smaller() {
         let base = header(128, 96, "n-pages: 3\n");
