@@ -45,7 +45,7 @@ export const toolPanels = `
       <div class="range-labels"><span id="range-minimum">0</span><span id="range-maximum">255</span></div>
       ${slider("minimum", "Minimum", 0, 254)}
       ${slider("maximum", "Maximum", 1, 255)}
-      <footer class="panel-footer display-presets">${[0.1, 0.5, 1].map((tail) => `<button class="text-button percentile-button" data-percentile="${tail}" title="Set display range to the ${tail}–${100 - tail} percentiles" disabled>${tail}–${100 - tail}</button>`).join("")}<button id="reset-display" class="text-button" type="button">${icon("reset")}Reset</button></footer>
+      <footer class="panel-footer display-presets">${[0, 0.1, 0.5, 1].map((tail) => `<button class="text-button percentile-button" data-percentile="${tail}" title="${tail === 0 ? "Set display range to the sampled image minimum and maximum" : `Set display range to the ${tail}–${100 - tail} percentiles`}" disabled>${tail}–${100 - tail}</button>`).join("")}<button id="reset-display" class="text-button" type="button">${icon("reset")}Reset</button></footer>
     </section>
     <section id="points-panel" class="tool-panel" aria-labelledby="points-title" hidden>
       <header class="panel-heading">

@@ -58,7 +58,7 @@ Two thin horizontal header bars sit above the image viewer.
    neutral background, preserve its aspect ratio, and support smooth pan and
    zoom. Use nearest-neighbor scaling so magnified pixels have sharp boundaries.
    Fit the image to the available space when first opened. WASD and arrow keys
-   pan at three times OpenSeadragon's default speed and tap distance.
+   pan at fifteen times OpenSeadragon's default speed and tap distance.
 
 Open selects a local image and replaces the current image. Save creates a
 separate annotated TIFF copy with ImageJ ROI metadata; never overwrite the
@@ -76,7 +76,9 @@ discarding unsaved annotations on Open or Close. Ctrl+S opens Save.
   Minimum and Maximum sliders with labels on the left and values on the right.
   Adjust the displayed image live without modifying source pixels or cached tiles.
   Show vertical cutoff lines at the selected minimum and maximum.
-  Provide percentile presets 0.1–99.9, 0.5–99.5, and 1–99 beside Reset.
+  Provide percentile presets 0–100, 0.1–99.9, 0.5–99.5, and 1–99 beside Reset.
+  The 0–100 preset uses the sampled histogram's occupied minimum and maximum;
+  Reset restores the full 0–255 display range.
   The histogram defaults to linear counts. A Linear/Log toggle overlays its
   upper-right corner on hover or keyboard focus and changes only histogram heights.
   Use the current 8-bit display preview domain, not original high-bit-depth values.

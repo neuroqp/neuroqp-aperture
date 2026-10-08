@@ -94,7 +94,7 @@ const viewer = OpenSeadragon({
   visibilityRatio: 0.2,
   constrainDuringPan: false,
   maxZoomPixelRatio: 4,
-  pixelsPerArrowPress: 120,
+  pixelsPerArrowPress: 600,
   gestureSettingsMouse: { clickToZoom: false, dblClickToZoom: true },
 });
 

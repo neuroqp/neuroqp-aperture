@@ -107,7 +107,8 @@ No microscopy source files are modified.
   ImageJ point selections and overlays remain editable annotations.
 - Display-range sliders and percentile presets adjust only
   the displayed image. The approximate histogram samples the 8-bit preview, with
-  linear counts by default and an optional Log toggle on hover. Original images
+  linear counts by default and an optional Log toggle on hover. The 0–100 preset
+  uses the sampled minimum and maximum; Reset restores 0–255. Original images
   and cached tiles stay unchanged.
 - TIFF copies preserve their original layout. Stock ImageJ cannot directly open
   all tiled TIFFs or BigTIFFs; those need a suitable image reader. Other formats
@@ -120,7 +121,7 @@ No microscopy source files are modified.
   0 to 99. In multi-point mode, mouse-down or E adds a point at the cursor,
   dragging an existing point moves it, and Alt-click removes it. The hit radius
   is five screen pixels regardless of marker size. Hold Space or Ctrl to
-  temporarily pan without leaving the tool; WASD/arrows move at three times
+  temporarily pan without leaving the tool; WASD/arrows move at fifteen times
   the viewer's default speed. The panel header's help explains the controls.
   Saved ROIs use ImageJ's active selection and overlays.
 - Multi-page images display their first page. Specialist microscopy metadata,

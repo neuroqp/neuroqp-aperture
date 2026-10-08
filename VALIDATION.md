@@ -295,3 +295,16 @@ help while retaining the panel. T3 browser checks additionally cover keyboard
 focus, outside dismissal and scrollable help at 640 by 320. Local screenshots
 remain ignored under test-data/multipoint-header-help-{light,dark}.native.png.
 No backend code or source images changed in this follow-up.
+
+## Faster keyboard panning and full sampled intensity range
+
+Thirty-seven frontend tests pass, including 0–100 histogram endpoints with rare
+extremes, uniform images and empty histograms. Production build and formatting
+pass. Native ArrowRight/D and ArrowUp/W taps now move 540 CSS pixels, five times
+the previous 108, with the navigation setting increased from 120 to 600.
+
+A generated RGB gradient spanning 40–180 verified that 0–100 selects Minimum 40
+and Maximum 180 and updates the display filter. Reset restores 0–255 and the
+identity filter. The source file hash remains unchanged. All five footer buttons
+fit on one row inside the panel in both themes. Local screenshots remain ignored
+under test-data/brightness-full-sampled-{light,dark}.native.png.
