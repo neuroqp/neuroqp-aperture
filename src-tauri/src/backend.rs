@@ -1,0 +1,909 @@
+use crate::native::{self, NativeLevel};
+use serde::Serialize;
+use std::{
+    collections::hash_map::DefaultHasher,
+    ffi::OsString,
+    fs::{self, File},
+    hash::{Hash, Hasher},
+    io::Read,
+    path::{Path, PathBuf},
+    process::{Command, Stdio},
+    sync::{
+        atomic::{AtomicBool, AtomicU64, Ordering},
+        Arc, Mutex,
+    },
+    thread,
+    time::{Duration, SystemTime, UNIX_EPOCH},
+};
+
+pub const CACHE_LIMIT: u64 = 2 * 1024 * 1024 * 1024;
+const TILE_SIZE: u32 = 256;
+static NEXT_ID: AtomicU64 = AtomicU64::new(1);
+
+#[derive(Clone, Debug, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ImageState {
+    pub id: String,
+    pub name: String,
+    pub width: u32,
+    pub height: u32,
+    pub orientation: u8,
+    pub phase: String,
+    pub preview_ready: bool,
+    pub tiles_ready: bool,
+    pub progress: Option<f64>,
+    pub error: Option<String>,
+    pub detail: String,
+}
+
+pub struct Job {
+    pub state: Mutex<ImageState>,
+    pub cancel: AtomicBool,
+    pub dir: Mutex<PathBuf>,
+    pub input: PathBuf,
+    work: PathBuf,
+    pub native: Mutex<Vec<NativeLevel>>,
+    root: PathBuf,
+    cache_key: String,
+    process_number: AtomicU64,
+}
+
+pub struct Backend {
+    pub current: Mutex<Option<Arc<Job>>>,
+    root: PathBuf,
+    workers: Mutex<Vec<thread::JoinHandle<()>>>,
+    pub requests: AtomicU64,
+    pub closing: AtomicBool,
+    pub tile_slots: Arc<tokio::sync::Semaphore>,
+}
+
+impl Backend {
+    pub fn new(root: PathBuf) -> Result<Self, String> {
+        fs::create_dir_all(&root).map_err(|e| e.to_string())?;
+        // Snapshot stale work at startup; deletion runs off the window thread.
+        let stale: Vec<_> = fs::read_dir(&root)
+            .map_err(|e| e.to_string())?
+            .flatten()
+            .filter(|entry| {
+                let name = entry.file_name();
+                let name = name.to_string_lossy();
+                name.starts_with("work-") || name.starts_with("promote-")
+            })
+            .map(|entry| entry.path())
+            .collect();
+        let cleanup = thread::spawn(move || {
+            for path in stale {
+                let _ = fs::remove_dir_all(path);
+            }
+        });
+        Ok(Self {
+            current: Mutex::new(None),
+            root,
+            workers: Mutex::new(vec![cleanup]),
+            closing: AtomicBool::new(false),
+            requests: AtomicU64::new(0),
+            tile_slots: Arc::new(tokio::sync::Semaphore::new(2)),
+        })
+    }
+
+    pub fn open(&self, path: &Path) -> Result<ImageState, String> {
+        if self.closing.load(Ordering::Relaxed) {
+            return Err("Viewer shutting down.".into());
+        }
+        let source = fs::canonicalize(path).map_err(|e| format!("Cannot open image: {e}"))?;
+        let metadata = fs::metadata(&source).map_err(|e| e.to_string())?;
+        if !metadata.is_file() {
+            return Err("Choose a regular image file.".into());
+        }
+        let extension = source
+            .extension()
+            .and_then(|s| s.to_str())
+            .unwrap_or("")
+            .to_ascii_lowercase();
+        if !matches!(
+            extension.as_str(),
+            "jpg" | "jpeg" | "png" | "bmp" | "tif" | "tiff" | "webp"
+        ) {
+            return Err("Supported formats: JPEG, PNG, BMP, WebP, TIFF and BigTIFF.".into());
+        }
+        let mut hasher = DefaultHasher::new();
+        "aperture-display-v2".hash(&mut hasher);
+        source.hash(&mut hasher);
+        metadata.len().hash(&mut hasher);
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::MetadataExt;
+            (
+                metadata.dev(),
+                metadata.ino(),
+                metadata.ctime(),
+                metadata.ctime_nsec(),
+            )
+                .hash(&mut hasher);
+        }
+        metadata
+            .modified()
+            .map_err(|e| e.to_string())?
+            .hash(&mut hasher);
+        let cache_key = format!("{:016x}", hasher.finish());
+        let id = format!(
+            "{}-{}",
+            SystemTime::now()
+                .duration_since(UNIX_EPOCH)
+                .unwrap_or_default()
+                .as_nanos(),
+            NEXT_ID.fetch_add(1, Ordering::Relaxed)
+        );
+        let dir = self.root.join(format!("work-{id}"));
+        fs::create_dir(&dir).map_err(|e| e.to_string())?;
+        fs::create_dir(dir.join("tmp")).map_err(|e| e.to_string())?;
+        let input = dir.join(format!("source.{extension}"));
+        // Loader options use brackets, so never pass a user filename to libvips.
+        #[cfg(unix)]
+        std::os::unix::fs::symlink(&source, &input).map_err(|e| e.to_string())?;
+        #[cfg(not(unix))]
+        return Err("This proof of concept currently supports Linux only.".into());
+        let initial = ImageState {
+            id,
+            name: path
+                .file_name()
+                .unwrap_or(source.file_name().unwrap())
+                .to_string_lossy()
+                .into_owned(),
+            width: 0,
+            height: 0,
+            orientation: 1,
+            phase: "loading".into(),
+            preview_ready: false,
+            tiles_ready: false,
+            progress: None,
+            error: None,
+            detail: "Reading image metadata…".into(),
+        };
+        let job = Arc::new(Job {
+            state: Mutex::new(initial.clone()),
+            cancel: AtomicBool::new(false),
+            dir: Mutex::new(dir.clone()),
+            input,
+            work: dir,
+            native: Mutex::new(Vec::new()),
+            root: self.root.clone(),
+            cache_key,
+            process_number: AtomicU64::new(0),
+        });
+        let mut current = self.current.lock().unwrap();
+        if let Some(old) = current.replace(job.clone()) {
+            old.cancel();
+        }
+        drop(current);
+        let mut workers = self.workers.lock().unwrap();
+        workers.retain(|worker| !worker.is_finished());
+        workers.push(thread::spawn(move || {
+            if let Err(error) = load(&job) {
+                let mut state = job.state.lock().unwrap();
+                if !job.cancel.load(Ordering::Relaxed) {
+                    state.phase = "error".into();
+                    state.error = Some(error);
+                    state.detail = "Image loading failed.".into();
+                }
+            }
+            if job.cancel.load(Ordering::Relaxed) || job.state.lock().unwrap().phase == "error" {
+                let dir = job.dir.lock().unwrap().clone();
+                if dir
+                    .file_name()
+                    .unwrap()
+                    .to_string_lossy()
+                    .starts_with("work-")
+                {
+                    let _ = fs::remove_dir_all(dir);
+                }
+            }
+        }));
+        Ok(initial)
+    }
+
+    pub fn snapshot(&self) -> Option<ImageState> {
+        self.current
+            .lock()
+            .unwrap()
+            .as_ref()
+            .map(|job| job.state.lock().unwrap().clone())
+    }
+    pub fn cancel(&self) {
+        if let Some(job) = self.current.lock().unwrap().as_ref() {
+            job.cancel();
+        }
+    }
+    pub fn shutdown(&self) {
+        self.closing.store(true, Ordering::Relaxed);
+        self.cancel();
+        for worker in self.workers.lock().unwrap().drain(..) {
+            let _ = worker.join();
+        }
+        while self.requests.load(Ordering::Relaxed) != 0 {
+            thread::sleep(Duration::from_millis(20));
+        }
+    }
+}
+
+impl Job {
+    fn cancel(&self) {
+        self.cancel.store(true, Ordering::Relaxed);
+        let mut state = self.state.lock().unwrap();
+        state.phase = "cancelled".into();
+        state.detail = "Loading cancelled.".into();
+        state.progress = None;
+    }
+    fn update(&self, action: impl FnOnce(&mut ImageState)) {
+        let mut state = self.state.lock().unwrap();
+        if !self.cancel.load(Ordering::Relaxed) {
+            action(&mut state);
+        }
+    }
+}
+
+impl Drop for Job {
+    fn drop(&mut self) {
+        let _ = fs::remove_dir_all(&self.work);
+    }
+}
+
+pub fn field<'a>(header: &'a str, name: &str) -> Option<&'a str> {
+    header
+        .lines()
+        .find_map(|line| line.strip_prefix(&format!("{name}: ")))
+}
+
+fn dimensions(header: &str) -> Result<(u32, u32), String> {
+    let width = field(header, "width")
+        .and_then(|s| s.parse().ok())
+        .unwrap_or(0);
+    let height = field(header, "height")
+        .and_then(|s| s.parse().ok())
+        .unwrap_or(0);
+    if width == 0 || height == 0 || width > i32::MAX as u32 || height > i32::MAX as u32 {
+        return Err("Invalid or unsupported image dimensions.".into());
+    }
+    Ok((width, height))
+}
+
+fn validate_header(header: &str) -> Result<(u32, u32), String> {
+    let dims = dimensions(header)?;
+    if !matches!(field(header, "format"), Some("uchar" | "ushort"))
+        || !matches!(field(header, "bands"), Some("1" | "3" | "4"))
+    {
+        return Err("Supported pixels: unsigned 8/16-bit grayscale, RGB and RGBA. Signed, floating-point, and other channel counts are not supported.".into());
+    }
+    if !matches!(
+        field(header, "vips-loader"),
+        Some("jpegload" | "pngload" | "tiffload" | "magickload" | "bmp2vips" | "webpload")
+    ) {
+        return Err("This file does not decode as a supported image format.".into());
+    }
+    if field(header, "vips-loader") == Some("magickload")
+        && !field(header, "magick-format")
+            .unwrap_or("")
+            .starts_with("BMP")
+    {
+        return Err("Only BMP is supported through ImageMagick's decoder.".into());
+    }
+    if !matches!(
+        field(header, "interpretation"),
+        Some("b-w" | "grey16" | "srgb" | "rgb" | "rgb16")
+    ) {
+        return Err("Supported color interpretations: grayscale, RGB and sRGB. Convert other color spaces before opening.".into());
+    }
+    Ok(dims)
+}
+
+fn input(job: &Job, options: &str) -> OsString {
+    OsString::from(format!("{}{}", job.input.display(), options))
+}
+
+fn load(job: &Arc<Job>) -> Result<(), String> {
+    prune(&job.root, CACHE_LIMIT)?;
+    let header = run(job, "vipsheader", &["-a".into(), input(job, "")])?;
+    let (width, height) = validate_header(&header)?;
+    let pages = field(&header, "n-pages").unwrap_or("1");
+    let pixel = field(&header, "format").unwrap_or("uchar");
+    job.update(|state| {
+        state.width = width;
+        state.height = height;
+        state.orientation = field(&header, "orientation")
+            .and_then(|s| s.parse().ok())
+            .filter(|n| (1..=8).contains(n))
+            .unwrap_or(1);
+        state.detail = format!(
+            "{width} × {height} · {}-bit · first image page of {pages}. Building preview…",
+            if pixel == "ushort" { 16 } else { 8 }
+        );
+    });
+    let tiffinfo = if field(&header, "vips-loader") == Some("tiffload") {
+        run(job, "tiffinfo", &[job.input.clone().into_os_string()]).ok()
+    } else {
+        None
+    };
+    let levels = native::discover(
+        &header,
+        &|options| run(job, "vipsheader", &["-a".into(), input(job, options)]),
+        tiffinfo.as_deref(),
+    );
+    *job.native.lock().unwrap() = levels;
+    if job.cancel.load(Ordering::Relaxed) {
+        return Err("Loading cancelled.".into());
+    }
+    let complete = job.root.join(&job.cache_key);
+    if complete.join("complete").is_file() && complete.join("preview.jpg").is_file() {
+        fs::write(complete.join("access"), b"").map_err(|e| e.to_string())?;
+        *job.dir.lock().unwrap() = complete;
+        job.update(|s| {
+            s.phase = "ready".into();
+            s.preview_ready = true;
+            s.tiles_ready = true;
+            s.progress = Some(1.0);
+            s.detail = "Reused display cache. Source pixels unchanged.".into();
+        });
+        return Ok(());
+    }
+    prune(&job.root, CACHE_LIMIT / 2)?;
+    let dir = job.dir.lock().unwrap().clone();
+    let preview_partial = dir.join("preview.partial.jpg");
+    // Explicit TIFF page=0 prevents unrelated pages from entering the displayed scene.
+    // vips resize (rather than thumbnail) avoids automatic page-pyramid selection.
+    let scale = (1024.0 / width.max(height) as f64).min(1.0);
+    let options = if field(&header, "vips-loader") == Some("tiffload") {
+        "[page=0,n=1,access=sequential]"
+    } else {
+        "[access=sequential]"
+    };
+    let preview_input = {
+        let levels = job.native.lock().unwrap();
+        levels
+            .iter()
+            .find(|level| level.width.max(level.height) <= 1024)
+            .or_else(|| levels.last())
+            .cloned()
+    };
+    let (preview_options, preview_scale) = match preview_input {
+        Some(level) => (
+            level.options,
+            (1024.0 / level.width.max(level.height) as f64).min(1.0),
+        ),
+        None => (options.to_string(), scale),
+    };
+    run(
+        job,
+        "vips",
+        &[
+            "resize".into(),
+            input(job, &preview_options),
+            OsString::from(format!(
+                "{}[Q=85,strip,background=52 54 51]",
+                preview_partial.display()
+            )),
+            preview_scale.to_string().into(),
+        ],
+    )?;
+    fs::rename(preview_partial, dir.join("preview.jpg")).map_err(|e| e.to_string())?;
+    job.update(|s| {
+        s.preview_ready = true;
+        s.tiles_ready = true;
+        s.detail = "Preview available. Sharper tiles are loading…".into();
+    });
+    if job.native.lock().unwrap().is_empty() {
+        run(
+            job,
+            "vips",
+            &[
+                "dzsave".into(),
+                input(job, options),
+                dir.join("tiles").into_os_string(),
+                "--tile-size=256".into(),
+                "--overlap=0".into(),
+                "--suffix=.jpg[Q=85,strip,background=52 54 51]".into(),
+                "--background=52 54 51".into(),
+                "--depth=onepixel".into(),
+            ],
+        )?;
+    }
+    if job.cancel.load(Ordering::Relaxed) {
+        return Err("Loading cancelled.".into());
+    }
+    fs::write(dir.join("complete"), b"v2").map_err(|e| e.to_string())?;
+    fs::write(dir.join("access"), b"").map_err(|e| e.to_string())?;
+    // Keep a job-local source alias and temp directory for on-demand native tiles.
+    let staging = job
+        .root
+        .join(format!("promote-{}", job.state.lock().unwrap().id));
+    fs::create_dir(&staging).map_err(|e| e.to_string())?;
+    for name in [
+        "preview.jpg",
+        "complete",
+        "access",
+        "tiles_files",
+        "tiles.dzi",
+    ] {
+        let source = dir.join(name);
+        if source.exists() {
+            fs::rename(source, staging.join(name)).map_err(|e| e.to_string())?;
+        }
+    }
+    if complete.exists() {
+        fs::remove_dir_all(&complete).map_err(|e| e.to_string())?;
+    }
+    fs::rename(staging, &complete).map_err(|e| e.to_string())?;
+    *job.dir.lock().unwrap() = complete;
+    job.update(|s| {
+        s.phase = "ready".into();
+        s.progress = Some(1.0);
+        s.detail = if job.native.lock().unwrap().is_empty() {
+            "Display pyramid ready. Source pixels unchanged."
+        } else {
+            "Using existing TIFF pyramid; detail loads on demand."
+        }
+        .into();
+    });
+    Ok(())
+}
+
+// Each decode lives in a killable process. libvips' operation cache is bounded;
+// codec memory is not a hard RSS limit and should be measured on representative files.
+pub(crate) fn run(job: &Job, program: &str, args: &[OsString]) -> Result<String, String> {
+    if job.cancel.load(Ordering::Relaxed) {
+        return Err("Loading cancelled.".into());
+    }
+    let dir = job.work.clone();
+    let number = job.process_number.fetch_add(1, Ordering::Relaxed);
+    let stdout_path = dir.join(format!("stdout-{number}"));
+    let stderr_path = dir.join(format!("stderr-{number}"));
+    let stdout = File::create(&stdout_path).map_err(|e| e.to_string())?;
+    let stderr = File::create(&stderr_path).map_err(|e| e.to_string())?;
+    let mut command = Command::new(program);
+    command
+        .args(args)
+        .env("TMPDIR", dir.join("tmp"))
+        .env("VIPS_CONCURRENCY", "2");
+    if program == "vips" || program == "vipsheader" {
+        command.args([
+            "--vips-concurrency=2",
+            "--vips-cache-max=0",
+            "--vips-cache-max-memory=67108864",
+            "--vips-disc-threshold=32m",
+        ]);
+    }
+    let mut child = command.stdout(Stdio::from(stdout)).stderr(Stdio::from(stderr)).spawn().map_err(|e| format!("Cannot run {program}: {e}. Install libvips tools (and libtiff tools for existing page pyramids)."))?;
+    let mut ticks = 0;
+    let status = loop {
+        if job.cancel.load(Ordering::Relaxed) {
+            let _ = child.kill();
+            let _ = child.wait();
+            let _ = fs::remove_file(stdout_path);
+            let _ = fs::remove_file(stderr_path);
+            return Err("Loading cancelled.".into());
+        }
+        match child.try_wait() {
+            Ok(Some(status)) => break status,
+            Ok(None) => (),
+            Err(error) => {
+                let _ = child.kill();
+                let _ = child.wait();
+                return Err(error.to_string());
+            }
+        }
+        if ticks % 5 == 0 && tree_size(&job.root) > CACHE_LIMIT {
+            let _ = child.kill();
+            let _ = child.wait();
+            let _ = fs::remove_file(&stdout_path);
+            let _ = fs::remove_file(&stderr_path);
+            return Err("The 2 GiB display cache limit was reached. This image needs more temporary disk space than this proof of concept allows.".into());
+        }
+        ticks += 1;
+        thread::sleep(Duration::from_millis(100));
+    };
+    let mut output = String::new();
+    File::open(&stdout_path)
+        .map_err(|e| e.to_string())?
+        .take(65536)
+        .read_to_string(&mut output)
+        .map_err(|e| e.to_string())?;
+    let mut errors = String::new();
+    File::open(&stderr_path)
+        .map_err(|e| e.to_string())?
+        .take(8192)
+        .read_to_string(&mut errors)
+        .map_err(|e| e.to_string())?;
+    let _ = fs::remove_file(stdout_path);
+    let _ = fs::remove_file(stderr_path);
+    if tree_size(&job.root) > CACHE_LIMIT {
+        return Err("Display cache limit reached.".into());
+    }
+    if status.success() {
+        Ok(output)
+    } else {
+        Err(format!(
+            "{program} could not decode this image: {}",
+            errors.trim()
+        ))
+    }
+}
+
+pub fn max_level(width: u32, height: u32) -> u32 {
+    32 - width.max(height).saturating_sub(1).leading_zeros()
+}
+
+#[derive(Debug, PartialEq)]
+pub enum Asset {
+    Preview,
+    Tile { level: u32, x: u32, y: u32 },
+}
+
+pub fn asset(path: &str, id: &str, width: u32, height: u32) -> Option<Asset> {
+    let parts: Vec<_> = path.trim_start_matches('/').split('/').collect();
+    if parts.first().copied() != Some(id) {
+        return None;
+    }
+    if parts == [id, "preview.jpg"] {
+        return Some(Asset::Preview);
+    }
+    if parts.len() != 4 || parts[1] != "tiles" {
+        return None;
+    }
+    let level: u32 = parts[2].parse().ok()?;
+    let (x, y) = parts[3].strip_suffix(".jpg")?.split_once('_')?;
+    let (x, y): (u32, u32) = (x.parse().ok()?, y.parse().ok()?);
+    let max = max_level(width, height);
+    if width == 0 || height == 0 || level > max {
+        return None;
+    }
+    let factor = 1_u64 << (max - level);
+    let level_width = (width as u64).div_ceil(factor);
+    let level_height = (height as u64).div_ceil(factor);
+    if x as u64 >= level_width.div_ceil(TILE_SIZE as u64)
+        || y as u64 >= level_height.div_ceil(TILE_SIZE as u64)
+    {
+        return None;
+    }
+    Some(Asset::Tile { level, x, y })
+}
+
+pub fn read_asset(job: &Arc<Job>, asset: Asset) -> Result<Vec<u8>, (u16, String)> {
+    let deadline = std::time::Instant::now() + Duration::from_secs(600);
+    loop {
+        if job.cancel.load(Ordering::Relaxed) {
+            return Err((410, "Image replaced or cancelled.".into()));
+        }
+        let state = job.state.lock().unwrap().clone();
+        let dir = job.dir.lock().unwrap().clone();
+        let path = match asset {
+            Asset::Preview => dir.join("preview.jpg"),
+            Asset::Tile { level, x, y } => {
+                if !job.native.lock().unwrap().is_empty() {
+                    if state.phase == "error" {
+                        return Err((500, state.error.unwrap_or_default()));
+                    }
+                    return native_tile(job, level, x, y).map_err(|error| {
+                        job.update(|s| {
+                            s.phase = "error".into();
+                            s.error = Some(error.clone());
+                            s.detail = "Cannot load image detail.".into();
+                        });
+                        (500, error)
+                    });
+                }
+                dir.join("tiles_files")
+                    .join(level.to_string())
+                    .join(format!("{x}_{y}.jpg"))
+            }
+        };
+        if let Ok(bytes) = fs::read(path) {
+            // dzsave writes each tile directly; only expose complete JPEG streams.
+            if bytes.starts_with(&[0xff, 0xd8]) && bytes.ends_with(&[0xff, 0xd9]) {
+                return Ok(bytes);
+            }
+        }
+        if state.phase == "error" {
+            return Err((500, state.error.unwrap_or_default()));
+        }
+        if state.phase == "ready" {
+            return Err((404, "Tile unavailable.".into()));
+        }
+        if std::time::Instant::now() > deadline {
+            return Err((504, "Tile generation timed out.".into()));
+        }
+        thread::sleep(Duration::from_millis(100));
+    }
+}
+
+fn native_tile(job: &Job, level: u32, x: u32, y: u32) -> Result<Vec<u8>, String> {
+    let state = job.state.lock().unwrap().clone();
+    let max = max_level(state.width, state.height);
+    let factor = 1_u64 << (max - level);
+    let target_width = (state.width as u64).div_ceil(factor) as u32;
+    let target_height = (state.height as u64).div_ceil(factor) as u32;
+    let levels = job.native.lock().unwrap();
+    let source = levels
+        .iter()
+        .rev()
+        .find(|v| v.width >= target_width && v.height >= target_height)
+        .unwrap_or(&levels[0])
+        .clone();
+    drop(levels);
+    let dir = job.dir.lock().unwrap().clone();
+    let tiles = dir.join("native_tiles");
+    fs::create_dir_all(&tiles).map_err(|e| e.to_string())?;
+    let destination = tiles.join(format!("{level}-{x}-{y}.jpg"));
+    if let Ok(bytes) = fs::read(&destination) {
+        return Ok(bytes);
+    }
+    let number = job.process_number.fetch_add(1, Ordering::Relaxed);
+    let partial = job.work.join(format!("tile-{number}.partial.jpg"));
+    let tile_width = TILE_SIZE.min(target_width - x * TILE_SIZE);
+    let tile_height = TILE_SIZE.min(target_height - y * TILE_SIZE);
+    // Affine's output area keeps the global sampling grid and exact edge sizes.
+    // Demand-driven native TIFF loading reads the requested source region only.
+    let result = run(
+        job,
+        "vips",
+        &[
+            "affine".into(),
+            input(job, &source.options),
+            OsString::from(format!(
+                "{}[Q=85,strip,background=52 54 51]",
+                partial.display()
+            )),
+            format!(
+                "{} 0 0 {}",
+                target_width as f64 / source.width as f64,
+                target_height as f64 / source.height as f64
+            )
+            .into(),
+            format!(
+                "--oarea={} {} {} {}",
+                x * TILE_SIZE,
+                y * TILE_SIZE,
+                tile_width,
+                tile_height
+            )
+            .into(),
+            "--interpolate=bilinear".into(),
+            "--extend=copy".into(),
+        ],
+    );
+    if let Err(error) = result {
+        let _ = fs::remove_file(&partial);
+        return Err(error);
+    }
+    if job.cancel.load(Ordering::Relaxed) {
+        let _ = fs::remove_file(&partial);
+        return Err("Loading cancelled.".into());
+    }
+    if tree_size(&job.root) > CACHE_LIMIT {
+        let _ = fs::remove_file(&partial);
+        return Err("Display cache limit reached.".into());
+    }
+    fs::rename(&partial, &destination).map_err(|e| e.to_string())?;
+    fs::read(destination).map_err(|e| e.to_string())
+}
+
+fn tree_size(path: &Path) -> u64 {
+    let Ok(entries) = fs::read_dir(path) else {
+        return 0;
+    };
+    entries
+        .flatten()
+        .map(|entry| match entry.file_type() {
+            Ok(kind) if kind.is_symlink() => 0,
+            Ok(kind) if kind.is_dir() => tree_size(&entry.path()),
+            Ok(_) => entry.metadata().map(|m| m.len()).unwrap_or(0),
+            Err(_) => 0,
+        })
+        .sum()
+}
+
+fn prune(root: &Path, limit: u64) -> Result<(), String> {
+    let mut entries: Vec<_> = fs::read_dir(root)
+        .map_err(|e| e.to_string())?
+        .flatten()
+        .filter(|entry| {
+            entry.path().join("complete").is_file()
+                && !entry.file_name().to_string_lossy().starts_with("work-")
+        })
+        .collect();
+    entries.sort_by_key(|entry| {
+        fs::metadata(entry.path().join("access"))
+            .and_then(|m| m.modified())
+            .unwrap_or(UNIX_EPOCH)
+    });
+    let mut size = tree_size(root);
+    for entry in entries {
+        if size <= limit {
+            break;
+        }
+        let bytes = tree_size(&entry.path());
+        fs::remove_dir_all(entry.path()).map_err(|e| e.to_string())?;
+        size = size.saturating_sub(bytes);
+    }
+    Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    #[test]
+    fn tile_bounds_and_traversal() {
+        assert_eq!(max_level(65, 49), 7);
+        assert_eq!(max_level(1, 1), 0);
+        assert_eq!(
+            asset("/id/tiles/7/0_0.jpg", "id", 65, 49),
+            Some(Asset::Tile {
+                level: 7,
+                x: 0,
+                y: 0
+            })
+        );
+        for path in [
+            "/id/tiles/7/1_0.jpg",
+            "/id/tiles/8/0_0.jpg",
+            "/id/tiles/7/../source.jpg",
+            "/old/preview.jpg",
+            "/id/tiles/7/4294967295_0.jpg",
+        ] {
+            assert!(asset(path, "id", 65, 49).is_none(), "{path}");
+        }
+        assert_eq!(
+            asset("/id/tiles/0/0_0.jpg", "id", 65, 49),
+            Some(Asset::Tile {
+                level: 0,
+                x: 0,
+                y: 0
+            })
+        );
+    }
+    #[test]
+    fn reject_signed_float_and_multichannel() {
+        let header="width: 12\nheight: 13\nbands: 1\nformat: ushort\nvips-loader: tiffload\ninterpretation: grey16\n";
+        assert_eq!(validate_header(header).unwrap(), (12, 13));
+        assert!(validate_header(&header.replace("ushort", "float")).is_err());
+        assert!(validate_header(&header.replace("bands: 1", "bands: 5")).is_err());
+        assert!(validate_header(&header.replace("width: 12", "width: 0")).is_err());
+    }
+    #[test]
+    fn actual_decoder_cache_and_cancellation() {
+        if Command::new("vips").arg("--version").output().is_err() {
+            return;
+        }
+        let root = std::env::temp_dir().join(format!(
+            "aperture-test-{}",
+            NEXT_ID.fetch_add(1, Ordering::Relaxed)
+        ));
+        let backend = Backend::new(root.clone()).unwrap();
+        let fixture = Path::new(env!("CARGO_MANIFEST_DIR"))
+            .join("../tests/fixtures/gray16-tiled-bigtiff.tif");
+        let wait = || {
+            let deadline = std::time::Instant::now() + Duration::from_secs(20);
+            loop {
+                let state = backend.snapshot().unwrap();
+                if state.phase != "loading" {
+                    return state;
+                }
+                assert!(std::time::Instant::now() < deadline);
+                thread::sleep(Duration::from_millis(20));
+            }
+        };
+        let first = backend.open(&fixture).unwrap();
+        let state = wait();
+        assert_eq!(state.phase, "ready", "{:?}", state);
+        assert_eq!((state.width, state.height), (65, 49));
+        let job = backend.current.lock().unwrap().clone().unwrap();
+        let bytes = read_asset(
+            &job,
+            Asset::Tile {
+                level: 7,
+                x: 0,
+                y: 0,
+            },
+        )
+        .unwrap();
+        assert!(bytes.starts_with(&[255, 216]));
+        let second = backend.open(&fixture).unwrap();
+        assert_ne!(first.id, second.id);
+        let state = wait();
+        assert_eq!(state.phase, "ready");
+        assert!(state.detail.contains("Reused"));
+        assert!(job.cancel.load(Ordering::Relaxed));
+        assert_eq!(read_asset(&job, Asset::Preview).unwrap_err().0, 410);
+        let live = backend.current.lock().unwrap().clone().unwrap();
+        let sleeper = thread::spawn(move || run(&live, "sleep", &["30".into()]));
+        thread::sleep(Duration::from_millis(100));
+        let cancelled = std::time::Instant::now();
+        backend.cancel();
+        assert!(sleeper.join().unwrap().unwrap_err().contains("cancelled"));
+        assert!(cancelled.elapsed() < Duration::from_secs(2));
+        assert_eq!(backend.snapshot().unwrap().phase, "cancelled");
+        backend.shutdown();
+        fs::remove_dir_all(root).unwrap();
+    }
+    #[test]
+    fn native_pyramid_reuse_and_odd_edge_geometry() {
+        if Command::new("vips").arg("--version").output().is_err() {
+            return;
+        }
+        let root = std::env::temp_dir().join(format!(
+            "aperture-native-test-{}",
+            NEXT_ID.fetch_add(1, Ordering::Relaxed)
+        ));
+        let backend = Backend::new(root.clone()).unwrap();
+        let source = Path::new(env!("CARGO_MANIFEST_DIR"))
+            .join("../tests/fixtures/rgb-odd-subifd-pyramid.tif");
+        backend.open(&source).unwrap();
+        let deadline = std::time::Instant::now() + Duration::from_secs(20);
+        loop {
+            let state = backend.snapshot().unwrap();
+            if state.phase != "loading" {
+                assert_eq!(state.phase, "ready", "{:?}", state);
+                break;
+            }
+            assert!(std::time::Instant::now() < deadline);
+            thread::sleep(Duration::from_millis(20));
+        }
+        let job = backend.current.lock().unwrap().clone().unwrap();
+        assert!(job.native.lock().unwrap().len() > 1);
+        assert!(!job.dir.lock().unwrap().join("tiles_files").exists());
+        assert!(job.input.exists());
+        for (level, x, y, expected) in [(12, 8, 4, (3, 1)), (11, 4, 2, (2, 1)), (0, 0, 0, (1, 1))] {
+            let bytes = read_asset(&job, Asset::Tile { level, x, y }).unwrap();
+            let image = root.join(format!("check-{level}.jpg"));
+            fs::write(&image, bytes).unwrap();
+            let output = Command::new("vipsheader")
+                .arg("-a")
+                .arg(&image)
+                .output()
+                .unwrap();
+            assert!(output.status.success());
+            assert_eq!(
+                dimensions(std::str::from_utf8(&output.stdout).unwrap()).unwrap(),
+                expected
+            );
+        }
+        backend.open(&source).unwrap();
+        let deadline = std::time::Instant::now() + Duration::from_secs(20);
+        loop {
+            let state = backend.snapshot().unwrap();
+            if state.phase != "loading" {
+                assert_eq!(state.phase, "ready");
+                assert!(state.detail.contains("Reused"));
+                break;
+            }
+            assert!(std::time::Instant::now() < deadline);
+            thread::sleep(Duration::from_millis(20));
+        }
+        let second = backend.current.lock().unwrap().clone().unwrap();
+        assert!(second.input.exists());
+        assert!(read_asset(
+            &second,
+            Asset::Tile {
+                level: 12,
+                x: 0,
+                y: 0
+            }
+        )
+        .is_ok());
+        backend.shutdown();
+        drop(job);
+        drop(second);
+        fs::remove_dir_all(root).unwrap();
+    }
+    #[test]
+    fn cache_pruning_never_follows_source_alias() {
+        let root = std::env::temp_dir().join(format!(
+            "aperture-prune-test-{}",
+            NEXT_ID.fetch_add(1, Ordering::Relaxed)
+        ));
+        fs::create_dir_all(root.join("entry")).unwrap();
+        fs::write(root.join("entry/complete"), b"ok").unwrap();
+        fs::write(root.join("entry/pixels"), vec![0; 1024]).unwrap();
+        prune(&root, 0).unwrap();
+        assert!(!root.join("entry").exists());
+        fs::remove_dir_all(root).unwrap();
+    }
+}

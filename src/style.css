@@ -1,0 +1,275 @@
+:root {
+  font-family: "Cantarell", "Aptos", "Segoe UI", sans-serif;
+  font-size: 12px;
+  color: #353833;
+  background: #343633;
+  font-synthesis: none;
+  --paper: #f4f4f0;
+  --line: #dcded6;
+  --ink: #353833;
+  --accent: #637c66;
+}
+
+* {
+  box-sizing: border-box;
+}
+html,
+body,
+#app {
+  width: 100%;
+  height: 100%;
+  margin: 0;
+  overflow: hidden;
+}
+#app {
+  display: flex;
+  flex-direction: column;
+}
+button {
+  font: inherit;
+  color: inherit;
+  border: 0;
+  background: transparent;
+  padding: 0;
+  cursor: default;
+}
+button:focus-visible {
+  outline: 2px solid var(--accent);
+  outline-offset: -3px;
+}
+button:disabled {
+  color: #a8ada3;
+}
+button:not(:disabled):hover {
+  background: #e6e9e0;
+}
+button:not(:disabled):active {
+  background: #d8ded2;
+}
+svg {
+  display: block;
+  width: 18px;
+  height: 18px;
+  fill: none;
+  stroke: currentColor;
+  stroke-width: 1.35;
+  stroke-linecap: round;
+  stroke-linejoin: round;
+  flex-shrink: 0;
+}
+[hidden] {
+  display: none !important;
+}
+
+.image-bar {
+  display: flex;
+  align-items: center;
+  height: 36px;
+  min-height: 36px;
+  background: var(--paper);
+  border-bottom: 1px solid var(--line);
+  user-select: none;
+}
+.image-title {
+  display: flex;
+  align-items: center;
+  gap: 9px;
+  padding-left: 13px;
+  flex: 1;
+  min-width: 0;
+  height: 100%;
+}
+.image-title > svg {
+  width: 15px;
+  height: 15px;
+  color: #6b7467;
+  pointer-events: none;
+}
+#filename {
+  font-size: 12px;
+  letter-spacing: 0.01em;
+  white-space: nowrap;
+  text-overflow: ellipsis;
+  overflow: hidden;
+  padding-right: 12px;
+}
+.file-actions {
+  display: flex;
+  gap: 2px;
+  padding-right: 12px;
+}
+.file-button {
+  height: 27px;
+  padding: 0 9px;
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  border-radius: 3px;
+}
+.file-button svg {
+  width: 15px;
+  height: 15px;
+}
+.window-actions {
+  display: flex;
+  height: 100%;
+  border-left: 1px solid var(--line);
+}
+.window-button {
+  width: 40px;
+  display: grid;
+  place-items: center;
+}
+.window-button svg {
+  width: 15px;
+  height: 15px;
+}
+.window-button.close:not(:disabled):hover {
+  color: #f4f4f0;
+  background: #ac4d46;
+}
+.window-button.close:not(:disabled):active {
+  background: #8e3e38;
+}
+
+.quick-bar {
+  position: relative;
+  display: flex;
+  align-items: center;
+  height: 35px;
+  min-height: 35px;
+  padding: 0 10px 0 8px;
+  background: #eeefe9;
+  border-bottom: 1px solid #cfd3c9;
+  user-select: none;
+  gap: 8px;
+}
+.tool-group {
+  display: flex;
+  gap: 2px;
+}
+.tool {
+  width: 28px;
+  height: 27px;
+  display: grid;
+  place-items: center;
+  border-radius: 3px;
+  flex-shrink: 0;
+}
+.tool svg {
+  width: 17px;
+  height: 17px;
+}
+.tool.selected:not(:disabled) {
+  color: #506953;
+  background: #dde4d7;
+}
+.separator {
+  height: 17px;
+  width: 1px;
+  flex-shrink: 0;
+  background: #d1d7ca;
+}
+.load-status {
+  margin-left: auto;
+  display: flex;
+  align-items: center;
+  justify-content: flex-end;
+  min-width: 0;
+  gap: 8px;
+  font-size: 11px;
+}
+#status {
+  color: #687162;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  max-width: min(35vw, 320px);
+}
+#status.error {
+  color: #9a493e;
+}
+#dimensions {
+  color: #71776b;
+  font-variant-numeric: tabular-nums;
+  white-space: nowrap;
+  letter-spacing: 0.025em;
+}
+#progress {
+  position: absolute;
+  bottom: -1px;
+  left: 0;
+  right: 0;
+  height: 2px;
+  overflow: hidden;
+  background: #dee4d9;
+  z-index: 1;
+}
+#progress span {
+  display: block;
+  width: 100%;
+  height: 100%;
+  background: var(--accent);
+  transform-origin: left;
+}
+#progress.indeterminate span {
+  width: 24%;
+  animation: progress 1.7s ease-in-out infinite;
+}
+@keyframes progress {
+  from {
+    transform: translateX(-100%);
+  }
+  to {
+    transform: translateX(520%);
+  }
+}
+#viewer {
+  position: relative;
+  flex: 1;
+  min-height: 0;
+  background: #343633;
+}
+#viewer:focus-within {
+  outline: none;
+}
+#viewer.drop-target::after {
+  content: "";
+  position: absolute;
+  inset: 8px;
+  border: 2px solid #a2b79c;
+  pointer-events: none;
+}
+.openseadragon-canvas:focus-visible {
+  outline: 1px solid #a2b79c;
+  outline-offset: -3px;
+}
+
+@media (max-width: 680px) {
+  .quick-bar {
+    gap: 5px;
+    padding-left: 5px;
+  }
+  .tool {
+    width: 25px;
+  }
+  .tool-group {
+    gap: 0;
+  }
+  #dimensions {
+    display: none;
+  }
+  .file-actions {
+    padding-right: 5px;
+  }
+  .window-button {
+    width: 32px;
+  }
+}
+@media (prefers-reduced-motion: reduce) {
+  #progress.indeterminate span {
+    animation: none;
+    width: 100%;
+    opacity: 0.55;
+  }
+}
