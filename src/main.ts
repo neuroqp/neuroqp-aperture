@@ -2,6 +2,7 @@ import OpenSeadragon from "openseadragon";
 import { convertFileSrc, invoke, isTauri } from "@tauri-apps/api/core";
 import { getCurrentWindow } from "@tauri-apps/api/window";
 import { open } from "@tauri-apps/plugin-dialog";
+import appIcon from "../src-tauri/icons/icon.png";
 import {
   ImageLoader,
   orientation,
@@ -13,8 +14,6 @@ import {
 import "./style.css";
 
 const icons: Record<string, string> = {
-  image:
-    '<rect x="3" y="3" width="14" height="14" rx="2"/><path d="m3 13 4-4 4 4 2-2 4 4"/><circle cx="13" cy="7" r="1"/>',
   open: '<path d="M3 7V4h5l2 2h7v3M3 7h15l-3 9H2Z"/>',
   save: '<path d="M4 2h10l3 3v13H3V2Z"/><path d="M6 2v5h7V2M6 18v-7h8v7"/>',
   rectangle:
@@ -43,7 +42,7 @@ const tool = (id: string, name: string, label: string, placeholder = false) =>
 document.querySelector<HTMLDivElement>("#app")!.innerHTML = `
   <header class="image-bar">
     <div class="image-title" data-tauri-drag-region>
-      ${icon("image")}
+      <img src="${appIcon}" width="20" height="20" alt="" draggable="false" data-tauri-drag-region>
       <span id="filename" data-tauri-drag-region>NeuroQP Aperture</span>
     </div>
     <div class="file-actions">
@@ -93,6 +92,7 @@ const viewer = OpenSeadragon({
   showSequenceControl: false,
   showNavigator: false,
   drawer: "canvas",
+  imageSmoothingEnabled: false,
   imageLoaderLimit: 4,
   maxImageCacheCount: 128,
   timeout: 600_000,

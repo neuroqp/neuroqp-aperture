@@ -53,7 +53,8 @@ Two thin horizontal header bars sit above the image viewer.
    are placeholders initially, visibly inactive with descriptive tooltips.
 3. **Image viewer:** fill all remaining window space. Show the image against a
    neutral background, preserve its aspect ratio, and support smooth pan and
-   zoom. Fit the image to the available space when first opened.
+   zoom. Use nearest-neighbor scaling so magnified pixels have sharp boundaries.
+   Fit the image to the available space when first opened.
 
 Open selects a local image and replaces the current image. Save is a visible
 control; its initial behavior and supported output formats remain to be decided.

@@ -81,3 +81,13 @@ application was left open displaying that real image. `native-final.json`
 records these final results.
 Windows, macOS, GPU memory, hundreds-of-GB images, and frame-rate guarantees are
 not validated.
+
+## Pixel rendering and app icon
+
+Nearest-neighbor rendering was checked with a 128 by 128 alternating-pixel PNG.
+The native app displayed crisp enlarged blocks, and a browser canvas sample
+contained only black and white values at pixel boundaries with smoothing disabled.
+The selected six-blade aperture icon was verified in the native header and included
+in a successful standalone debug build. The seven frontend tests and formatting
+check passed. JPEG display tiles remain lossy; nearest-neighbor scaling does not
+make them pixel-exact scientific data.
