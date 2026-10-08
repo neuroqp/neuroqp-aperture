@@ -12,6 +12,8 @@ import {
   Copy,
   SlidersHorizontal,
   RotateCcw,
+  Sun,
+  Moon,
   type IconNode,
 } from "lucide";
 
@@ -28,6 +30,8 @@ const icons = {
   restore: Copy,
   brightness: SlidersHorizontal,
   reset: RotateCcw,
+  sun: Sun,
+  moon: Moon,
   // Three point markers, drawn on Lucide's 24px grid.
   points: [
     ["path", { d: "M3 8h6M6 5v6M14 5h6M17 2v6M11 18h6M14 15v6" }],

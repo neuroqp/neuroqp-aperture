@@ -65,15 +65,24 @@ Disable Save until an image and a supported save operation are available.
 
 ## Tool option panels
 
-- Show a compact panel beneath the toolbar for the selected tool. Toggle the
-  button again, press Escape, or use its close button to dismiss it.
+- Panels open independently in a row anchored to the viewer's top-right.
+  Keep open panels adjacent; wrap when the window cannot fit another panel.
+  Each toggle and close button controls only its own panel. Escape closes the
+  focused panel, or the most recently opened panel if neither has focus.
 - Brightness: display-range graph, Minimum, Maximum, Brightness, and Contrast
-  sliders with values and Reset. Controls currently update local UI state only.
+  sliders with each label to the left and its value to the right, plus Reset.
+  Controls currently update local UI state only.
   Future brightness adjustments must affect display only, never source pixels.
-- Multi-point: Type, Color, Size, Label points, Show on all slices, Counter, and
-  point count. Show a small marker appearance preview. Annotation placement and
-  counting are not implemented yet.
-- Preserve option values while switching panels during the current session.
+- Multi-point: icon toggle rows for Cross/Dot/Circle, color, and size. Each row
+  previews its choices using the other two current selections. Include Label
+  points, Show on all slices, Counter, and point count. Annotation placement
+  and counting are not implemented yet.
+- Preserve option values while closing and reopening panels during the session.
+- Use the approved T1/B2/C1/D1/S1/P2/M2 styling: recessed lavender toggles, tinted
+  action buttons, solid purple checkboxes, raised dropdowns, fine round-handle
+  sliders, and quiet compact panels. Use purple and orange accents in light and
+  dark modes. Follow system appearance initially; a header theme button switches
+  modes and remembers the choice.
 
 ## Loading and performance
 

@@ -5,6 +5,7 @@ import { open } from "@tauri-apps/plugin-dialog";
 import appIcon from "../src-tauri/icons/icon.png";
 import { icon, type IconName } from "./icons";
 import { bindTools, toolPanels } from "./tools";
+import { bindTheme } from "./theme";
 import {
   ImageLoader,
   orientation,
@@ -28,6 +29,7 @@ document.querySelector<HTMLDivElement>("#app")!.innerHTML = `
       <button id="open-button" class="file-button" type="button" title="Open image (Ctrl+O)">${icon("open")}<span>Open</span></button>
       <button id="save-button" class="file-button" type="button" title="Saving is not available in this preview" disabled>${icon("save")}<span>Save</span></button>
     </div>
+    <button id="theme-button" class="tool theme-button" type="button" aria-label="Switch theme"></button>
     <div class="window-actions">
       <button id="minimize-button" class="window-button" type="button" title="Minimize" aria-label="Minimize">${icon("minimize")}</button>
       <button id="maximize-button" class="window-button" type="button" title="Maximize" aria-label="Maximize">${icon("maximize")}</button>
@@ -61,6 +63,7 @@ document.querySelector<HTMLDivElement>("#app")!.innerHTML = `
 const $ = <T extends HTMLElement = HTMLElement>(id: string) =>
   document.getElementById(id)! as T;
 const tools = bindTools();
+bindTheme();
 const native = isTauri();
 const windowHandle = native ? getCurrentWindow() : null;
 const viewer = OpenSeadragon({
@@ -310,7 +313,9 @@ document.addEventListener("keydown", (event) => {
   } else if (
     !(
       event.target instanceof Element &&
-      event.target.closest("input, select, textarea, [contenteditable]")
+      event.target.closest(
+        "input, select, textarea, [contenteditable], .tool-panel",
+      )
     ) &&
     !event.ctrlKey &&
     !event.metaKey &&

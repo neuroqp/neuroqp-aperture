@@ -1,5 +1,11 @@
 import { icon } from "./icons";
 import {
+  defaultPointSettings,
+  pointChoices,
+  pointSymbol,
+  type PointSettings,
+} from "./point-settings";
+import {
   adjustDisplay,
   defaultDisplaySettings,
   type DisplaySettings,
@@ -19,8 +25,9 @@ const slider = (
   max: number,
 ) => `
   <label class="adjustment" for="display-${key}">
-    <span>${label}</span><output id="value-${key}" for="display-${key}">${defaultDisplaySettings[key]}</output>
+    <span>${label}</span>
     <input id="display-${key}" data-display="${key}" type="range" min="${min}" max="${max}" value="${defaultDisplaySettings[key]}">
+    <output id="value-${key}" for="display-${key}">${defaultDisplaySettings[key]}</output>
   </label>`;
 const closeButton = `<button class="tool panel-close" type="button" aria-label="Close tool options" title="Close (Escape)">${icon("cancel")}</button>`;
 
@@ -41,13 +48,8 @@ export const toolPanels = `
     </section>
     <section id="points-panel" class="tool-panel" aria-labelledby="points-title" hidden>
       <header class="panel-heading"><h2 id="points-title">Multi-point</h2>${closeButton}</header>
-      <div class="point-appearance">
-        <div class="point-fields">
-          <label for="point-type">Type<select id="point-type">${options(["Cross", "Dot", "Hybrid", "Circle"], "Cross")}</select></label>
-          <label for="point-color">Color<select id="point-color">${options(["Magenta", "Red", "Yellow", "Green", "Cyan", "Blue", "White", "Black"], "Magenta")}</select></label>
-          <label for="point-size">Size<select id="point-size">${options(["Tiny", "Small", "Medium", "Large", "Extra large"], "Extra large")}</select></label>
-        </div>
-        <div class="point-preview" role="img" aria-label="Point appearance preview"><svg viewBox="0 0 48 48"><g id="point-marker"></g><text id="point-label" x="35" y="13">1</text></svg></div>
+      <div class="point-options">
+        ${(["type", "color", "size"] as const).map((key) => `<div class="point-option-row"><span id="point-${key}-label">${key[0].toUpperCase() + key.slice(1)}</span><div id="point-${key}" class="point-choices" role="group" aria-labelledby="point-${key}-label"></div></div>`).join("")}
       </div>
       <div class="point-flags">
         <label><input id="point-labels" type="checkbox" checked>Label points</label>
@@ -66,41 +68,56 @@ export const toolPanels = `
 export function bindTools() {
   const container = document.querySelector<HTMLElement>("#tool-panels")!;
   const names = ["brightness", "points"] as const;
-  let active: (typeof names)[number] | null = null;
-  const setActive = (name: typeof active) => {
-    active = name;
-    container.hidden = name === null;
-    for (const item of names) {
-      const selected = item === name;
-      const button = document.getElementById(`${item}-button`)!;
-      button.setAttribute("aria-pressed", String(selected));
-      button.setAttribute("aria-expanded", String(selected));
-      document.getElementById(`${item}-panel`)!.hidden = !selected;
-    }
+  type PanelName = (typeof names)[number];
+  const openPanels = new Set<PanelName>();
+  const setOpen = (name: PanelName, open: boolean) => {
+    if (open) openPanels.add(name);
+    else openPanels.delete(name);
+    container.hidden = openPanels.size === 0;
+    const button = document.getElementById(`${name}-button`)!;
+    button.setAttribute("aria-pressed", String(open));
+    button.setAttribute("aria-expanded", String(open));
+    document.getElementById(`${name}-panel`)!.hidden = !open;
   };
   const close = () => {
-    if (!active) return false;
-    const button = document.getElementById(`${active}-button`)!;
-    setActive(null);
-    button.focus();
+    // Escape closes the focused panel, otherwise the most recently opened one.
+    const focused = names.find(
+      (name) =>
+        document
+          .getElementById(`${name}-panel`)!
+          .contains(document.activeElement) ||
+        document.activeElement?.id === `${name}-button`,
+    );
+    const name =
+      focused && openPanels.has(focused) ? focused : [...openPanels].at(-1);
+    if (!name) return false;
+    setOpen(name, false);
+    document.getElementById(`${name}-button`)!.focus();
     return true;
   };
   for (const name of names) {
     document
       .getElementById(`${name}-button`)!
-      .addEventListener("click", () =>
-        setActive(active === name ? null : name),
-      );
+      .addEventListener("click", () => setOpen(name, !openPanels.has(name)));
+    document
+      .querySelector(`#${name}-panel .panel-close`)!
+      .addEventListener("click", () => {
+        setOpen(name, false);
+        document.getElementById(`${name}-button`)!.focus();
+      });
   }
-  container
-    .querySelectorAll(".panel-close")
-    .forEach((button) => button.addEventListener("click", close));
 
   let display = { ...defaultDisplaySettings };
   const refreshDisplay = () => {
     for (const key of Object.keys(display) as (keyof DisplaySettings)[]) {
-      (document.getElementById(`display-${key}`) as HTMLInputElement).value =
-        String(display[key]);
+      const input = document.getElementById(
+        `display-${key}`,
+      ) as HTMLInputElement;
+      input.value = String(display[key]);
+      input.style.setProperty(
+        "--fill",
+        `${((display[key] - Number(input.min)) / (Number(input.max) - Number(input.min))) * 100}%`,
+      );
       document.getElementById(`value-${key}`)!.textContent = String(
         display[key],
       );
@@ -134,34 +151,36 @@ export function bindTools() {
     refreshDisplay();
   });
 
-  const updatePointPreview = () => {
-    const type = (document.getElementById("point-type") as HTMLSelectElement)
-      .value;
-    const color = (
-      document.getElementById("point-color") as HTMLSelectElement
-    ).value.toLowerCase();
-    const size = (document.getElementById("point-size") as HTMLSelectElement)
-      .selectedIndex;
-    const radius = [2, 3, 5, 7, 9][size];
-    const cross = `<path d="M${24 - radius} 24h${radius * 2}M24 ${24 - radius}v${radius * 2}"/>`;
-    const circle = `<circle cx="24" cy="24" r="${type === "Hybrid" ? radius / 2 : radius}"${type === "Dot" ? ' fill="currentColor" stroke="none"' : ""}/>`;
-    document.getElementById("point-marker")!.innerHTML =
-      type === "Cross" ? cross : type === "Hybrid" ? circle + cross : circle;
-    container.querySelector<HTMLElement>(".point-preview")!.style.color = color;
-    document.getElementById("point-label")!.style.display = (
-      document.getElementById("point-labels") as HTMLInputElement
-    ).checked
-      ? ""
-      : "none";
-  };
-  for (const id of [
-    "point-type",
-    "point-color",
-    "point-size",
-    "point-labels",
-  ]) {
-    document.getElementById(id)!.addEventListener("change", updatePointPreview);
+  refreshDisplay();
+
+  let point = { ...defaultPointSettings };
+  const keys = ["type", "color", "size"] as const;
+  for (const key of keys) {
+    const group = document.getElementById(`point-${key}`)!;
+    for (const choice of pointChoices(key, point)) {
+      const button = document.createElement("button");
+      button.type = "button";
+      button.className = "tool point-choice";
+      button.dataset.value = choice.value;
+      button.setAttribute("aria-label", choice.value);
+      button.addEventListener("click", () => {
+        point = { ...point, [key]: choice.value } as PointSettings;
+        refreshPoints();
+      });
+      group.append(button);
+    }
   }
-  updatePointPreview();
+  function refreshPoints() {
+    for (const key of keys) {
+      const buttons = document.getElementById(`point-${key}`)!.children;
+      pointChoices(key, point).forEach((choice, index) => {
+        const button = buttons[index] as HTMLButtonElement;
+        button.innerHTML = pointSymbol(choice.settings);
+        button.setAttribute("aria-pressed", String(choice.selected));
+        button.title = `${choice.value} · ${choice.settings.size} ${choice.settings.color.toLowerCase()} ${choice.settings.type.toLowerCase()}`;
+      });
+    }
+  }
+  refreshPoints();
   return { close };
 }

@@ -96,7 +96,7 @@ make them pixel-exact scientific data.
 
 The toolbar now uses Lucide icons plus a matching custom multi-point symbol.
 Browser interaction checks passed at 1280 by 800 and 640 by 400: right-aligned
-viewer controls, mutually exclusive tool panels, toggle-to-close, Escape with
+viewer controls, the original single-panel behavior, toggle-to-close, Escape with
 focus restoration, slider changes and Reset, point-type and checkbox changes,
 and retained options when switching tools. Both panels fit the smaller viewport
 without internal scrolling. A loaded checkerboard canvas and its viewport zoom
@@ -110,3 +110,23 @@ Native screenshots are ignored under `test-data/brightness-panel.native.png`,
 only manage UI state: no image processing, annotation placement, or source-file
 writes were added. Nine frontend tests pass, including display-range bounds and
 independent adjustment state.
+
+## Selected styling and independent panels
+
+Light/dark styling and independently opened panels were checked in the browser
+at 1280 by 800 and 640 by 400. Both panels fit side by side at the minimum size;
+closing either leaves the other aligned right. Escape closes the focused panel
+and restores its toolbar-button focus. Point selections persist across closing
+and reopening. The theme button changes the palette and stores the choice.
+
+The blue/medium/circle selection produced medium blue type choices, differently
+colored medium circles, and blue circles in five sizes, with one selected button
+per row. An orange/large/dot combination also passed. Brightness changed to 100
+without changing the loaded checkerboard canvas; annotation count remained zero.
+Eleven frontend tests pass, including choice coordination and marker geometry.
+
+Native Linux mouse checks verified both panels together over a loaded microscopy
+TIFF, changing the marker color to blue, and switching from dark to light. The
+screenshots `test-data/point-options-dark.native.png` and
+`test-data/point-options-light.native.png` remain local and ignored. Image
+processing and point placement remain unimplemented.

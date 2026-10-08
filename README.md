@@ -4,6 +4,11 @@ A minimal Linux desktop image viewer built with Tauri, Rust, and OpenSeadragon.
 Two compact toolbars leave the rest of the window to the image. Large images
 load through a preview and progressively available detail tiles.
 
+Brightness and multi-point options open independently at the viewer's top-right.
+Point type, color, and size buttons preview the current combination. The header's
+sun/moon button switches light and dark modes and remembers your choice; the
+initial theme follows the system.
+
 ## Run locally
 
 Install Node.js 22.18 or newer, pnpm 9, a current Rust toolchain, and the Tauri
