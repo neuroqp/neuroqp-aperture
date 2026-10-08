@@ -57,7 +57,8 @@ Two thin horizontal header bars sit above the image viewer.
 3. **Image viewer:** fill all remaining window space. Show the image against a
    neutral background, preserve its aspect ratio, and support smooth pan and
    zoom. Use nearest-neighbor scaling so magnified pixels have sharp boundaries.
-   Fit the image to the available space when first opened.
+   Fit the image to the available space when first opened. WASD and arrow keys
+   pan at three times OpenSeadragon's default speed and tap distance.
 
 Open selects a local image and replaces the current image. Save creates a
 separate annotated TIFF copy with ImageJ ROI metadata; never overwrite the
@@ -84,8 +85,11 @@ discarding unsaved annotations on Open or Close. Ctrl+S opens Save.
   previews its choices using the other two current selections. Include Label
   points, Show on all slices, Counter, and the selected counter's point count.
   With the tool active, primary mouse-down inside the image adds a point using
-  the current point-selection settings, even if the pointer is moving. Counter assigns a category to new points
-  within the active selection, following ImageJ. Type, size and base color apply
+  the current point-selection settings, even if the pointer is moving. E adds
+  a point at the cursor once per press, ignoring key-repeat, text/control entry,
+  held pan/delete modifiers, and active pointer gestures. Counter assigns a
+  category to new points within the active selection, following ImageJ.
+  Type, size and base color apply
   to the active selection; Label points also updates point overlays. Counter
   changes do not restore separate styles. A fresh selection using counter 0
   labels points sequentially. Once a higher counter is used, labels show category
@@ -95,12 +99,16 @@ discarding unsaved annotations on Open or Close. Ctrl+S opens Save.
   to the right of Counter's dropdown. Explain the behavior first, then note
   compatibility with ImageJ's multi-point tool. Categories range from 0 to 99;
   the scrollable dropdown must follow the app's light/dark theme.
+  Use a fixed five-screen-pixel hit radius independent of marker size and zoom.
   Hovering a visible point in multi-point mode shows a grab cursor; dragging
   moves it. Alt-hover shows a minus cursor and Alt-click removes that point.
   Space or Ctrl held temporarily overrides the current tool with panning and
   a hand cursor; releasing restores the tool. Panning takes precedence over
   point editing. Losing window focus clears transient keys and gestures.
-  Closing the panel or selecting Pan leaves point-placement mode.
+  Closing the panel or selecting Pan leaves point-placement mode. A question-mark
+  tooltip in the Multi-point panel header explains marker appearance, categories,
+  adding with the mouse or E, dragging, deletion, and temporary panning. Marker
+  appearance settings do not change image pixels.
 - Preserve option values while closing and reopening panels during the session.
 - Use the approved T1/B2/C1/D1/S1/P2/M2 styling: recessed lavender toggles, tinted
   action buttons, solid purple checkboxes, raised dropdowns, fine round-handle

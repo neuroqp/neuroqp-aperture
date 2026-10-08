@@ -48,7 +48,25 @@ export const toolPanels = `
       <footer class="panel-footer display-presets">${[0.1, 0.5, 1].map((tail) => `<button class="text-button percentile-button" data-percentile="${tail}" title="Set display range to the ${tail}–${100 - tail} percentiles" disabled>${tail}–${100 - tail}</button>`).join("")}<button id="reset-display" class="text-button" type="button">${icon("reset")}Reset</button></footer>
     </section>
     <section id="points-panel" class="tool-panel" aria-labelledby="points-title" hidden>
-      <header class="panel-heading"><h2 id="points-title">Multi-point</h2>${closeButton}</header>
+      <header class="panel-heading">
+        <div class="panel-title"><h2 id="points-title">Multi-point</h2>
+          <div class="tool-help">
+            <button id="points-help-button" class="tool-help-button" type="button" aria-label="About the multi-point tool" aria-describedby="points-help-text" aria-controls="points-help-text" aria-expanded="false">${icon("help")}</button>
+            <div id="points-help-text" class="tool-tooltip" role="tooltip" popover="manual" hidden>
+              <strong>Mark and edit points</strong>
+              <p>Type, Color and Size change marker appearance only. They never change image pixels.</p>
+              <p>Counter groups points into categories from 0 to 99, with category colors matching ImageJ. Label points optionally shows their labels.</p>
+              <ul>
+                <li>Press the left mouse button or E to add a point at the cursor. E adds one point per press.</li>
+                <li>Hover over a point, then drag to move it.</li>
+                <li>Hold Alt over a point for the minus cursor; Alt-click to remove it.</li>
+                <li>Hold Space or Ctrl to pan temporarily.</li>
+                <li>Use WASD or the arrow keys to navigate.</li>
+              </ul>
+            </div>
+          </div>
+        </div>${closeButton}
+      </header>
       <div class="point-options">
         ${(["type", "color", "size"] as const).map((key) => `<div class="point-option-row"><span id="point-${key}-label">${key[0].toUpperCase() + key.slice(1)}</span><div id="point-${key}" class="point-choices" role="group" aria-labelledby="point-${key}-label"></div></div>`).join("")}
       </div>
@@ -65,9 +83,9 @@ export const toolPanels = `
               ${Array.from({ length: 100 }, (_, counter) => `<button id="counter-option-${counter}" type="button" role="option" data-counter="${counter}" aria-selected="${counter === 0}" tabindex="-1">${counter}</button>`).join("")}
             </div>
           </div>
-          <div class="counter-help">
-            <button id="counter-help-button" class="counter-help-button" type="button" aria-label="About counters" aria-describedby="counter-help-text" aria-controls="counter-help-text" aria-expanded="false">${icon("help")}</button>
-            <div id="counter-help-text" class="counter-tooltip" role="tooltip" popover="manual" hidden>
+          <div class="tool-help">
+            <button id="counter-help-button" class="tool-help-button" type="button" aria-label="About counters" aria-describedby="counter-help-text" aria-controls="counter-help-text" aria-expanded="false">${icon("help")}</button>
+            <div id="counter-help-text" class="tool-tooltip" role="tooltip" popover="manual" hidden>
               <strong>Counters group points into categories</strong>
               <p>Choose a counter from 0 to 99 to assign new points to that category. Points shows the selected category's total in this selection.</p>
               <p>A fresh selection using counter 0 labels points in order: 1, 2, 3. Selecting a higher counter switches to category labels, so points in counter 1 all read 1. Returning to 0 keeps category labels until you start a fresh selection.</p>
@@ -91,9 +109,6 @@ export function bindTools(
   const counterButtons = Array.from(
     counterOptions.querySelectorAll<HTMLButtonElement>("[data-counter]"),
   );
-  const helpButton = document.getElementById("counter-help-button")!;
-  const helpText = document.getElementById("counter-help-text")!;
-  const help = helpButton.parentElement!;
   let counterDigits = "";
   let counterTypedAt = 0;
   const positionPopup = (popup: HTMLElement, anchor: HTMLElement) => {
@@ -101,29 +116,45 @@ export function bindTools(
     popup.style.left = `${Math.max(12, Math.min(rect.right - popup.offsetWidth, window.innerWidth - popup.offsetWidth - 12))}px`;
     popup.style.top = `${Math.max(12, rect.top - popup.offsetHeight)}px`;
   };
-  let helpPinned = false;
-  const showHelp = (show: boolean) => {
-    helpText.hidden = !show;
-    if (show) {
-      helpText.showPopover();
-      positionPopup(helpText, helpButton);
-    } else helpText.hidePopover();
-    helpButton.setAttribute("aria-expanded", String(show));
-    if (!show) helpPinned = false;
-  };
-  help.addEventListener("mouseenter", () => showHelp(true));
-  help.addEventListener("mouseleave", () => {
-    if (!helpPinned && document.activeElement !== helpButton) showHelp(false);
+  const helps = ["counter", "points"].map((name) => {
+    const button = document.getElementById(`${name}-help-button`)!;
+    const text = document.getElementById(`${name}-help-text`)!;
+    const wrapper = button.parentElement!;
+    let pinned = false;
+    const show = (visible: boolean) => {
+      text.hidden = !visible;
+      if (visible) {
+        closeCounter();
+        for (const other of helps) if (other.text !== text) other.show(false);
+        const below =
+          name === "points"
+            ? button.closest("header")!.getBoundingClientRect().bottom
+            : null;
+        if (below !== null)
+          text.style.maxHeight = `${window.innerHeight - below - 12}px`;
+        text.showPopover();
+        positionPopup(text, button);
+        if (below !== null) text.style.top = `${below}px`;
+      } else text.hidePopover();
+      button.setAttribute("aria-expanded", String(visible));
+      if (!visible) pinned = false;
+    };
+    wrapper.addEventListener("mouseenter", () => show(true));
+    wrapper.addEventListener("mouseleave", () => {
+      if (!pinned && document.activeElement !== button) show(false);
+    });
+    button.addEventListener("focus", () => show(true));
+    button.addEventListener("blur", () => {
+      if (!pinned) show(false);
+    });
+    button.addEventListener("click", () => {
+      const pin = !pinned;
+      show(pin);
+      pinned = pin;
+    });
+    return { text, wrapper, show };
   });
-  helpButton.addEventListener("focus", () => showHelp(true));
-  helpButton.addEventListener("blur", () => {
-    if (!helpPinned) showHelp(false);
-  });
-  helpButton.addEventListener("click", () => {
-    const pin = !helpPinned;
-    showHelp(pin);
-    helpPinned = pin;
-  });
+  const hideHelp = () => helps.forEach((help) => help.show(false));
   const closeCounter = (restoreFocus = false) => {
     counterOptions.hidePopover();
     counterOptions.hidden = true;
@@ -142,7 +173,7 @@ export function bindTools(
   };
   const openCounter = () => {
     counterDigits = "";
-    showHelp(false);
+    hideHelp();
     counterOptions.hidden = false;
     counterOptions.showPopover();
     positionPopup(counterOptions, counter);
@@ -214,7 +245,8 @@ export function bindTools(
   document.addEventListener("pointerdown", (event) => {
     const target = event.target as Node;
     if (!counter.parentElement!.contains(target)) closeCounter();
-    if (!help.contains(target)) showHelp(false);
+    for (const help of helps)
+      if (!help.wrapper.contains(target)) help.show(false);
   });
   const names = ["brightness", "points"] as const;
   type PanelName = (typeof names)[number];
@@ -229,7 +261,7 @@ export function bindTools(
     document.getElementById(`${name}-panel`)!.hidden = !open;
     if (name === "points" && !open) {
       closeCounter();
-      showHelp(false);
+      hideHelp();
     }
     if (name === "points") onPointsChange();
   };
@@ -238,8 +270,8 @@ export function bindTools(
       closeCounter(true);
       return true;
     }
-    if (!helpText.hidden) {
-      showHelp(false);
+    if (helps.some((help) => !help.text.hidden)) {
+      hideHelp();
       return true;
     }
     // Escape closes the focused panel, otherwise the most recently opened one.

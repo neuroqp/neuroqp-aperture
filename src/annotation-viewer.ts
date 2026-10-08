@@ -11,7 +11,12 @@ import {
   type PointReference,
 } from "./annotations";
 
-import { hitPoint, pointAction, type ScreenPoint } from "./point-interaction";
+import {
+  hitPoint,
+  pointAction,
+  keyPlacementAllowed,
+  type ScreenPoint,
+} from "./point-interaction";
 
 const ns = "http://www.w3.org/2000/svg";
 const element = (name: string, attributes: Record<string, string | number>) => {
@@ -35,6 +40,7 @@ export class AnnotationViewer {
   private ctrl = false;
   private alt = false;
   private pressed = false;
+  private buttons = 0;
   private dragged:
     (PointReference & { offsetX: number; offsetY: number }) | null = null;
   private editedGesture = false;
@@ -64,6 +70,8 @@ export class AnnotationViewer {
     viewer.addHandler("canvas-release", this.release);
     viewer.addHandler("canvas-click", this.click);
     viewer.addHandler("canvas-exit", this.exit);
+    viewer.addHandler("canvas-nonprimary-press", this.buttonsChange);
+    viewer.addHandler("canvas-nonprimary-release", this.buttonsChange);
     viewer.canvas.addEventListener("pointermove", this.pointerMove);
     viewer.canvas.addEventListener("pointercancel", this.resetInteraction);
     document.addEventListener("keydown", this.keyDown, true);
@@ -86,6 +94,7 @@ export class AnnotationViewer {
 
   private modifiers(event: MouseEvent) {
     this.ctrl = event.ctrlKey;
+    this.buttons = event.buttons;
     this.alt = event.altKey;
   }
 
@@ -144,6 +153,7 @@ export class AnnotationViewer {
   };
 
   private release = (event: OpenSeadragon.CanvasReleaseEvent) => {
+    this.modifiers(event.originalEvent as MouseEvent);
     this.pressed = false;
     this.dragged = null;
     this.pointer = event.insideElementReleased ? event.position : null;
@@ -169,7 +179,52 @@ export class AnnotationViewer {
     this.updateInteraction();
   };
 
+  private buttonsChange = (
+    event: OpenSeadragon.CanvasNonPrimaryButtonEvent,
+  ) => {
+    this.buttons = event.buttons;
+  };
+
   private keyDown = (event: KeyboardEvent) => {
+    if (event.key.toLowerCase() === "e") {
+      const typing =
+        event.target instanceof Element &&
+        !!event.target.closest(
+          "input, select, textarea, [contenteditable], [role=listbox], [role=combobox]",
+        );
+      if (
+        keyPlacementAllowed({
+          active: this.actions.active(),
+          editable: this.actions.editable(),
+          hovering: this.pointer !== null,
+          repeat: event.repeat,
+          modified:
+            this.space ||
+            this.ctrl ||
+            this.alt ||
+            event.ctrlKey ||
+            event.altKey ||
+            event.metaKey,
+          pressed: this.pressed || this.buttons !== 0,
+          typing,
+        }) &&
+        this.pointer
+      ) {
+        const point = this.toStored(this.pointer);
+        if (
+          point &&
+          this.image &&
+          point.x >= -0.5 &&
+          point.y >= -0.5 &&
+          point.x < this.image.width - 0.5 &&
+          point.y < this.image.height - 0.5
+        ) {
+          event.preventDefault();
+          this.actions.add(point);
+        }
+      }
+      return;
+    }
     if (
       event.code === "Space" &&
       event.target instanceof Element &&
@@ -207,6 +262,7 @@ export class AnnotationViewer {
 
   private resetInteraction = () => {
     this.space = this.ctrl = this.alt = this.pressed = false;
+    this.buttons = 0;
     this.dragged = null;
     this.pointer = null;
     this.updateInteraction();
@@ -275,7 +331,6 @@ export class AnnotationViewer {
           pointIndex: index,
           x: screen.x,
           y: screen.y,
-          radius,
         });
         const group = element("g", {
           transform: `translate(${screen.x} ${screen.y})`,
@@ -328,6 +383,8 @@ export class AnnotationViewer {
     this.viewer.removeHandler("canvas-release", this.release);
     this.viewer.removeHandler("canvas-click", this.click);
     this.viewer.removeHandler("canvas-exit", this.exit);
+    this.viewer.removeHandler("canvas-nonprimary-press", this.buttonsChange);
+    this.viewer.removeHandler("canvas-nonprimary-release", this.buttonsChange);
     this.viewer.canvas.removeEventListener("pointermove", this.pointerMove);
     this.viewer.canvas.removeEventListener(
       "pointercancel",

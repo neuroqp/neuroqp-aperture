@@ -117,10 +117,12 @@ No microscopy source files are modified.
   point overlays. Fresh counter-0 selections show point numbers; using a higher
   counter switches to category labels and ImageJ's counter colors. The question
   mark to the right of Counter explains this behavior. Categories range from
-  0 to 99. In multi-point mode, mouse-down adds points, dragging an existing
-  point moves it, and Alt-click removes it. Hold Space or Ctrl to temporarily
-  pan without leaving the tool. Saved ROIs use ImageJ's active selection and
-  overlays.
+  0 to 99. In multi-point mode, mouse-down or E adds a point at the cursor,
+  dragging an existing point moves it, and Alt-click removes it. The hit radius
+  is five screen pixels regardless of marker size. Hold Space or Ctrl to
+  temporarily pan without leaving the tool; WASD/arrows move at three times
+  the viewer's default speed. The panel header's help explains the controls.
+  Saved ROIs use ImageJ's active selection and overlays.
 - Multi-page images display their first page. Specialist microscopy metadata,
   channels, Z stacks, and timepoints are not interpreted.
 - Supported display pixels are unsigned 8/16-bit grayscale, RGB, and RGBA in

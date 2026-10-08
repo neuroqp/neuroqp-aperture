@@ -275,3 +275,23 @@ canvas press, held modifiers, modifier changes during a drag, outside release,
 and actual window focus loss. Cancelled drags did not resume or alter saved
 coordinates. Pointer-cancel cleanup was exercised with a synthetic event;
 hardware-generated pointer cancellation was not exercised.
+
+## Keyboard placement, navigation and tool help
+
+Thirty-six frontend tests pass, including the fixed 5 CSS-pixel hit radius and
+keyboard placement guards. Native Tauri interaction verified 3× keyboard panning:
+ArrowRight/D and ArrowUp/W taps move approximately 108 CSS pixels with
+OpenSeadragon's navigation setting at 120 (its minimum tap spans nine pan frames,
+compared with 36 pixels at the previous setting of 40).
+
+An extra-large marker is draggable at 4 pixels from its center but not at 6 or
+9 pixels. Separate E presses each add one point at the cursor. Space, Ctrl, Alt,
+input focus, Pan mode and an active mouse gesture prevent keyboard placement.
+WebKit/WebDriver did not emit repeated events for a held key; repeat suppression
+was verified with a synthetic repeated keydown and the unit guard test.
+
+Native light/dark screenshots verify the Multi-point header help. Escape hides
+help while retaining the panel. T3 browser checks additionally cover keyboard
+focus, outside dismissal and scrollable help at 640 by 320. Local screenshots
+remain ignored under test-data/multipoint-header-help-{light,dark}.native.png.
+No backend code or source images changed in this follow-up.
