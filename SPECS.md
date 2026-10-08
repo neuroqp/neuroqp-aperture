@@ -13,7 +13,8 @@ preview as soon as possible, and stays responsive while loading large images.
   pixel-type, and multi-page coverage must be documented as support is added.
 - Keep the interface and implementation small. Image editing, analysis,
   annotation placement, and specialist microscopy formats are outside the initial
-  scope. Brightness and multi-point option panels are UI-only prototypes.
+  scope. Display-range adjustment is display-only; multi-point options remain
+  a UI prototype.
 
 ## Technology decisions
 
@@ -51,7 +52,7 @@ Two thin horizontal header bars sit above the image viewer.
    Integrate window controls into this bar so the design does not need a third
    title bar.
 2. **Quick toolbar:** a compact row of icon buttons inspired by ImageJ. These
-   use Lucide icons, with a matching custom multi-point icon. Brightness and
+   use Lucide icons, with a matching custom multi-point icon. Display range and
    multi-point toggles sit on the left; pan, zoom, and fit controls sit on the
    right. Remove unused placeholder tools.
 3. **Image viewer:** fill all remaining window space. Show the image against a
@@ -69,10 +70,15 @@ Disable Save until an image and a supported save operation are available.
   Keep open panels adjacent; wrap when the window cannot fit another panel.
   Each toggle and close button controls only its own panel. Escape closes the
   focused panel, or the most recently opened panel if neither has focus.
-- Brightness: display-range graph, Minimum, Maximum, Brightness, and Contrast
-  sliders with each label to the left and its value to the right, plus Reset.
-  Controls currently update local UI state only.
-  Future brightness adjustments must affect display only, never source pixels.
+- Display range: an approximate histogram sampled from the image preview,
+  Minimum and Maximum sliders with labels on the left and values on the right.
+  Adjust the displayed image live without modifying source pixels or cached tiles.
+  Show vertical cutoff lines at the selected minimum and maximum.
+  Provide percentile presets 0.1–99.9, 0.5–99.5, and 1–99 beside Reset.
+  The histogram defaults to linear counts. A Linear/Log toggle overlays its
+  upper-right corner on hover or keyboard focus and changes only histogram heights.
+  Use the current 8-bit display preview domain, not original high-bit-depth values.
+  Reset the display range when opening another image.
 - Multi-point: icon toggle rows for Cross/Dot/Circle, color, and size. Each row
   previews its choices using the other two current selections. Include Label
   points, Show on all slices, Counter, and point count. Annotation placement

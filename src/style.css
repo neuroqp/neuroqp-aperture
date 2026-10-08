@@ -630,3 +630,56 @@ select:focus-visible {
   color: var(--ink);
   font-variant-numeric: tabular-nums;
 }
+
+/* Filter only the image canvas, never the panels or source data. */
+#viewer.display-adjusted canvas {
+  filter: var(--display-filter);
+}
+#histogram-bars {
+  fill: var(--accent);
+  fill-opacity: 0.3;
+  stroke: none;
+}
+#range-line {
+  stroke-width: 1;
+  opacity: 0.8;
+}
+.histogram-cutoff {
+  stroke: var(--focus);
+  stroke-width: 1.5;
+  vector-effect: non-scaling-stroke;
+}
+.display-presets {
+  gap: 4px;
+  justify-content: space-between;
+}
+.display-presets .text-button {
+  padding: 4px 5px;
+  font-size: 10px;
+  white-space: nowrap;
+}
+.adjustment input:disabled {
+  opacity: 0.4;
+}
+
+.histogram-container {
+  position: relative;
+}
+.histogram-container .range-graph {
+  display: block;
+}
+.histogram-scale {
+  position: absolute;
+  top: 4px;
+  right: 4px;
+  padding: 2px 6px;
+  font-size: 10px;
+  background: var(--panel);
+  opacity: 0;
+  pointer-events: none;
+}
+.histogram-container:hover .histogram-scale,
+.histogram-scale:focus-visible {
+  opacity: 1;
+  pointer-events: auto;
+}

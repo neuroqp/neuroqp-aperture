@@ -130,3 +130,29 @@ TIFF, changing the marker color to blue, and switching from dark to light. The
 screenshots `test-data/point-options-dark.native.png` and
 `test-data/point-options-light.native.png` remain local and ignored. Image
 processing and point placement remain unimplemented.
+
+## Display range and approximate histogram
+
+Supersedes the earlier UI-only brightness prototype. Fourteen frontend tests
+pass, including range clipping, the CSS transfer formula, histogram sampling,
+percentile tails, constant images, and empty histograms. Prettier, TypeScript,
+Vite, and the standalone Linux debug build pass.
+
+Browser interaction verified two sliders only, default Linear, the upper-right
+hover toggle, Log changing the histogram without changing the image, moving
+cutoff lines, percentile selection, Reset, and disabled controls on a new load.
+Light and dark layouts were inspected. Raw canvas pixels remained identical
+through display adjustments; a screenshot confirmed visible range clipping.
+
+Earlier native Linux checks in this change verified a preview histogram and a
+visible 1–99 percentile adjustment on a real microscopy TIFF, selecting 28–153.
+The native evidence is `test-data/histogram.native.png` and
+`test-data/histogram-preset.native.png`. The final simplified panel and hover
+interaction were checked in the isolated browser only, to avoid interfering
+with the user's active desktop. Native verification of that final UI remains
+outstanding. All screenshots and validation fixtures remain ignored.
+
+Histogram values are an approximation from a preview downsampled to at most
+256 by 256 pixels. They describe the 8-bit display luminance, not original
+16-bit intensities. The renderer filters only the image canvas; file data and
+cached tiles are not rewritten.

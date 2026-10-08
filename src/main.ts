@@ -6,6 +6,7 @@ import appIcon from "../src-tauri/icons/icon.png";
 import { icon, type IconName } from "./icons";
 import { bindTools, toolPanels } from "./tools";
 import { bindTheme } from "./theme";
+import { applyDisplay, loadHistogram } from "./display";
 import {
   ImageLoader,
   orientation,
@@ -38,7 +39,7 @@ document.querySelector<HTMLDivElement>("#app")!.innerHTML = `
   </header>
   <nav class="quick-bar" aria-label="Image tools">
     <div class="tool-group" role="group" aria-label="Image adjustments and annotation tools">
-      ${tool("brightness-button", "brightness", "Brightness & contrast", true)}
+      ${tool("brightness-button", "brightness", "Display range", true)}
       ${tool("points-button", "points", "Multi-point", true)}
     </div>
     <div class="load-status">
@@ -62,7 +63,7 @@ document.querySelector<HTMLDivElement>("#app")!.innerHTML = `
 
 const $ = <T extends HTMLElement = HTMLElement>(id: string) =>
   document.getElementById(id)! as T;
-const tools = bindTools();
+const tools = bindTools(applyDisplay);
 bindTheme();
 const native = isTauri();
 const windowHandle = native ? getCurrentWindow() : null;
@@ -115,6 +116,7 @@ function resetViewer() {
   pyramidAdded = false;
   tileError = null;
   viewer.close();
+  tools.resetImage();
   document
     .querySelectorAll<HTMLButtonElement>("[data-image-control]")
     .forEach((button) => (button.disabled = true));
@@ -170,6 +172,14 @@ function showImage(state: ImageState) {
 
   if (state.previewReady && !previewAdded) {
     previewAdded = true;
+    void loadHistogram(`${tileUrl(state.id)}/preview.jpg`).then(
+      (bins) => {
+        if (currentId === state.id) tools.setHistogram(bins);
+      },
+      () => {
+        if (currentId === state.id) tools.setHistogram(null);
+      },
+    );
     viewer.addTiledImage({
       tileSource: preview(state, tileUrl),
       ...transform,
@@ -183,6 +193,7 @@ function showImage(state: ImageState) {
           return;
         }
         viewer.viewport.goHome(true);
+        tools.setImageReady(true);
         document
           .querySelectorAll<HTMLButtonElement>("[data-image-control]")
           .forEach((button) => (button.disabled = false));
