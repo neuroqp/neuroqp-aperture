@@ -1,3 +1,4 @@
+mod annotation_io;
 mod roi;
 mod tiff_annotations;
 
@@ -46,6 +47,7 @@ fn main() {
                 channel: 0,
                 slice: 0,
                 frame: 0,
+                source_index: None,
                 raw: vec![],
             },
         };
@@ -88,4 +90,37 @@ fn main() {
         assert_eq!(read.active_roi.unwrap(), encoded);
         assert_eq!(read.overlays, overlays);
     }
+    let source = directory.join("gray16-stack.tif");
+    let loaded = annotation_io::load(&source).unwrap();
+    let mut split = vec![];
+    for (index, counter) in [(1, 2), (0, 4), (1, 4), (0, 2)] {
+        let mut group = loaded[index].clone();
+        group.points.retain(|p| p.counter == counter);
+        if counter == 2 {
+            group.point_type = 1;
+            group.size = 6;
+            group.color = Some(0xff00ff00);
+            group.show_labels = false;
+        }
+        split.push(group);
+    }
+    let mut added = split[0].clone();
+    added.source_index = None;
+    added.points = vec![roi::Point {
+        x: 21.5,
+        y: 22.25,
+        counter: 2,
+        position: 0,
+    }];
+    split.push(added);
+    let target = directory.join("saved-split.tif");
+    annotation_io::save(&source, &target, split).unwrap();
+    let reopened = annotation_io::load(&target).unwrap();
+    assert_eq!(reopened.len(), 5);
+    annotation_io::save(
+        &target,
+        &directory.join("saved-split-reopened.tif"),
+        reopened,
+    )
+    .unwrap();
 }

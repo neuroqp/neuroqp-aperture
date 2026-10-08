@@ -112,8 +112,10 @@ No microscopy source files are modified.
 - TIFF copies preserve their original layout. Stock ImageJ cannot directly open
   all tiled TIFFs or BigTIFFs; those need a suitable image reader. Other formats
   convert to a classic stripped TIFF, subject to its 4 GiB addressing limit.
-- Point movement and deletion are not implemented. Different marker styles save
-  as separate ROI groups; the latest is active in ImageJ and others are overlays.
+- Counter selects the annotation group. Type, color, size, and Label points
+  update that counter's existing and future points; switching counters restores
+  their settings. Point movement and deletion are not implemented. Saved ROI
+  groups use ImageJ's active selection and overlays.
 - Multi-page images display their first page. Specialist microscopy metadata,
   channels, Z stacks, and timepoints are not interpreted.
 - Supported display pixels are unsigned 8/16-bit grayscale, RGB, and RGBA in

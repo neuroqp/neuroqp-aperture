@@ -129,6 +129,31 @@ class ImageJInterop {
                 save(saved, directory.resolve("imagej-edited.tif"));
             }
         }
+        for (String name : new String[]{"saved-split.tif", "saved-split-reopened.tif"}) {
+            ImagePlus saved = open(directory.resolve(name));
+            PointRoi added = (PointRoi)saved.getRoi();
+            check(added.getFloatPolygon().npoints == 1 && added.getFloatPolygon().xpoints[0] == 21.5f && added.getFloatPolygon().ypoints[0] == 22.25f, "new group coordinates changed");
+            check(added.getName() == null && added.getProperty("source") == null, "new group inherited imported metadata");
+            check(Arrays.equals(added.getCounters(), new int[]{2}), "new group counter changed");
+            Overlay overlay = saved.getOverlay();
+            check(overlay.size() == 5 && overlay.get(0).getName().equals("untouched-rectangle"), "split overlays missing");
+            int[] counters = {2, 4, 4, 2};
+            int[] positions = {0, 1, 0, 2};
+            String[] names = {"synthetic-active", "editable-overlay", "synthetic-active", "editable-overlay"};
+            for (int i = 0; i < counters.length; i++) {
+                PointRoi group = (PointRoi)overlay.get(i + 1);
+                FloatPolygon xy = group.getFloatPolygon();
+                check(xy.npoints == 1 && xy.xpoints[0] == (counters[i] == 2 ? 12.25f : 3.5f) && xy.ypoints[0] == (counters[i] == 2 ? 16.75f : 9.25f), "split group coordinates changed");
+                check(Arrays.equals(group.getCounters(), new int[]{(positions[i] << 8) | counters[i]}), "split group counter/position changed");
+                check(group.getName().equals(names[i]) && group.getProperty("source").equals("synthetic"), "split group lost source metadata");
+                if (counters[i] == 2) {
+                    check(group.getPointType() == 1 && group.getSize() == 6 && group.getStrokeColor().equals(Color.green) && !group.getShowLabels(), "counter style edit lost");
+                } else {
+                    boolean fromOverlay = names[i].equals("editable-overlay");
+                    check(group.getPointType() == (fromOverlay ? 3 : 2) && group.getSize() == (fromOverlay ? 5 : 3) && group.getStrokeColor().equals(fromOverlay ? Color.cyan : new Color(0xffff8000, true)) && group.getShowLabels(), "unselected counter style changed");
+                }
+            }
+        }
     }
 
     public static void main(String[] args) throws Exception {

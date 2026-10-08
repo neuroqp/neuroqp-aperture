@@ -197,3 +197,20 @@ used. Local screenshots include `test-data/points-native-added.png` and
 TIFF copies retain their layout, so stock ImageJ's existing tiled-TIFF/BigTIFF
 reader limits still apply. Movement, deletion, stack navigation, and large-point-
 set performance benchmarks remain outside this change.
+
+## Counter-group editing
+
+Supersedes the new-points-only styling described above. Twenty-three frontend
+and seventeen Rust tests pass. Counter edits update existing markers, preserve
+other counters, and retain source metadata when mixed-counter ROIs split.
+The expanded ImageJ check verifies names/properties, counters, coordinates and
+slice positions through splitting, reordering, style edits and repeated saves.
+
+T3 browser checks verified editing both existing counter-0 markers without
+changing counter 1, recalling counter-1 controls, and saving the split groups
+with their original metadata references. A separate native Linux Tauri instance
+verified color, type, size and label changes, plus switching away and back to
+restore group controls and counts. Screenshot `test-data/counter-groups.native.png`
+is local and ignored. The review's loading-state issue was fixed by disabling
+point controls until annotation loading completes. Empty groups keep preferences
+for the current image only; Show on all slices still controls new-point positions.

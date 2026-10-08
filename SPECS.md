@@ -84,7 +84,11 @@ discarding unsaved annotations on Open or Close. Ctrl+S opens Save.
   previews its choices using the other two current selections. Include Label
   points, Show on all slices, Counter, and the selected counter's point count.
   With the tool active, primary clicks inside the image add points using the
-  selected configuration. Keep earlier marker styles when settings change.
+  selected counter's configuration. Counter selects the group being edited:
+  changing type, color, size, or Label points updates every existing point in
+  that counter and future points. Other counters stay unchanged. Switching
+  counters recalls their settings; point numbering is per counter. Empty-counter
+  settings are remembered during the current image session.
   Closing the panel or selecting Pan leaves point-placement mode. Do not add
   movement, deletion, or custom pan gestures yet.
 - Preserve option values while closing and reopening panels during the session.

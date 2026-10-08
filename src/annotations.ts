@@ -1,4 +1,9 @@
-import { pointColors, type PointSettings } from "./point-settings.ts";
+import {
+  defaultPointSettings,
+  pointColors,
+  pointSizes,
+  type PointSettings,
+} from "./point-settings.ts";
 
 export type AnnotationPoint = {
   x: number;
@@ -17,6 +22,7 @@ export type PointRoi = {
   slice: number;
   frame: number;
   raw: number[];
+  sourceIndex?: number;
 };
 export type AnnotationSettings = PointSettings & {
   labels: boolean;
@@ -24,6 +30,77 @@ export type AnnotationSettings = PointSettings & {
   counter: number;
 };
 export type ImageBounds = { width: number; height: number };
+
+const imageJTypes = { Cross: 1, Dot: 2, Circle: 3 };
+const imageJSizes = Object.keys(pointSizes) as PointSettings["size"][];
+const imageJColor = (color: PointSettings["color"]) =>
+  (0xff000000 | Number.parseInt(pointColors[color].slice(1), 16)) >>> 0;
+
+export function settingsForCounter(
+  rois: PointRoi[],
+  counter: number,
+): AnnotationSettings {
+  const roi = rois.find((roi) =>
+    roi.points.some((point) => point.counter === counter),
+  );
+  const point = roi?.points.find((point) => point.counter === counter);
+  return {
+    type:
+      (Object.keys(imageJTypes) as PointSettings["type"][]).find(
+        (type) => imageJTypes[type] === roi?.pointType,
+      ) ?? defaultPointSettings.type,
+    size: imageJSizes[roi?.size ?? -1] ?? defaultPointSettings.size,
+    color:
+      (Object.keys(pointColors) as PointSettings["color"][]).find(
+        (color) => imageJColor(color) === roi?.color,
+      ) ?? defaultPointSettings.color,
+    labels: roi?.showLabels ?? true,
+    allSlices:
+      !!roi &&
+      roi.position === 0 &&
+      roi.channel === 0 &&
+      roi.slice === 0 &&
+      roi.frame === 0 &&
+      point?.position === 0,
+    counter,
+  };
+}
+
+export function updateCounter<K extends keyof PointSettings | "labels">(
+  rois: PointRoi[],
+  counter: number,
+  key: K,
+  value: AnnotationSettings[K],
+): PointRoi[] {
+  const field = (
+    {
+      type: "pointType",
+      size: "size",
+      color: "color",
+      labels: "showLabels",
+    } as const
+  )[key];
+  const encoded =
+    key === "type"
+      ? imageJTypes[value as PointSettings["type"]]
+      : key === "size"
+        ? imageJSizes.indexOf(value as PointSettings["size"])
+        : key === "color"
+          ? imageJColor(value as PointSettings["color"])
+          : value;
+  let changed = false;
+  const next = rois.flatMap((roi) => {
+    const selected = roi.points.filter((point) => point.counter === counter);
+    if (!selected.length || roi[field] === encoded) return [roi];
+    changed = true;
+    const remaining = roi.points.filter((point) => point.counter !== counter);
+    const updated = { ...roi, [field]: encoded, points: selected };
+    return remaining.length
+      ? [{ ...roi, points: remaining }, updated]
+      : [updated];
+  });
+  return changed ? next : rois;
+}
 
 // OSD handles rotation in its coordinate conversions, but not image flipping.
 export function flipCoordinate(
@@ -70,16 +147,14 @@ export function addPoint(
     settings.counter > 9
   )
     return null;
+  const existing = rois.find((roi) =>
+    roi.points.some((point) => point.counter === settings.counter),
+  );
   const style = {
-    pointType: { Cross: 1, Dot: 2, Circle: 3 }[settings.type],
-    size: ["Tiny", "Small", "Medium", "Large", "Extra large"].indexOf(
-      settings.size,
-    ),
-    color:
-      (0xff000000 |
-        Number.parseInt(pointColors[settings.color].slice(1), 16)) >>>
-      0,
-    showLabels: settings.labels,
+    pointType: existing?.pointType ?? imageJTypes[settings.type],
+    size: existing?.size ?? imageJSizes.indexOf(settings.size),
+    color: existing ? existing.color : imageJColor(settings.color),
+    showLabels: existing?.showLabels ?? settings.labels,
     position: settings.allSlices ? 0 : 1,
     channel: 0,
     slice: 0,
@@ -90,19 +165,31 @@ export function addPoint(
     counter: settings.counter,
     position: style.position,
   };
-  const last = rois.at(-1);
-  if (
-    last &&
-    (Object.keys(style) as (keyof typeof style)[]).every(
-      (key) => last[key] === style[key],
-    )
-  ) {
-    return [
-      ...rois.slice(0, -1),
-      { ...last, points: [...last.points, nextPoint] },
-    ];
-  }
-  return [...rois, { ...style, points: [nextPoint], raw: [] }];
+  const index = rois.findIndex(
+    (roi) =>
+      roi.points.some((point) => point.counter === settings.counter) &&
+      roi.pointType === style.pointType &&
+      roi.size === style.size &&
+      roi.color === style.color &&
+      roi.showLabels === style.showLabels &&
+      roi.position <= 1 &&
+      roi.channel <= 1 &&
+      roi.slice <= 1 &&
+      roi.frame <= 1 &&
+      (!settings.allSlices ||
+        (roi.position === 0 &&
+          roi.channel === 0 &&
+          roi.slice === 0 &&
+          roi.frame === 0)),
+  );
+  if (index !== -1)
+    return rois.map((roi, roiIndex) =>
+      roiIndex === index ? { ...roi, points: [...roi.points, nextPoint] } : roi,
+    );
+  return [
+    ...rois,
+    { ...existing, ...style, points: [nextPoint], raw: existing?.raw ?? [] },
+  ];
 }
 
 export function counterCount(rois: PointRoi[], counter: number) {

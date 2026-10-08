@@ -3,7 +3,14 @@ import { convertFileSrc, invoke, isTauri } from "@tauri-apps/api/core";
 import { getCurrentWindow } from "@tauri-apps/api/window";
 import { open, save, confirm } from "@tauri-apps/plugin-dialog";
 import { AnnotationViewer } from "./annotation-viewer";
-import { addPoint, counterCount, type PointRoi } from "./annotations";
+import {
+  addPoint,
+  counterCount,
+  settingsForCounter,
+  updateCounter,
+  type PointRoi,
+  type AnnotationSettings,
+} from "./annotations";
 import appIcon from "../src-tauri/icons/icon.png";
 import { icon, type IconName } from "./icons";
 import { bindTools, toolPanels } from "./tools";
@@ -89,6 +96,7 @@ const viewer = OpenSeadragon({
 
 let currentImage: ImageState | null = null;
 let rois: PointRoi[] = [];
+const counterSettings = new Map<number, AnnotationSettings>();
 let annotationsReady = false;
 let annotationError: string | null = null;
 let dirty = false;
@@ -107,7 +115,31 @@ const annotationViewer = new AnnotationViewer(
   () => tools.pointsActive() && annotationsReady && !saving,
 );
 
-function updatePointTool() {
+function updatePointTool(key?: keyof AnnotationSettings) {
+  if (key === "counter") {
+    const counter = tools.pointSettings().counter;
+    tools.setPointSettings(
+      counterSettings.get(counter) ?? settingsForCounter(rois, counter),
+    );
+  } else if (key) {
+    const settings = tools.pointSettings();
+    counterSettings.set(settings.counter, settings);
+    if (annotationsReady && !saving && key !== "allSlices") {
+      const next = updateCounter(rois, settings.counter, key, settings[key]);
+      if (next !== rois) {
+        rois = next;
+        dirty = true;
+        annotationViewer.setRois(rois);
+      }
+    }
+  }
+  document
+    .querySelectorAll<HTMLButtonElement | HTMLInputElement | HTMLSelectElement>(
+      ".point-choice, #point-labels, #point-all-slices, select#point-counter",
+    )
+    .forEach((control) => {
+      control.disabled = saving || !annotationsReady;
+    });
   const active = tools.pointsActive();
   for (const gestures of [
     viewer.gestureSettingsByDeviceType("mouse"),
@@ -210,6 +242,8 @@ function resetViewer() {
   currentId = null;
   currentImage = null;
   rois = [];
+  counterSettings.clear();
+  tools.setPointSettings(settingsForCounter([], 0));
   annotationsReady = false;
   annotationError = null;
   dirty = false;
@@ -243,6 +277,9 @@ function showImage(state: ImageState) {
       (loaded) => {
         if (currentId !== state.id) return;
         rois = loaded;
+        tools.setPointSettings(
+          settingsForCounter(rois, tools.pointSettings().counter),
+        );
         annotationsReady = true;
         annotationViewer.setRois(rois);
         updatePointTool();

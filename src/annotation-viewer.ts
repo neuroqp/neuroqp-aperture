@@ -69,7 +69,7 @@ export class AnnotationViewer {
     const item = this.viewer.world.getItemAt(0);
     this.overlay.replaceChildren();
     if (!item || !this.image) return;
-    let label = 0;
+    const labels = new Map<number, number>();
     const fragment = document.createDocumentFragment();
     for (const roi of this.rois) {
       if (roi.position > 1 || roi.slice > 1 || roi.frame > 1 || roi.channel > 1)
@@ -81,7 +81,8 @@ export class AnnotationViewer {
           ? "#ffff00"
           : `#${(roi.color & 0xffffff).toString(16).padStart(6, "0")}`;
       for (const point of roi.points) {
-        label++;
+        const label = (labels.get(point.counter) ?? 0) + 1;
+        labels.set(point.counter, label);
         if (point.position > 1) continue;
         const stored = storedToImage(point, this.image.width, item.getFlip());
         const viewportPoint = item.imageToViewportCoordinates(

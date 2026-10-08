@@ -1,4 +1,5 @@
 import { icon } from "./icons";
+import type { AnnotationSettings } from "./annotations";
 import {
   defaultPointSettings,
   pointChoices,
@@ -74,7 +75,7 @@ export const toolPanels = `
 
 export function bindTools(
   onDisplayChange: (settings: DisplaySettings) => void,
-  onPointsChange: () => void = () => {},
+  onPointsChange: (key?: keyof AnnotationSettings) => void = () => {},
 ) {
   const container = document.querySelector<HTMLElement>("#tool-panels")!;
   const names = ["brightness", "points"] as const;
@@ -237,7 +238,7 @@ export function bindTools(
       button.addEventListener("click", () => {
         point = { ...point, [key]: choice.value } as PointSettings;
         refreshPoints();
-        onPointsChange();
+        onPointsChange(key);
       });
       group.append(button);
     }
@@ -254,8 +255,14 @@ export function bindTools(
     }
   }
   refreshPoints();
-  for (const id of ["point-labels", "point-all-slices", "point-counter"]) {
-    document.getElementById(id)!.addEventListener("change", onPointsChange);
+  for (const [id, key] of [
+    ["point-labels", "labels"],
+    ["point-all-slices", "allSlices"],
+    ["point-counter", "counter"],
+  ] as const) {
+    document
+      .getElementById(id)!
+      .addEventListener("change", () => onPointsChange(key));
   }
   return {
     close,
@@ -264,6 +271,22 @@ export function bindTools(
     setHistogram,
     pointsActive: () => openPanels.has("points"),
     deactivatePoints: () => setOpen("points", false),
+    setPointSettings: (settings: AnnotationSettings) => {
+      point = {
+        type: settings.type,
+        color: settings.color,
+        size: settings.size,
+      };
+      (document.getElementById("point-labels") as HTMLInputElement).checked =
+        settings.labels;
+      (
+        document.getElementById("point-all-slices") as HTMLInputElement
+      ).checked = settings.allSlices;
+      (
+        document.querySelector("select#point-counter") as HTMLSelectElement
+      ).value = String(settings.counter);
+      refreshPoints();
+    },
     pointSettings: () => ({
       ...point,
       labels: (document.getElementById("point-labels") as HTMLInputElement)

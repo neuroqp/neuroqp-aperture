@@ -17,12 +17,16 @@ fn is_tiff(path: &Path) -> bool {
 }
 
 fn points(annotations: &TiffAnnotations) -> Result<Vec<PointRoi>, String> {
-    annotations
+    let mut rois: Vec<PointRoi> = annotations
         .overlays
         .iter()
         .chain(annotations.active_roi.iter())
         .filter_map(|bytes| roi::decode(bytes).transpose())
-        .collect()
+        .collect::<Result<_, _>>()?;
+    for (index, roi) in rois.iter_mut().enumerate() {
+        roi.source_index = Some(index);
+    }
+    Ok(rois)
 }
 
 pub fn load(source: &Path) -> Result<Vec<PointRoi>, String> {
@@ -49,13 +53,17 @@ fn edited_metadata(
         .filter(|bytes| matches!(roi::decode(bytes), Ok(None)))
         .unwrap_or_default();
     let mut encoded = vec![];
-    for (index, mut current) in rois.into_iter().enumerate() {
-        // The frontend retains group order and appends groups. Restore metadata
-        // from the source rather than accepting arbitrary ROI bytes through IPC.
-        current.raw = existing
-            .get(index)
-            .map(|r| r.raw.clone())
-            .unwrap_or_default();
+    for mut current in rois {
+        // Splitting a mixed-counter ROI retains its original metadata for each
+        // group, without accepting arbitrary ROI bytes through IPC.
+        current.raw = match current.source_index {
+            Some(index) => existing
+                .get(index)
+                .ok_or("Original point ROI index is out of range")?
+                .raw
+                .clone(),
+            None => vec![],
+        };
         if !current.points.is_empty() {
             encoded.push(roi::encode(&current)?);
         }
@@ -177,6 +185,7 @@ mod tests {
             overlays: vec![bytes.clone(), nonpoint.clone()],
         };
         let mut submitted = point();
+        submitted.source_index = Some(0);
         submitted.raw.clear();
         let (active, overlays) = edited_metadata(original, vec![submitted]).unwrap();
         assert_eq!(active, bytes);
@@ -193,8 +202,10 @@ mod tests {
             overlays: vec![roi::encode(&first).unwrap()],
         };
         let mut cleared = point();
+        cleared.source_index = Some(0);
         cleared.points.clear();
         let mut existing = point();
+        existing.source_index = Some(1);
         existing.raw.clear();
         let mut appended = point();
         appended.raw.clear();
@@ -215,6 +226,84 @@ mod tests {
             roi::decode(&overlays[0]).unwrap().unwrap().frame,
             existing.frame
         );
+    }
+
+    #[test]
+    fn split_counter_groups_keep_source_metadata_after_reordering_and_reopening() {
+        let mut mixed = point();
+        mixed.points[0].counter = 1;
+        mixed.points[1].counter = 2;
+        let mixed_bytes = roi::encode(&mixed).unwrap();
+        let mut other_bytes = mixed_bytes.clone();
+        let h = u32::from_be_bytes(other_bytes[60..64].try_into().unwrap()) as usize;
+        let name = u32::from_be_bytes(other_bytes[h + 16..h + 20].try_into().unwrap()) as usize;
+        for (i, letter) in "overlay".encode_utf16().enumerate() {
+            other_bytes[name + i * 2..name + i * 2 + 2].copy_from_slice(&letter.to_be_bytes());
+        }
+        let original = TiffAnnotations {
+            active_roi: Some(mixed_bytes),
+            overlays: vec![other_bytes],
+        };
+        let loaded = points(&original).unwrap();
+        assert_eq!(loaded[0].source_index, Some(0));
+        assert_eq!(loaded[1].source_index, Some(1));
+        let mut counter_one = loaded[1].clone();
+        counter_one.points.retain(|p| p.counter == 1);
+        counter_one.point_type = 1;
+        counter_one.size = 5;
+        counter_one.color = Some(0xff00ff00);
+        counter_one.show_labels = false;
+        let mut counter_two = loaded[1].clone();
+        counter_two.points.retain(|p| p.counter == 2);
+        let mut added = point();
+        added.points.truncate(1);
+        added.points[0].x = 41.5;
+        // Raw bytes from a new frontend group must never supply source metadata.
+        assert_eq!(added.source_index, None);
+        let submitted = vec![counter_one, loaded[0].clone(), counter_two, added];
+        let (active, overlays) = edited_metadata(original, submitted.clone()).unwrap();
+        let reopened = TiffAnnotations {
+            active_roi: Some(active),
+            overlays,
+        };
+        let saved = points(&reopened).unwrap();
+        assert_eq!(saved.len(), 4);
+        for (actual, expected) in saved.iter().zip(&submitted) {
+            assert_eq!(actual.points, expected.points);
+            assert_eq!(actual.point_type, expected.point_type);
+            assert_eq!(actual.size, expected.size);
+            assert_eq!(actual.color, expected.color);
+            assert_eq!(actual.show_labels, expected.show_labels);
+            assert_eq!(actual.frame, expected.frame);
+        }
+        let text = |raw: &[u8], offset: usize| {
+            let h = u32::from_be_bytes(raw[60..64].try_into().unwrap()) as usize;
+            let start =
+                u32::from_be_bytes(raw[h + offset..h + offset + 4].try_into().unwrap()) as usize;
+            let len = u32::from_be_bytes(raw[h + offset + 4..h + offset + 8].try_into().unwrap())
+                as usize;
+            raw[start..start + len * 2].to_vec()
+        };
+        for (group, source) in [(0, 1), (1, 0), (2, 1)] {
+            assert_eq!(text(&saved[group].raw, 16), text(&loaded[source].raw, 16));
+            assert_eq!(text(&saved[group].raw, 40), text(&loaded[source].raw, 40));
+        }
+        assert!(text(&saved[3].raw, 16).is_empty());
+        assert!(text(&saved[3].raw, 40).is_empty());
+        let (active, overlays) = edited_metadata(
+            TiffAnnotations {
+                active_roi: reopened.active_roi.clone(),
+                overlays: reopened.overlays.clone(),
+            },
+            saved,
+        )
+        .unwrap();
+        assert_eq!(Some(active), reopened.active_roi);
+        assert_eq!(overlays, reopened.overlays);
+
+        let mut invalid = submitted[0].clone();
+        invalid.source_index = Some(99);
+        assert!(edited_metadata(reopened, vec![invalid]).is_err());
     }
 
     #[test]

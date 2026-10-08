@@ -31,6 +31,9 @@ pub struct PointRoi {
     pub slice: u32,
     #[serde(default)]
     pub frame: u32,
+    /// Original point ROI in the opened image; shared by groups split by counter.
+    #[serde(default)]
+    pub source_index: Option<usize>,
     /// Retained on the backend, never accepted from the frontend.
     #[serde(skip)]
     pub raw: Vec<u8>,
@@ -152,6 +155,7 @@ pub fn decode(data: &[u8]) -> Result<Option<PointRoi>, String> {
         channel,
         slice,
         frame,
+        source_index: None,
         raw: data.to_vec(),
     }))
 }
@@ -176,6 +180,7 @@ pub fn encode(roi: &PointRoi) -> Result<Vec<u8>, String> {
         original.raw.clear();
         let mut current = roi.clone();
         current.raw.clear();
+        current.source_index = None;
         if original == current {
             return Ok(roi.raw.clone());
         }
@@ -262,6 +267,7 @@ mod tests {
             channel: 0,
             slice: 0,
             frame: 0,
+            source_index: None,
             raw: vec![],
         }
     }

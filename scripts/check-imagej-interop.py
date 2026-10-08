@@ -51,7 +51,7 @@ def main():
         )
         (work / "src").mkdir()
         shutil.copyfile(scripts / "check-imagej-interop.rs", work / "src" / "main.rs")
-        for module in ["roi.rs", "tiff_annotations.rs"]:
+        for module in ["annotation_io.rs", "roi.rs", "tiff_annotations.rs"]:
             shutil.copyfile(backend / module, work / "src" / module)
         def rust(mode):
             run("cargo", "run", "--quiet", "--offline", "--manifest-path",
