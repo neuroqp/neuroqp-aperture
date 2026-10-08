@@ -89,3 +89,20 @@ test("percentile presets clip the requested tails and handle uniform and empty i
     maximum: 255,
   });
 });
+
+test("0–100 uses occupied histogram endpoints without clipping rare intensities", async () => {
+  const { percentileRange } = await import("./display-settings.ts");
+  const bins = Array(256).fill(0);
+  bins[30] = 1;
+  bins[100] = 10000;
+  bins[210] = 1;
+  assert.deepEqual(percentileRange(bins, 0), { minimum: 30, maximum: 210 });
+  for (const value of [0, 80, 255]) {
+    const constant = Array(256).fill(0);
+    constant[value] = 1;
+    const result = percentileRange(constant, 0);
+    assert.ok(result.maximum > result.minimum);
+    assert.ok(result.minimum >= 0 && result.maximum <= 255);
+  }
+  assert.deepEqual(percentileRange(Array(256).fill(0), 0), defaults);
+});

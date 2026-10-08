@@ -41,6 +41,9 @@ pub struct Job {
     pub cancel: AtomicBool,
     pub dir: Mutex<PathBuf>,
     pub input: PathBuf,
+    pub source: PathBuf,
+    /// Initial metadata remains the sourceIndex basis through repeated saves.
+    pub annotations: Mutex<Option<crate::annotation_io::AnnotationBasis>>,
     work: PathBuf,
     pub native: Mutex<Vec<NativeLevel>>,
     root: PathBuf,
@@ -165,6 +168,8 @@ impl Backend {
             cancel: AtomicBool::new(false),
             dir: Mutex::new(dir.clone()),
             input,
+            source,
+            annotations: Mutex::new(None),
             work: dir,
             native: Mutex::new(Vec::new()),
             root: self.root.clone(),

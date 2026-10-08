@@ -1,7 +1,19 @@
 import OpenSeadragon from "openseadragon";
 import { convertFileSrc, invoke, isTauri } from "@tauri-apps/api/core";
 import { getCurrentWindow } from "@tauri-apps/api/window";
-import { open } from "@tauri-apps/plugin-dialog";
+import { open, save, confirm } from "@tauri-apps/plugin-dialog";
+import { AnnotationViewer } from "./annotation-viewer";
+import {
+  addPoint,
+  movePoint,
+  deletePoint,
+  counterCount,
+  settingsForRois,
+  updatePointRois,
+  selectCounter,
+  type PointRoi,
+  type AnnotationSettings,
+} from "./annotations";
 import appIcon from "../src-tauri/icons/icon.png";
 import { icon, type IconName } from "./icons";
 import { bindTools, toolPanels } from "./tools";
@@ -28,7 +40,7 @@ document.querySelector<HTMLDivElement>("#app")!.innerHTML = `
     </div>
     <div class="file-actions">
       <button id="open-button" class="file-button" type="button" title="Open image (Ctrl+O)">${icon("open")}<span>Open</span></button>
-      <button id="save-button" class="file-button" type="button" title="Saving is not available in this preview" disabled>${icon("save")}<span>Save</span></button>
+      <button id="save-button" class="file-button" type="button" title="Save annotated TIFF (Ctrl+S)" disabled>${icon("save")}<span>Save</span></button>
     </div>
     <button id="theme-button" class="tool theme-button" type="button" aria-label="Switch theme"></button>
     <div class="window-actions">
@@ -59,11 +71,23 @@ document.querySelector<HTMLDivElement>("#app")!.innerHTML = `
     <section id="viewer" aria-label="Image viewer"></section>
     ${toolPanels}
   </div>
+  <dialog id="save-dialog" aria-labelledby="save-dialog-title" aria-describedby="save-dialog-description save-dialog-path">
+    <form method="dialog">
+      <h2 id="save-dialog-title">Save annotated TIFF</h2>
+      <p id="save-dialog-description">Overwrite this TIFF or save to another file. Image pixels stay unchanged.</p>
+      <p id="save-dialog-path" class="save-target"></p>
+      <div class="save-actions">
+        <button id="save-overwrite-button" class="file-button save-primary" type="submit" value="overwrite">Overwrite</button>
+        <button id="save-as-button" class="file-button" type="submit" value="save-as">Save as...</button>
+        <button id="save-cancel-button" class="file-button" type="submit" value="cancel" autofocus>Cancel</button>
+      </div>
+    </form>
+  </dialog>
 `;
 
 const $ = <T extends HTMLElement = HTMLElement>(id: string) =>
   document.getElementById(id)! as T;
-const tools = bindTools(applyDisplay);
+const tools = bindTools(applyDisplay, updatePointTool);
 bindTheme();
 const native = isTauri();
 const windowHandle = native ? getCurrentWindow() : null;
@@ -82,8 +106,173 @@ const viewer = OpenSeadragon({
   visibilityRatio: 0.2,
   constrainDuringPan: false,
   maxZoomPixelRatio: 4,
+  pixelsPerArrowPress: 300,
   gestureSettingsMouse: { clickToZoom: false, dblClickToZoom: true },
 });
+
+let currentImage: ImageState | null = null;
+let rois: PointRoi[] = [];
+let annotationsReady = false;
+let annotationError: string | null = null;
+let saveError: string | null = null;
+let dirty = false;
+let saving = false;
+let savedPath: string | null = null;
+const saveDialog = $<HTMLDialogElement>("save-dialog");
+function editAnnotations(next: PointRoi[] | null) {
+  if (!next || next === rois || !annotationsReady || saving) return;
+  rois = next;
+  dirty = true;
+  annotationViewer.setRois(rois);
+  updatePointTool();
+}
+
+const annotationViewer = new AnnotationViewer(viewer, {
+  add: (point) => {
+    if (currentImage)
+      editAnnotations(
+        addPoint(rois, point, tools.pointSettings(), currentImage),
+      );
+  },
+  move: (reference, point) => {
+    if (currentImage)
+      editAnnotations(movePoint(rois, reference, point, currentImage));
+  },
+  delete: (reference) => editAnnotations(deletePoint(rois, reference)),
+  active: () => tools.pointsActive(),
+  editable: () => annotationsReady && !saving,
+});
+
+function updatePointTool(key?: keyof AnnotationSettings) {
+  if (key === "counter" && annotationsReady && !saving) {
+    rois = selectCounter(rois, tools.pointSettings().counter);
+    annotationViewer.setRois(rois);
+  } else if (
+    key &&
+    annotationsReady &&
+    !saving &&
+    key !== "allSlices" &&
+    key !== "counter"
+  ) {
+    const settings = tools.pointSettings();
+    const next = updatePointRois(rois, key, settings[key]);
+    if (next !== rois) {
+      rois = next;
+      dirty = true;
+      annotationViewer.setRois(rois);
+    }
+  }
+  document
+    .querySelectorAll<HTMLButtonElement | HTMLInputElement | HTMLSelectElement>(
+      ".point-choice, #point-labels, #point-all-slices, #point-counter, #point-counter-options button[data-counter]",
+    )
+    .forEach((control) => {
+      control.disabled = saving || !annotationsReady;
+    });
+  const active = tools.pointsActive();
+  annotationViewer.updateInteraction();
+  $("pan-button").classList.toggle("selected", !active);
+  const count = counterCount(rois, tools.pointSettings().counter);
+  $("point-count").textContent = String(count);
+  $("point-count").title =
+    `${rois.reduce((sum, roi) => sum + roi.points.length, 0)} points total`;
+  $("filename").classList.toggle("unsaved", dirty);
+  $<HTMLButtonElement>("save-button").disabled =
+    !annotationsReady ||
+    (!dirty && !rois.some((roi) => roi.points.length > 0)) ||
+    saving;
+}
+
+async function discardChanges() {
+  if (saving || dialogOpen) return false;
+  if (!dirty) return true;
+  dialogOpen = true;
+  try {
+    return await confirm(
+      "Discard unsaved point annotations? Save first to keep them.",
+      {
+        title: "Unsaved annotations",
+        kind: "warning",
+        okLabel: "Discard",
+        cancelLabel: "Cancel",
+      },
+    );
+  } finally {
+    dialogOpen = false;
+  }
+}
+
+async function saveAnnotations() {
+  if (
+    !native ||
+    saving ||
+    dialogOpen ||
+    !currentId ||
+    $<HTMLButtonElement>("save-button").disabled
+  )
+    return;
+  dialogOpen = true;
+  saving = true;
+  saveError = null;
+  updatePointTool();
+  if (currentImage) showImage(currentImage);
+  let completed = false;
+  try {
+    const target = await invoke<{
+      path: string;
+      exists: boolean;
+      isTiff: boolean;
+    }>("annotation_target", {
+      id: currentId,
+      path: savedPath,
+    });
+    let path = target.path;
+    let overwrite = false;
+    if (target.isTiff || target.exists) {
+      $("save-dialog-path").textContent = target.path;
+      saveDialog.returnValue = "cancel";
+      const choice = await new Promise<string>((resolve) => {
+        saveDialog.addEventListener(
+          "close",
+          () => resolve(saveDialog.returnValue),
+          { once: true },
+        );
+        saveDialog.showModal();
+      });
+      if (choice === "overwrite") overwrite = true;
+      else if (choice === "save-as") {
+        const selected = await save({
+          title: "Save annotated TIFF as",
+          defaultPath: target.path,
+          filters: [{ name: "TIFF image", extensions: ["tif", "tiff"] }],
+        });
+        if (!selected) return;
+        path = selected;
+        // The native save picker confirms replacement of an existing file.
+        overwrite = true;
+      } else return;
+    }
+    if (!/\.tiff?$/i.test(path) && !(target.isTiff && path === target.path))
+      throw new Error("Use a .tif or .tiff filename for the annotated TIFF.");
+    $("status").classList.remove("error");
+    $("status").textContent = "Saving annotations…";
+    await invoke("save_annotations", { id: currentId, path, rois, overwrite });
+    savedPath = path;
+    dirty = false;
+    completed = true;
+  } catch (error) {
+    saveError = String(error);
+  } finally {
+    saving = false;
+    dialogOpen = false;
+    updatePointTool();
+    if (currentImage) showImage(currentImage);
+    if (completed && !$("status").classList.contains("error")) {
+      $("status").textContent = "Saved";
+      $("status").title = "Saved";
+    }
+  }
+}
 
 let currentId: string | null = null;
 let previewAdded = false;
@@ -112,6 +301,17 @@ function setLoading(active: boolean, progress: number | null = null) {
 
 function resetViewer() {
   currentId = null;
+  currentImage = null;
+  savedPath = null;
+  rois = [];
+  tools.setPointSettings(settingsForRois([], 0));
+  annotationsReady = false;
+  annotationError = null;
+  saveError = null;
+  dirty = false;
+  annotationViewer.setImage(null);
+  annotationViewer.setRois([]);
+  updatePointTool();
   previewAdded = false;
   pyramidAdded = false;
   tileError = null;
@@ -126,8 +326,8 @@ function resetViewer() {
 function showError(message: string) {
   setLoading(false);
   $("viewer").dataset.phase = "error";
-  $("status").textContent = message;
-  $("status").title = message;
+  $("status").textContent = saveError || message;
+  $("status").title = saveError || message;
   $("status").classList.add("error");
 }
 
@@ -135,32 +335,60 @@ function showImage(state: ImageState) {
   if (currentId !== state.id) {
     resetViewer();
     currentId = state.id;
+    void invoke<PointRoi[]>("load_annotations", { id: state.id }).then(
+      (loaded) => {
+        if (currentId !== state.id) return;
+        rois = loaded;
+        tools.setPointSettings(
+          settingsForRois(rois, tools.pointSettings().counter),
+        );
+        annotationsReady = true;
+        annotationViewer.setRois(rois);
+        updatePointTool();
+      },
+      (error) => {
+        if (currentId !== state.id) return;
+        annotationError = `Annotations could not load: ${String(error)}`;
+        $("status").textContent = annotationError;
+        $("status").classList.add("error");
+      },
+    );
   }
+  currentImage = state;
+  if (state.width > 0) annotationViewer.setImage(state);
   $("filename").textContent = state.name;
+  $("filename").classList.toggle("unsaved", dirty);
   $("viewer").dataset.phase = state.phase;
   $("filename").title = state.name;
   setLoading(state.phase === "loading", state.progress);
   $("status").classList.toggle(
     "error",
     state.phase === "error" ||
+      saveError !== null ||
+      annotationError !== null ||
       (tileError !== null && state.phase !== "cancelled"),
   );
   const status =
-    state.phase === "error"
+    saveError ||
+    (state.phase === "error"
       ? state.error || "Could not load image"
-      : state.phase === "cancelled"
-        ? "Cancelled"
-        : tileError
-          ? tileError
-          : state.phase === "loading"
-            ? state.previewReady
-              ? "Loading detail…"
-              : state.width > 0
-                ? "Building preview…"
-                : "Reading image…"
-            : "";
+      : annotationError
+        ? annotationError
+        : saving
+          ? "Saving annotations…"
+          : state.phase === "cancelled"
+            ? "Cancelled"
+            : tileError
+              ? tileError
+              : state.phase === "loading"
+                ? state.previewReady
+                  ? "Loading detail…"
+                  : state.width > 0
+                    ? "Building preview…"
+                    : "Reading image…"
+                : "");
   if ($("status").textContent !== status) $("status").textContent = status;
-  $("status").title = tileError || state.detail || status;
+  $("status").title = saveError || tileError || state.detail || status;
   const transform = orientation(state.orientation);
   const [displayWidth, displayHeight] =
     transform.degrees % 180 === 0
@@ -197,7 +425,7 @@ function showImage(state: ImageState) {
         document
           .querySelectorAll<HTMLButtonElement>("[data-image-control]")
           .forEach((button) => (button.disabled = false));
-        $("pan-button").classList.add("selected");
+        updatePointTool();
         if (state.tilesReady) addPyramid(state);
       },
       error: () => {
@@ -241,7 +469,8 @@ const loader = new ImageLoader(
   showError,
 );
 
-async function openPath(path: string) {
+async function openPath(path: string, checked = false) {
+  if (!checked && !(await discardChanges())) return;
   resetViewer();
   $("viewer").dataset.phase = "loading";
   $("filename").textContent = path.split(/[\\/]/).pop() || path;
@@ -252,7 +481,7 @@ async function openPath(path: string) {
 }
 
 async function chooseImage() {
-  if (!native || dialogOpen) return;
+  if (!native || dialogOpen || !(await discardChanges())) return;
   dialogOpen = true;
   try {
     const path = await open({
@@ -265,7 +494,7 @@ async function chooseImage() {
         },
       ],
     });
-    if (typeof path === "string") await openPath(path);
+    if (typeof path === "string") await openPath(path, true);
   } catch (error) {
     showError(String(error));
   } finally {
@@ -285,10 +514,14 @@ async function cancelLoad() {
   $<HTMLButtonElement>("cancel-button").disabled = false;
 }
 
+$("save-button").addEventListener("click", () => void saveAnnotations());
 $("open-button").addEventListener("click", () => void chooseImage());
 $("cancel-button").addEventListener("click", () => void cancelLoad());
 $("fit-button").addEventListener("click", () => viewer.viewport.goHome());
-$("pan-button").addEventListener("click", () => viewer.canvas.focus());
+$("pan-button").addEventListener("click", () => {
+  tools.deactivatePoints();
+  viewer.canvas.focus();
+});
 viewer.addHandler("tile-load-failed", (event) => {
   const message = tileFailure(
     currentId ? tileUrl(currentId) : null,
@@ -302,6 +535,7 @@ viewer.addHandler("tile-load-failed", (event) => {
   )
     return;
   tileError = message;
+  if (saveError) return;
   $("status").textContent = message;
   $("status").title = message;
   $("status").classList.add("error");
@@ -315,9 +549,16 @@ $("zoom-out-button").addEventListener("click", () => {
   viewer.viewport.applyConstraints();
 });
 document.addEventListener("keydown", (event) => {
+  if (dialogOpen || saving) return;
   if ((event.ctrlKey || event.metaKey) && event.key.toLowerCase() === "o") {
     event.preventDefault();
     void chooseImage();
+  } else if (
+    (event.ctrlKey || event.metaKey) &&
+    event.key.toLowerCase() === "s"
+  ) {
+    event.preventDefault();
+    void saveAnnotations();
   } else if (event.key === "Escape") {
     if (tools.close()) event.preventDefault();
     else void cancelLoad();
@@ -346,6 +587,17 @@ document.addEventListener("keydown", (event) => {
 });
 
 if (windowHandle) {
+  void windowHandle
+    .onCloseRequested(async (event) => {
+      if (dirty || saving || dialogOpen) {
+        event.preventDefault();
+        if (await discardChanges()) {
+          dirty = false;
+          await windowHandle.close();
+        }
+      }
+    })
+    .catch(showError);
   $("minimize-button").addEventListener(
     "click",
     () => void windowHandle.minimize().catch(showError),
@@ -388,5 +640,6 @@ if (windowHandle) {
 
 window.addEventListener("beforeunload", () => {
   loader.dispose();
+  annotationViewer.dispose();
   viewer.destroy();
 });

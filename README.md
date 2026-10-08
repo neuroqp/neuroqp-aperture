@@ -85,14 +85,49 @@ operate the real file chooser and capture the application window. It uses the
 keyboard, clipboard, and window focus while running. Results and screenshots
 stay in ignored `test-data/`.
 
+## ImageJ annotation validation
+
+Run the optional interoperability check against a local ImageJ installation:
+
+```bash
+python3 scripts/check-imagej-interop.py /path/to/ImageJ/ij.jar --java-home /path/to/jdk
+```
+
+It generates synthetic TIFFs, round-trips editable ROIs through Aperture and
+ImageJ, and checks coordinates, metadata, and exact image pixel preservation.
+No microscopy source files are modified.
+
 ## Proof-of-concept boundaries
 
 - Linux is the current development and validation target. Windows and macOS
   packaging and testing are pending.
-- Save is disabled. Display-range sliders and percentile presets adjust only
+- Save/Ctrl+S offers Overwrite, Save as…, or Cancel for TIFFs. Overwrite updates
+  ImageJ-compatible annotations at the current path while preserving pixels and
+  unrelated metadata. Other formats default to a sibling file with the same
+  name and a .tif extension; existing destinations require confirmation.
+  Save as… opens the file picker and remembers the chosen path for later saves.
+  Click with Multi-point active to add
+  points; closing the panel or selecting Pan leaves placement mode. Imported
+  ImageJ point selections and overlays remain editable annotations.
+- Display-range sliders and percentile presets adjust only
   the displayed image. The approximate histogram samples the 8-bit preview, with
-  linear counts by default and an optional Log toggle on hover. Original images
-  and cached tiles stay unchanged. Multi-point options do not yet place points.
+  linear counts by default and an optional Log toggle on hover. The 0–100 preset
+  uses the sampled minimum and maximum; Reset restores 0–255. Original images
+  and cached tiles stay unchanged.
+- TIFF copies preserve their original layout. Stock ImageJ cannot directly open
+  all tiled TIFFs or BigTIFFs; those need a suitable image reader. Other formats
+  convert to a classic stripped TIFF, subject to its 4 GiB addressing limit.
+- Counter assigns an ImageJ category to new points in the active selection.
+  Type, size and base color apply to that selection; Label points also updates
+  point overlays. Fresh counter-0 selections show point numbers; using a higher
+  counter switches to category labels and ImageJ's counter colors. The question
+  mark to the right of Counter explains this behavior. Categories range from
+  0 to 99. In multi-point mode, mouse-down or E adds a point at the cursor,
+  dragging an existing point moves it, and Alt-click removes it. The hit radius
+  is five screen pixels regardless of marker size. Hold Space or Ctrl to
+  temporarily pan without leaving the tool; WASD/arrows move at 7.5 times
+  the viewer's default speed. The panel header's help explains the controls.
+  Saved ROIs use ImageJ's active selection and overlays.
 - Multi-page images display their first page. Specialist microscopy metadata,
   channels, Z stacks, and timepoints are not interpreted.
 - Supported display pixels are unsigned 8/16-bit grayscale, RGB, and RGBA in

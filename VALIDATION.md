@@ -156,3 +156,220 @@ Histogram values are an approximation from a preview downsampled to at most
 256 by 256 pixels. They describe the 8-bit display luminance, not original
 16-bit intensities. The renderer filters only the image canvas; file data and
 cached tiles are not rewritten.
+
+## Editable multi-point annotations and ImageJ TIFF copies
+
+Eighteen frontend and sixteen Rust tests pass. Frontend checks cover immutable
+point additions, style grouping, outside-image rejection, and pixel-center/flip
+transforms. Backend checks cover real ImageJ ROI bytes, malformed metadata,
+classic/BigTIFF in both byte orders, unknown metadata retention, atomic copies,
+source/symlink/hardlink overwrite rejection, and pixel-identical PNG conversion.
+Prettier, rustfmt, Clippy, TypeScript/Vite, and the standalone debug build pass.
+
+`python3 scripts/check-imagej-interop.py /path/to/ij.jar --java-home /path/to/jdk`
+passed against the locally installed ImageJ 1.54g. It generates synthetic TIFFs,
+uses ImageJ's own encoders/decoders, edits through Aperture's ROI/TIFF modules,
+reopens with ImageJ, adds another point, and reimports the saved result. It
+checks exact pixel values, original source bytes, counters, subpixels, active
+selection and overlay styles, ROI properties, calibration and image metadata.
+The headless check bypasses ImageJ toolbar activation, which requires a GUI.
+Its float-image case tests metadata interchange only; Aperture's viewer still
+rejects floating-point images.
+
+Browser interaction with the production frontend and mocked native IPC verified
+imported marks, active-only placement, outside-image rejection, separate style
+groups, counters, label/all-slice configuration, save payloads, and unchanged
+marker screen size through zoom. T3 covered initial interactions; after its
+explicit automation-host-unavailable response, isolated Chromium completed zoom
+and pan checks. Validation harnesses remain ignored under `test-data/`.
+
+A separate Linux Tauri/WebDriver instance verified native point placement over
+a loaded image, marker rendering, counter updates, Save enablement, the native
+Save dialog opening, successful native save command execution, and reloading the
+saved TIFF with its marker. ImageJ independently reopened that native PNG-to-TIFF
+output, verified all 3,185 source RGB pixels exactly, and added another point to
+the editable selection. Native dialog filename entry and confirmation were
+not automated; save-command tests and browser Save-flow checks cover those
+surrounding paths separately. No global desktop mouse or keyboard injection was
+used. Local screenshots include `test-data/points-native-added.png` and
+`test-data/points-native-imported.png`.
+
+TIFF copies retain their layout, so stock ImageJ's existing tiled-TIFF/BigTIFF
+reader limits still apply. Movement, deletion, stack navigation, and large-point-
+set performance benchmarks remain outside this change.
+
+## Counter-group editing
+
+Supersedes the new-points-only styling described above. Twenty-three frontend
+and seventeen Rust tests pass. Counter edits update existing markers, preserve
+other counters, and retain source metadata when mixed-counter ROIs split.
+The expanded ImageJ check verifies names/properties, counters, coordinates and
+slice positions through splitting, reordering, style edits and repeated saves.
+
+T3 browser checks verified editing both existing counter-0 markers without
+changing counter 1, recalling counter-1 controls, and saving the split groups
+with their original metadata references. A separate native Linux Tauri instance
+verified color, type, size and label changes, plus switching away and back to
+restore group controls and counts. Screenshot `test-data/counter-groups.native.png`
+is local and ignored. The review's loading-state issue was fixed by disabling
+point controls until annotation loading completes. Empty groups keep preferences
+for the current image only; Show on all slices still controls new-point positions.
+
+## ImageJ counter semantics and themed controls
+
+Supersedes Counter-group editing above. Counter now selects a category inside
+the active point selection. Type, size and base color are shared by that
+selection; label visibility also applies to point overlays. Default counter-0
+selections show point indices; selecting a higher category switches to category
+labels and ImageJ colors, retained when returning to 0. Aperture switches
+immediately, without reproducing ImageJ's temporary missing-label behavior
+before its per-point counter array is allocated.
+
+Twenty-nine frontend and nineteen Rust tests pass, alongside Prettier, rustfmt,
+Clippy, TypeScript/Vite and the native debug build. Regression coverage includes
+overlay-only imports, preserved active/nonpoint selection roles, mixed-slice
+positions, category labels/colors, shared styling and immutable point addition.
+The installed ImageJ interoperability check passes after the metadata changes.
+
+The Counter menu uses an app-themed HTML popover instead of GTK's native select
+popup. A dedicated T3 browser tab verified actual clicks, keyboard selection,
+Escape/Tab dismissal, and readable help/menu layouts at 640 by 480 in both themes.
+Native Tauri/WebDriver checks verified category switching, placement, counts,
+shared appearance, labels, and Save/reopen with one ROI containing both counters.
+Save used the real frontend and Rust command with only the filename-dialog
+response supplied by the harness; native filename entry was not exercised.
+Local ignored screenshots include counter-menu-light.native.png,
+counter-menu-dark.native.png, counter-help-light.native.png and
+counter-help-dark.native.png under test-data/.
+
+## Point placement, dragging, deletion and temporary panning
+
+Thirty-five frontend and twenty-one Rust tests pass. The new model checks cover
+category 99, immutable movement/deletion, subpixel edge positions, nearest and
+topmost screen-space hit testing, and pan-over-edit precedence. Deleting the
+last point leaves an empty active selection and does not promote earlier ROIs
+in memory or on save. ImageJ interoperability now includes category 99 and
+clearing all points while retaining an unrelated rectangle overlay.
+
+Native Tauri/WebDriver interaction verified that points appear on mouse-down
+before release, with pointer drift creating no extra point. Space and Ctrl each
+pan the viewport without adding points or switching off Multi-point, then
+restore placement on release. Hover/drag moved an existing category-99 point
+without changing its style or count; Save/reopen retained its coordinates.
+Alt-hover selected the minus cursor, and Alt-click removed the point. Saving
+after deleting every point reopened without point annotations. The native Save
+check supplied only the filename-dialog response; it used the actual frontend
+and Rust save command.
+
+The Counter dropdown exposes 0–99, scrolls to the current choice, and accepts
+two-digit keyboard selection. Native light/dark screenshots verify the help icon
+to its right and the explanation followed by ImageJ compatibility text. Browser
+checks at 640 by 480 cover scrolling to 99 and popup bounds. Screenshots remain
+ignored under test-data/: counter-99-menu-{light,dark}.native.png,
+counter-updated-help-{light,dark}.native.png, point-dragged.native.png and
+point-delete-hover.native.png. WebDriver screenshots do not include the mouse
+pointer, so cursor checks inspect computed CSS and interaction state.
+
+Targeted native checks also passed with toolbar focus retained before the first
+canvas press, held modifiers, modifier changes during a drag, outside release,
+and actual window focus loss. Cancelled drags did not resume or alter saved
+coordinates. Pointer-cancel cleanup was exercised with a synthetic event;
+hardware-generated pointer cancellation was not exercised.
+
+## Keyboard placement, navigation and tool help
+
+Thirty-six frontend tests pass, including the fixed 5 CSS-pixel hit radius and
+keyboard placement guards. Native Tauri interaction verified 3× keyboard panning:
+ArrowRight/D and ArrowUp/W taps move approximately 108 CSS pixels with
+OpenSeadragon's navigation setting at 120 (its minimum tap spans nine pan frames,
+compared with 36 pixels at the previous setting of 40).
+
+An extra-large marker is draggable at 4 pixels from its center but not at 6 or
+9 pixels. Separate E presses each add one point at the cursor. Space, Ctrl, Alt,
+input focus, Pan mode and an active mouse gesture prevent keyboard placement.
+WebKit/WebDriver did not emit repeated events for a held key; repeat suppression
+was verified with a synthetic repeated keydown and the unit guard test.
+
+Native light/dark screenshots verify the Multi-point header help. Escape hides
+help while retaining the panel. T3 browser checks additionally cover keyboard
+focus, outside dismissal and scrollable help at 640 by 320. Local screenshots
+remain ignored under test-data/multipoint-header-help-{light,dark}.native.png.
+No backend code or source images changed in this follow-up.
+
+## Faster keyboard panning and full sampled intensity range
+
+Thirty-seven frontend tests pass, including 0–100 histogram endpoints with rare
+extremes, uniform images and empty histograms. Production build and formatting
+pass. Native ArrowRight/D and ArrowUp/W taps now move 540 CSS pixels, five times
+the previous 108, with the navigation setting increased from 120 to 600.
+
+A generated RGB gradient spanning 40–180 verified that 0–100 selects Minimum 40
+and Maximum 180 and updates the display filter. Reset restores 0–255 and the
+identity filter. The source file hash remains unchanged. All five footer buttons
+fit on one row inside the panel in both themes. Local screenshots remain ignored
+under test-data/brightness-full-sampled-{light,dark}.native.png.
+
+## Confirmed overwrite and Save as
+
+Supersedes the earlier restriction against overwriting a TIFF source. Save and
+Ctrl+S now offer Overwrite, Save as…, and Cancel for TIFFs. Keyboard navigation
+is halved from the previous setting: 300 instead of 600, yielding 270 CSS pixels
+per native tap. The frontend's 37 tests, production build and formatting pass.
+
+Rust coverage includes authorized same-path replacement in classic TIFF and
+BigTIFF, both byte orders, retained permissions, symlink targets, read-only
+destinations, failed rename cleanup, and the classic TIFF 4 GiB offset limit.
+New Save-as files use normal creation permissions even when the source is
+read-only. Stable per-image ROI metadata references prevent later overwrites
+from attaching the wrong metadata after deletion or reordering.
+
+All 97 TIFFs from manual_counting_pascal/tiffs passed actual backend load,
+annotation addition, same-path save, reopen, deletion/reordering/editing and a
+second overwrite on disposable copies. The first save retained every original
+byte except the first-IFD pointer and appended annotation metadata. Every
+original's SHA-256, size and modification time matched before and after testing.
+No format-specific failure was found in that set.
+
+All 24 Rust tests, strict Clippy, rustfmt and the installed ImageJ interoperability
+script pass. Native desktop checks verified Save/Ctrl+S, Overwrite without a
+picker, Save-as destination recall, cancellation and write-failure dirty-state
+retention, and both dialog themes. Repeated native overwrites after deleting an
+imported point overlay retained calibration, Info, ROI names/properties and a
+rectangle overlay; ImageJ independently verified exact pixels and edited points.
+
+PNG saving created the matching sibling TIFF directly and prompted on an
+existing destination. The original PNG hash and decoded pixels stayed unchanged.
+A disposable copy of 1321_BLA_20X_DAPI_-1.16_bottom_left_512px.tif was opened,
+annotated, overwritten through the dialog and reopened with its new point and
+identical decoded pixels. Native Escape, Tab and Space operated the dialog while
+the cursor remained over the viewer. The source file hash remained unchanged.
+The native filename-picker response was supplied by the test harness; native
+filename entry itself was not automated. Ignored screenshots include
+test-data/save-choice-{light,dark}.native.png and
+test-data/save-real-copy-reopened.native.png.
+
+## PR review regressions
+
+Thirty-eight frontend and twenty-eight Rust tests pass. Ordered overlay tests
+cover interleaved point/nonpoint ROIs, split groups, deletion, active-selection
+demotion and repeated saves. The ImageJ interoperability script verifies the
+same source-slot order and ROI metadata after export and reopen.
+
+The TIFF reader checks the combined 32 MiB tag budget before reading either
+payload, and both reader and writer bound item/container allocation. Sparse
+fixtures cover oversized combined tags and millions of zero-length items;
+ordinary empty items and a large individual ROI still round-trip.
+
+Production-browser regression checks verified that save errors survive six
+loading polls with dirty annotations and progress intact, then clear on retry or
+opening another image. Counter controls disable during saving without adding
+disabled properties to rendered SVG markers. Unit coverage includes opaque,
+translucent and transparent imported ARGB colors.
+
+Native keyboard checks verified that Tab-focused toolbar and Counter buttons
+ignore E and retain Space activation while the pointer stays over the image.
+Mouse selection of tool, type, size or Counter returns focus on canvas entry,
+allowing E placement without an extra click; keyboard and typing focus remain
+intact. Save-dialog Escape and Tab/Space cancellation retain dirty edits.
+Imported TIFF marker and label attributes retain half alpha and zero alpha,
+including the black label halo.
