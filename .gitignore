@@ -1,0 +1,9 @@
+node_modules/
+dist/
+src-tauri/target/
+src-tauri/gen/
+test-data/
+artifacts/
+.DS_Store
+*.log
+__pycache__/

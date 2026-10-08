@@ -1,0 +1,1655 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width,initial-scale=1" />
+    <title>Aperture · Component style study</title>
+    <style>
+      :root {
+        --purple: #6c3e89;
+        --purple-dark: #48225f;
+        --purple-soft: #ebe1f0;
+        --orange: #f7830d;
+        --orange-dark: #a74b06;
+        --orange-soft: #ffead4;
+        --ink: #302938;
+        --muted: #756d7c;
+        --line: #d9d3dd;
+        --paper: #faf9f7;
+        --panel: #f4f1f5;
+        font:
+          14px "Cantarell",
+          "Segoe UI",
+          sans-serif;
+        color: var(--ink);
+        background: var(--paper);
+      }
+      * {
+        box-sizing: border-box;
+      }
+      body {
+        margin: 0;
+      }
+      svg {
+        width: 18px;
+        height: 18px;
+        fill: none;
+        stroke: currentColor;
+        stroke-width: 1.7;
+        stroke-linecap: round;
+        stroke-linejoin: round;
+        flex-shrink: 0;
+      }
+      .symbols {
+        position: absolute;
+        width: 0;
+        height: 0;
+        overflow: hidden;
+      }
+      button {
+        font: inherit;
+        color: inherit;
+        cursor: default;
+      }
+      button:focus-visible,
+      a:focus-visible {
+        outline: 2px solid var(--orange-dark);
+        outline-offset: 3px;
+      }
+      a {
+        color: inherit;
+      }
+      .page {
+        max-width: 1260px;
+        margin: auto;
+        padding: 42px 40px 60px;
+      }
+      .masthead {
+        display: flex;
+        align-items: center;
+        gap: 12px;
+        padding-bottom: 24px;
+        border-bottom: 1px solid var(--line);
+      }
+      .masthead img {
+        width: 34px;
+        height: 34px;
+      }
+      .wordmark {
+        font-size: 15px;
+        font-weight: 650;
+      }
+      .edition {
+        margin-left: auto;
+        color: var(--muted);
+        font-size: 12px;
+      }
+      .intro {
+        display: grid;
+        grid-template-columns: 1fr auto;
+        gap: 40px;
+        align-items: end;
+        margin: 32px 0;
+      }
+      h1 {
+        font-size: 34px;
+        font-weight: 550;
+        letter-spacing: -1.2px;
+        margin: 0 0 12px;
+      }
+      .intro p {
+        max-width: 560px;
+        line-height: 1.6;
+        margin: 0;
+        color: var(--muted);
+      }
+      .palette {
+        display: flex;
+        gap: 24px;
+        padding-bottom: 3px;
+      }
+      .swatch {
+        display: grid;
+        grid-template-columns: 12px auto;
+        align-items: center;
+        gap: 5px 8px;
+        font-size: 12px;
+      }
+      .swatch i {
+        width: 12px;
+        height: 12px;
+        border-radius: 50%;
+        background: var(--purple);
+      }
+      .swatch.orange i {
+        background: var(--orange);
+      }
+      .swatch small {
+        grid-column: 2;
+        color: var(--muted);
+        font-size: 10px;
+      }
+      nav {
+        display: flex;
+        flex-wrap: wrap;
+        gap: 24px;
+        padding: 16px 0;
+        border-block: 1px solid var(--line);
+        font-size: 12px;
+      }
+      nav a {
+        text-decoration: none;
+      }
+      nav a:hover {
+        color: var(--purple);
+        text-decoration: underline;
+        text-underline-offset: 5px;
+      }
+      section {
+        padding: 32px 0 34px;
+        border-bottom: 1px solid var(--line);
+        scroll-margin-top: 18px;
+      }
+      .section-heading {
+        display: flex;
+        gap: 16px;
+        margin-bottom: 24px;
+      }
+      .section-id {
+        color: var(--purple);
+        font-size: 11px;
+        font-weight: 700;
+        padding-top: 5px;
+        min-width: 20px;
+      }
+      h2 {
+        font-size: 19px;
+        letter-spacing: -0.35px;
+        font-weight: 550;
+        margin: 0 0 5px;
+      }
+      .section-heading p,
+      .caption {
+        font-size: 12px;
+        line-height: 1.5;
+        color: var(--muted);
+        margin: 0;
+      }
+      .choices {
+        display: grid;
+        grid-template-columns: repeat(3, minmax(0, 1fr));
+        gap: 32px;
+      }
+      .choices.four {
+        grid-template-columns: repeat(4, minmax(0, 1fr));
+        gap: 24px;
+      }
+      .choice {
+        min-width: 0;
+      }
+      h3 {
+        display: flex;
+        align-items: baseline;
+        gap: 9px;
+        font-size: 12px;
+        font-weight: 550;
+        margin: 0 0 20px;
+      }
+      h3 b {
+        color: var(--purple);
+        font-size: 10px;
+        font-weight: 700;
+        letter-spacing: 0.4px;
+      }
+      .caption {
+        margin-top: 15px;
+        max-width: 280px;
+        font-size: 11px;
+      }
+      .sample-tray {
+        background: #eeebef;
+        border: 1px solid #e0dbe3;
+        padding: 16px 12px;
+        border-radius: 5px;
+      }
+      .toggle-pair {
+        display: grid;
+        grid-template-columns: 1fr 1fr;
+        gap: 12px;
+      }
+      .toggle-pair > div {
+        display: grid;
+        grid-template-columns: 32px 32px;
+        gap: 5px;
+        justify-content: start;
+      }
+      .state-label {
+        grid-column: 1/-1;
+        font-size: 10px;
+        color: var(--muted);
+        margin-bottom: 2px;
+      }
+      .icon-button {
+        display: inline-grid;
+        place-items: center;
+        width: 32px;
+        height: 31px;
+        padding: 0;
+        border-radius: 4px;
+        border: 1px solid transparent;
+        background: transparent;
+        color: #665d6e;
+        vertical-align: middle;
+      }
+      .icon-button svg {
+        width: 17px;
+        height: 17px;
+      }
+      .icon-button.pressed svg {
+        transform: translateY(1px);
+      }
+      .t1 {
+        background: linear-gradient(#fffdfd, #f0ecf2);
+        border-color: #cec5d5;
+        box-shadow:
+          0 1px 1px #39224516,
+          inset 0 1px #fff;
+      }
+      .t1.pressed {
+        color: var(--purple-dark);
+        background: #dfd2e7;
+        border-color: #a58bba;
+        box-shadow:
+          inset 0 2px 3px #43215542,
+          inset 0 -1px #fdf7ff,
+          0 1px #fff;
+      }
+      .t2 {
+        border-color: #d3ccd9;
+        background: #f7f5f8;
+        box-shadow: 0 1px 0 #fff;
+      }
+      .t2.pressed {
+        color: var(--purple);
+        border-color: #a49aaa;
+        background: #dcd6e1;
+        box-shadow:
+          inset 0 2px 3px #33243f3d,
+          inset 0 -1px #faf8fc,
+          0 1px #fff;
+      }
+      .t2.pressed:after {
+        content: "";
+        position: absolute;
+        width: 4px;
+        height: 4px;
+        background: var(--orange);
+        border-radius: 50%;
+        margin: 18px 0 0 19px;
+        box-shadow: 0 0 0 1px #a44b06;
+      }
+      .t3 {
+        border-color: #d2c9d9;
+        background: #faf7fc;
+        box-shadow: 0 1px 1px #3020381a;
+      }
+      .t3.pressed {
+        color: #fcf7ff;
+        border-color: #4c2761;
+        background: #75488f;
+        box-shadow:
+          inset 0 3px 4px #2c123b88,
+          inset 0 -1px #b394c4,
+          0 1px #fff;
+      }
+      .t4 {
+        border-color: #d2c9d9;
+        background: #faf7fc;
+        box-shadow: 0 1px 1px #3020381a;
+        border-radius: 2px;
+      }
+      .t4.pressed {
+        color: #71350a;
+        border-color: #b66c26;
+        background: #ffd2a1;
+        box-shadow:
+          inset 0 2px 3px #8546095c,
+          inset 0 -1px #fff4e7,
+          0 1px #fff;
+      }
+      .context-note {
+        display: flex;
+        align-items: center;
+        gap: 10px;
+        color: var(--muted);
+        font-size: 11px;
+        margin-top: 22px;
+      }
+      .focus-sample {
+        outline: 2px solid var(--orange-dark);
+        outline-offset: 3px;
+      }
+      .disabled-sample {
+        opacity: 0.36;
+      }
+      .button-samples {
+        display: flex;
+        gap: 8px;
+        align-items: center;
+        min-height: 38px;
+      }
+      .action {
+        display: inline-flex;
+        align-items: center;
+        justify-content: center;
+        gap: 7px;
+        height: 29px;
+        padding: 0 10px;
+        border: 1px solid #c8bdce;
+        border-radius: 4px;
+        background: #faf7fc;
+        font-size: 12px;
+      }
+      .action svg {
+        width: 14px;
+        height: 14px;
+      }
+      .action.b1 {
+        box-shadow:
+          0 1px 1px #39224518,
+          inset 0 1px #fff;
+        background: linear-gradient(#fffdfd, #ece6f0);
+      }
+      .action.primary {
+        background: var(--purple);
+        color: #fff8ff;
+        border-color: var(--purple-dark);
+      }
+      .action.b2 {
+        border-color: #b8a4c5;
+        color: var(--purple);
+        background: #f8f4fa;
+      }
+      .action.b2.primary {
+        background: var(--purple-soft);
+        color: var(--purple-dark);
+      }
+      .action.b3 {
+        border-color: transparent;
+        background: transparent;
+        color: var(--purple);
+        border-radius: 2px;
+      }
+      .action.b3.primary {
+        background: var(--orange-soft);
+        color: #813b08;
+        border-color: #e7b586;
+      }
+      .check-stack {
+        display: grid;
+        gap: 13px;
+        min-height: 70px;
+      }
+      .check {
+        display: flex;
+        gap: 8px;
+        align-items: center;
+        font-size: 12px;
+      }
+      .box {
+        width: 15px;
+        height: 15px;
+        border: 1px solid #b7a8c0;
+        border-radius: 3px;
+        background: #fcfafc;
+        display: inline-grid;
+        place-items: center;
+        flex-shrink: 0;
+      }
+      .box svg {
+        width: 12px;
+        height: 12px;
+        stroke-width: 2.3;
+      }
+      .c1 .checked {
+        background: var(--purple);
+        border-color: #5e3179;
+        color: #fff;
+      }
+      .c2 .box {
+        border-radius: 2px;
+        box-shadow:
+          inset 0 1px 2px #38234430,
+          0 1px #fff;
+      }
+      .c2 .checked {
+        background: #e4d7ec;
+        border-color: #a38bb3;
+        color: var(--purple-dark);
+      }
+      .c3 .box {
+        border-radius: 3px;
+        border-color: #baa7c5;
+      }
+      .c3 .checked {
+        background: #ffddb9;
+        border-color: #c87930;
+        color: #773404;
+        box-shadow: inset 0 1px 2px #7d41052e;
+      }
+      .field-label {
+        font-size: 11px;
+        color: var(--muted);
+        display: block;
+        margin-bottom: 7px;
+      }
+      .select {
+        display: flex;
+        align-items: center;
+        justify-content: space-between;
+        gap: 14px;
+        height: 30px;
+        padding: 0 9px;
+        border: 1px solid #c7bdce;
+        border-radius: 4px;
+        background: #fcfafc;
+        font-size: 12px;
+        min-width: 0;
+      }
+      .select svg {
+        width: 13px;
+        height: 13px;
+        color: var(--purple);
+      }
+      .d1 {
+        background: linear-gradient(#fffdfd, #f1edf4);
+        box-shadow: 0 1px 1px #3b24451a;
+      }
+      .d2 {
+        background: #eee8f2;
+        border-color: #b8a8c3;
+        box-shadow:
+          inset 0 1px 3px #37204424,
+          0 1px #fff;
+      }
+      .d3 {
+        border-width: 0 0 1px;
+        border-radius: 0;
+        border-color: #9d80b0;
+        background: transparent;
+        padding-left: 0;
+      }
+      .menu {
+        margin-top: 5px;
+        padding: 4px;
+        border: 1px solid #c9becf;
+        background: #fcfafc;
+        border-radius: 4px;
+        box-shadow: 0 3px 7px #30203817;
+        font-size: 12px;
+      }
+      .menu > div {
+        display: flex;
+        align-items: center;
+        gap: 7px;
+        padding: 5px 7px;
+      }
+      .menu .chosen {
+        background: var(--purple-soft);
+        color: var(--purple-dark);
+        border-radius: 2px;
+      }
+      .menu svg {
+        width: 13px;
+        height: 13px;
+      }
+      .menu .plain {
+        padding-left: 27px;
+      }
+      .slider-row {
+        margin: 0 0 15px;
+      }
+      .slider-label {
+        display: flex;
+        justify-content: space-between;
+        align-items: center;
+        font-size: 12px;
+        margin-bottom: 9px;
+      }
+      .number {
+        font-variant-numeric: tabular-nums;
+        color: var(--purple);
+        font-size: 11px;
+      }
+      .track {
+        position: relative;
+        height: 4px;
+        margin: 9px 6px 13px;
+        border-radius: 9px;
+        background: #d8cedf;
+      }
+      .track-fill {
+        display: block;
+        width: var(--position);
+        height: 100%;
+        background: var(--purple);
+        border-radius: inherit;
+      }
+      .thumb {
+        position: absolute;
+        left: var(--position);
+        top: 50%;
+        width: 13px;
+        height: 13px;
+        transform: translate(-50%, -50%);
+        border-radius: 50%;
+        background: #faf6fd;
+        border: 1.5px solid var(--purple);
+        box-shadow: 0 1px 2px #40234f30;
+      }
+      .s2 {
+        height: 6px;
+        border: 1px solid #c4b3cf;
+        box-shadow: inset 0 1px 2px #38204524;
+        background: #e7deed;
+      }
+      .s2 .thumb {
+        width: 10px;
+        height: 17px;
+        border-radius: 2px;
+        background: linear-gradient(#fff, #e4d8eb);
+        border: 1px solid #9d82ae;
+        box-shadow: 0 1px 2px #40234f44;
+      }
+      .s3 {
+        background: #e7dbed;
+        height: 3px;
+      }
+      .s3 .track-fill {
+        background: #b49ac4;
+      }
+      .s3 .thumb {
+        border: 1px solid #bc600c;
+        background: var(--orange);
+        width: 12px;
+        height: 12px;
+        box-shadow: 0 1px 2px #4c2c1330;
+      }
+      .panel-grid {
+        display: grid;
+        grid-template-columns: repeat(4, minmax(0, 1fr));
+        gap: 24px;
+      }
+      .panel-stage {
+        background: #e7e3e9;
+        padding: 14px 10px;
+        min-height: 352px;
+        border-radius: 5px;
+      }
+      .tool-panel {
+        background: #f8f5f9;
+        border: 1px solid #bfb1c9;
+        border-radius: 5px;
+        box-shadow: 0 2px 4px #30203820;
+        font-size: 11px;
+        overflow: hidden;
+      }
+      .panel-heading {
+        display: flex;
+        align-items: center;
+        justify-content: space-between;
+        gap: 4px;
+        height: 32px;
+        padding: 0 10px;
+        background: #e9e0ef;
+        border-bottom: 1px solid #cfc1d8;
+        color: var(--purple-dark);
+        font-weight: 600;
+        font-size: 11px;
+      }
+      .panel-heading svg {
+        width: 13px;
+        height: 13px;
+      }
+      .panel-body {
+        padding: 11px;
+      }
+      .graph {
+        display: block;
+        width: 100%;
+        height: 57px;
+        background: #fdfbfd;
+        border: 1px solid #d2c6da;
+        border-radius: 2px;
+        color: var(--purple);
+        stroke-width: 1.5;
+      }
+      .graph .grid {
+        stroke: #e8e0ed;
+        stroke-width: 1;
+      }
+      .graph .end {
+        fill: var(--orange);
+        stroke: #ad5309;
+        stroke-width: 1;
+      }
+      .range-label {
+        display: flex;
+        justify-content: space-between;
+        color: var(--muted);
+        font-size: 9px;
+        margin: 4px 0 13px;
+      }
+      .tool-panel .slider-label {
+        font-size: 10px;
+        margin-bottom: 8px;
+      }
+      .tool-panel .number {
+        font-size: 10px;
+      }
+      .tool-panel .slider-row {
+        margin-bottom: 13px;
+      }
+      .tool-panel .action {
+        height: 24px;
+        font-size: 10px;
+        padding: 0 7px;
+      }
+      .panel-footer {
+        display: flex;
+        justify-content: flex-end;
+        border-top: 1px solid #e2d9e7;
+        padding-top: 8px;
+        margin-top: 4px;
+      }
+      .p2 {
+        border-color: #ccc3d2;
+        box-shadow: 0 1px 3px #30203812;
+        border-radius: 2px;
+        background: #fbf9fc;
+      }
+      .p2 .panel-heading {
+        background: transparent;
+        border-bottom: 0;
+        height: 36px;
+      }
+      .p2 .panel-body {
+        padding-top: 4px;
+      }
+      .point-form {
+        display: grid;
+        gap: 9px;
+      }
+      .point-form label {
+        display: grid;
+        grid-template-columns: 32px minmax(0, 1fr);
+        gap: 6px;
+        align-items: center;
+        font-size: 10px;
+      }
+      .tool-panel .select {
+        height: 27px;
+        font-size: 10px;
+        padding: 0 6px;
+        gap: 4px;
+      }
+      .point-sample {
+        height: 49px;
+        margin: 12px 0;
+        display: flex;
+        align-items: center;
+        justify-content: center;
+        gap: 12px;
+        background: #eae3ef;
+        border: 1px solid #d3c6db;
+        border-radius: 3px;
+        color: var(--purple);
+      }
+      .point-sample svg {
+        width: 24px;
+        height: 24px;
+        stroke-width: 1.4;
+      }
+      .point-sample span {
+        font-size: 10px;
+        color: var(--muted);
+      }
+      .tool-panel .check {
+        font-size: 10px;
+        gap: 6px;
+      }
+      .tool-panel .check-stack {
+        gap: 10px;
+        min-height: 0;
+        margin: 14px 0;
+      }
+      .counter {
+        display: flex;
+        align-items: center;
+        justify-content: space-between;
+        gap: 6px;
+        border-top: 1px solid #e0d7e6;
+        padding-top: 10px;
+        font-size: 10px;
+      }
+      .counter .select {
+        min-width: 42px;
+      }
+      .counter > div {
+        display: flex;
+        align-items: center;
+        gap: 6px;
+      }
+      .point-inline {
+        display: grid;
+        grid-template-columns: minmax(0, 1fr) 34px;
+        gap: 7px;
+        align-items: center;
+      }
+      .point-inline .point-sample {
+        height: 43px;
+        margin: 0;
+      }
+      .mini-caption {
+        font-size: 10px;
+        color: var(--muted);
+        margin-top: 6px;
+      }
+      footer {
+        margin-top: 25px;
+        display: flex;
+        justify-content: space-between;
+        gap: 24px;
+        color: var(--muted);
+        font-size: 11px;
+        line-height: 1.6;
+      }
+      .recommendation {
+        max-width: 660px;
+      }
+      @media (max-width: 1000px) {
+        .choices.four,
+        .panel-grid {
+          grid-template-columns: repeat(2, minmax(0, 1fr));
+        }
+        .intro {
+          grid-template-columns: 1fr;
+        }
+        .palette {
+          gap: 28px;
+        }
+        .panel-stage {
+          max-width: 310px;
+        }
+      }
+      @media (max-width: 650px) {
+        .page {
+          padding: 22px 20px 36px;
+        }
+        h1 {
+          font-size: 28px;
+        }
+        .choices {
+          grid-template-columns: 1fr;
+          gap: 25px;
+        }
+        .choices.four,
+        .panel-grid {
+          grid-template-columns: 1fr;
+        }
+        .sample-tray {
+          max-width: 320px;
+        }
+        .choice {
+          max-width: 360px;
+        }
+        .edition {
+          font-size: 10px;
+        }
+        .intro {
+          gap: 22px;
+        }
+        nav {
+          gap: 15px;
+        }
+        .panel-stage {
+          max-width: 310px;
+        }
+        footer {
+          display: block;
+        }
+      }
+      @media print {
+        .page {
+          padding: 0;
+        }
+        section {
+          break-inside: avoid;
+        }
+        nav {
+          display: none;
+        }
+      }
+    </style>
+  </head>
+  <body>
+    <svg class="symbols" xmlns="http://www.w3.org/2000/svg" aria-hidden="true">
+      <defs>
+        <symbol id="brightness" viewBox="0 0 24 24">
+          <path
+            d="M21 4h-7M10 4H3M21 12h-9M8 12H3M21 20h-3M14 20H3M14 2v4M8 10v4M18 18v4"
+          />
+        </symbol>
+        <symbol id="points" viewBox="0 0 24 24">
+          <path d="M3 8h6M6 5v6M14 5h6M17 2v6M11 18h6M14 15v6" />
+        </symbol>
+        <symbol id="reset" viewBox="0 0 24 24">
+          <path d="M3 10a9 9 0 1 1 2.3 8M3 4v6h6" />
+        </symbol>
+        <symbol id="open" viewBox="0 0 24 24">
+          <path d="m6 14 1.5-3h14L18 21H3V3h6l2 3h8v5" />
+        </symbol>
+        <symbol id="check" viewBox="0 0 24 24">
+          <path d="m5 12 4 4L19 6" />
+        </symbol>
+        <symbol id="chevron" viewBox="0 0 24 24">
+          <path d="m7 10 5 5 5-5" />
+        </symbol>
+        <symbol id="close" viewBox="0 0 24 24">
+          <path d="m6 6 12 12M18 6 6 18" />
+        </symbol>
+        <symbol id="marker" viewBox="0 0 24 24">
+          <path d="M12 3v18M3 12h18" />
+        </symbol>
+      </defs>
+    </svg>
+    <main class="page">
+      <header class="masthead">
+        <img src="../../src-tauri/icons/icon.png" alt="" /><span
+          class="wordmark"
+          >NeuroQP Aperture</span
+        ><span class="edition">Component study / 01</span>
+      </header>
+      <div class="intro">
+        <div>
+          <h1>Small controls. Clear states.</h1>
+          <p>
+            Compare one component at a time. Each option can be mixed with the
+            others. All selected states are shown permanently for discussion.
+          </p>
+        </div>
+        <div class="palette">
+          <div class="swatch">
+            <i></i><span>NeuroQP purple</span
+            ><small>#6C3E89 · primary accent</small>
+          </div>
+          <div class="swatch orange">
+            <i></i><span>NeuroQP orange</span
+            ><small>#F7830D · secondary accent</small>
+          </div>
+        </div>
+      </div>
+      <nav aria-label="Components">
+        <a href="#toggles">01 Toggles</a><a href="#buttons">02 Buttons</a
+        ><a href="#checks">03 Checkboxes</a><a href="#dropdowns">04 Dropdowns</a
+        ><a href="#sliders">05 Sliders</a><a href="#panels">06 Panels</a>
+      </nav>
+      <section id="toggles">
+        <header class="section-heading">
+          <span class="section-id">01</span>
+          <div>
+            <h2>Toggle buttons</h2>
+            <p>
+              Both tools, off and on. A darker upper edge and inset shadow make
+              the selected state feel pressed into the toolbar.
+            </p>
+          </div>
+        </header>
+        <div class="choices four">
+          <article class="choice">
+            <h3><b>T1</b>Lavender well</h3>
+            <div class="sample-tray toggle-pair">
+              <div>
+                <span class="state-label">Off</span
+                ><button
+                  class="icon-button t1"
+                  aria-label="Brightness, off"
+                  aria-pressed="false"
+                >
+                  <svg aria-hidden="true">
+                    <use href="#brightness" />
+                  </svg></button
+                ><button
+                  class="icon-button t1"
+                  aria-label="Multi-point, off"
+                  aria-pressed="false"
+                >
+                  <svg aria-hidden="true"><use href="#points" /></svg>
+                </button>
+              </div>
+              <div>
+                <span class="state-label">On</span
+                ><button
+                  class="icon-button t1 pressed"
+                  aria-label="Brightness, on"
+                  aria-pressed="true"
+                >
+                  <svg aria-hidden="true">
+                    <use href="#brightness" />
+                  </svg></button
+                ><button
+                  class="icon-button t1 pressed"
+                  aria-label="Multi-point, on"
+                  aria-pressed="true"
+                >
+                  <svg aria-hidden="true"><use href="#points" /></svg>
+                </button>
+              </div>
+            </div>
+            <p class="caption">
+              Light purple fill, inset edge. Quiet but unmistakably pressed.
+            </p>
+          </article>
+          <article class="choice">
+            <h3><b>T2</b>Neutral well + orange dot</h3>
+            <div class="sample-tray toggle-pair">
+              <div>
+                <span class="state-label">Off</span
+                ><button
+                  class="icon-button t2"
+                  aria-label="Brightness, off"
+                  aria-pressed="false"
+                >
+                  <svg aria-hidden="true">
+                    <use href="#brightness" />
+                  </svg></button
+                ><button
+                  class="icon-button t2"
+                  aria-label="Multi-point, off"
+                  aria-pressed="false"
+                >
+                  <svg aria-hidden="true"><use href="#points" /></svg>
+                </button>
+              </div>
+              <div>
+                <span class="state-label">On</span
+                ><button
+                  class="icon-button t2 pressed"
+                  aria-label="Brightness, on"
+                  aria-pressed="true"
+                >
+                  <svg aria-hidden="true">
+                    <use href="#brightness" />
+                  </svg></button
+                ><button
+                  class="icon-button t2 pressed"
+                  aria-label="Multi-point, on"
+                  aria-pressed="true"
+                >
+                  <svg aria-hidden="true"><use href="#points" /></svg>
+                </button>
+              </div>
+            </div>
+            <p class="caption">
+              Recessed gray, purple glyph, small orange state indicator.
+            </p>
+          </article>
+          <article class="choice">
+            <h3><b>T3</b>Deep purple well</h3>
+            <div class="sample-tray toggle-pair">
+              <div>
+                <span class="state-label">Off</span
+                ><button
+                  class="icon-button t3"
+                  aria-label="Brightness, off"
+                  aria-pressed="false"
+                >
+                  <svg aria-hidden="true">
+                    <use href="#brightness" />
+                  </svg></button
+                ><button
+                  class="icon-button t3"
+                  aria-label="Multi-point, off"
+                  aria-pressed="false"
+                >
+                  <svg aria-hidden="true"><use href="#points" /></svg>
+                </button>
+              </div>
+              <div>
+                <span class="state-label">On</span
+                ><button
+                  class="icon-button t3 pressed"
+                  aria-label="Brightness, on"
+                  aria-pressed="true"
+                >
+                  <svg aria-hidden="true">
+                    <use href="#brightness" />
+                  </svg></button
+                ><button
+                  class="icon-button t3 pressed"
+                  aria-label="Multi-point, on"
+                  aria-pressed="true"
+                >
+                  <svg aria-hidden="true"><use href="#points" /></svg>
+                </button>
+              </div>
+            </div>
+            <p class="caption">
+              Strongest state contrast. The icon drops into a dark purple
+              recess.
+            </p>
+          </article>
+          <article class="choice">
+            <h3><b>T4</b>Amber well</h3>
+            <div class="sample-tray toggle-pair">
+              <div>
+                <span class="state-label">Off</span
+                ><button
+                  class="icon-button t4"
+                  aria-label="Brightness, off"
+                  aria-pressed="false"
+                >
+                  <svg aria-hidden="true">
+                    <use href="#brightness" />
+                  </svg></button
+                ><button
+                  class="icon-button t4"
+                  aria-label="Multi-point, off"
+                  aria-pressed="false"
+                >
+                  <svg aria-hidden="true"><use href="#points" /></svg>
+                </button>
+              </div>
+              <div>
+                <span class="state-label">On</span
+                ><button
+                  class="icon-button t4 pressed"
+                  aria-label="Brightness, on"
+                  aria-pressed="true"
+                >
+                  <svg aria-hidden="true">
+                    <use href="#brightness" />
+                  </svg></button
+                ><button
+                  class="icon-button t4 pressed"
+                  aria-label="Multi-point, on"
+                  aria-pressed="true"
+                >
+                  <svg aria-hidden="true"><use href="#points" /></svg>
+                </button>
+              </div>
+            </div>
+            <p class="caption">
+              Orange marks selection; purple is reserved for the surrounding
+              controls.
+            </p>
+          </article>
+        </div>
+        <div class="context-note">
+          State details
+          <button
+            class="icon-button t1 pressed focus-sample"
+            aria-label="Focused selected brightness"
+            aria-pressed="true"
+          >
+            <svg aria-hidden="true"><use href="#brightness" /></svg>
+          </button>
+          Keyboard focus
+          <button
+            class="icon-button t1 disabled-sample"
+            aria-label="Disabled appearance sample"
+            aria-pressed="false"
+          >
+            <svg aria-hidden="true"><use href="#points" /></svg>
+          </button>
+          Disabled appearance
+        </div>
+      </section>
+      <section id="buttons">
+        <header class="section-heading">
+          <span class="section-id">02</span>
+          <div>
+            <h2>Action buttons</h2>
+            <p>
+              Open and Reset, compared at the same size. Actions have a raised
+              or flat face; toggles stay recessed when selected.
+            </p>
+          </div>
+        </header>
+        <div class="choices">
+          <article class="choice">
+            <h3><b>B1</b>Fine bevel</h3>
+            <div class="button-samples">
+              <button class="action b1 primary">
+                <svg aria-hidden="true"><use href="#open" /></svg>Open</button
+              ><button class="action b1">
+                <svg aria-hidden="true"><use href="#reset" /></svg>Reset
+              </button>
+            </div>
+            <p class="caption">
+              A light edge gives ordinary actions a little physical lift.
+            </p>
+          </article>
+          <article class="choice">
+            <h3><b>B2</b>Tinted outline</h3>
+            <div class="button-samples">
+              <button class="action b2 primary">
+                <svg aria-hidden="true"><use href="#open" /></svg>Open</button
+              ><button class="action b2">
+                <svg aria-hidden="true"><use href="#reset" /></svg>Reset
+              </button>
+            </div>
+            <p class="caption">
+              Flat, restrained, and easy to distinguish from a pressed tool.
+            </p>
+          </article>
+          <article class="choice">
+            <h3><b>B3</b>Text + warm emphasis</h3>
+            <div class="button-samples">
+              <button class="action b3 primary">
+                <svg aria-hidden="true"><use href="#open" /></svg>Open</button
+              ><button class="action b3">
+                <svg aria-hidden="true"><use href="#reset" /></svg>Reset
+              </button>
+            </div>
+            <p class="caption">
+              Bare Reset; pale orange gives the primary action a warm accent.
+            </p>
+          </article>
+        </div>
+      </section>
+      <section id="checks">
+        <header class="section-heading">
+          <span class="section-id">03</span>
+          <div>
+            <h2>Checkboxes</h2>
+            <p>
+              Square marks for binary settings. Each sample shows the checked
+              and unchecked appearance.
+            </p>
+          </div>
+        </header>
+        <div class="choices">
+          <article class="choice">
+            <h3><b>C1</b>Solid purple</h3>
+            <div class="check-stack">
+              <span class="check c1"
+                ><span class="box checked"
+                  ><svg aria-hidden="true"><use href="#check" /></svg></span
+                >Label points</span
+              ><span class="check c1"
+                ><span class="box"></span>Show on all slices</span
+              >
+            </div>
+            <p class="caption">Highest contrast with a simple white check.</p>
+          </article>
+          <article class="choice">
+            <h3><b>C2</b>Inset lavender</h3>
+            <div class="check-stack">
+              <span class="check c2"
+                ><span class="box checked"
+                  ><svg aria-hidden="true"><use href="#check" /></svg></span
+                >Label points</span
+              ><span class="check c2"
+                ><span class="box"></span>Show on all slices</span
+              >
+            </div>
+            <p class="caption">
+              Matches the recessed toggle, with a dark purple check.
+            </p>
+          </article>
+          <article class="choice">
+            <h3><b>C3</b>Warm inset</h3>
+            <div class="check-stack">
+              <span class="check c3"
+                ><span class="box checked"
+                  ><svg aria-hidden="true"><use href="#check" /></svg></span
+                >Label points</span
+              ><span class="check c3"
+                ><span class="box"></span>Show on all slices</span
+              >
+            </div>
+            <p class="caption">
+              Orange fill and a dark check; keeps purple for tools and fields.
+            </p>
+          </article>
+        </div>
+      </section>
+      <section id="dropdowns">
+        <header class="section-heading">
+          <span class="section-id">04</span>
+          <div>
+            <h2>Dropdowns</h2>
+            <p>
+              Same value, three field treatments. Open-menu samples show how
+              selection would be highlighted.
+            </p>
+          </div>
+        </header>
+        <div class="choices">
+          <article class="choice">
+            <h3><b>D1</b>Raised field</h3>
+            <span class="field-label">Point type</span
+            ><span class="select d1"
+              ><span>Cross</span
+              ><svg aria-hidden="true"><use href="#chevron" /></svg
+            ></span>
+            <div class="menu">
+              <div class="chosen">
+                <svg aria-hidden="true"><use href="#check" /></svg>Cross
+              </div>
+              <div class="plain">Dot</div>
+              <div class="plain">Hybrid</div>
+              <div class="plain">Circle</div>
+            </div>
+            <p class="caption">
+              A shallow bevel separates the field from its panel.
+            </p>
+          </article>
+          <article class="choice">
+            <h3><b>D2</b>Inset field</h3>
+            <span class="field-label">Point type</span
+            ><span class="select d2"
+              ><span>Cross</span
+              ><svg aria-hidden="true"><use href="#chevron" /></svg
+            ></span>
+            <div class="menu">
+              <div class="chosen">
+                <svg aria-hidden="true"><use href="#check" /></svg>Cross
+              </div>
+              <div class="plain">Dot</div>
+              <div class="plain">Hybrid</div>
+              <div class="plain">Circle</div>
+            </div>
+            <p class="caption">
+              A pale purple recess puts the selected value inside the panel.
+            </p>
+          </article>
+          <article class="choice">
+            <h3><b>D3</b>Underline</h3>
+            <span class="field-label">Point type</span
+            ><span class="select d3"
+              ><span>Cross</span
+              ><svg aria-hidden="true"><use href="#chevron" /></svg
+            ></span>
+            <div class="menu">
+              <div class="chosen">
+                <svg aria-hidden="true"><use href="#check" /></svg>Cross
+              </div>
+              <div class="plain">Dot</div>
+              <div class="plain">Hybrid</div>
+              <div class="plain">Circle</div>
+            </div>
+            <p class="caption">
+              Least visual weight. Suitable when compactness matters most.
+            </p>
+          </article>
+        </div>
+      </section>
+      <section id="sliders">
+        <header class="section-heading">
+          <span class="section-id">05</span>
+          <div>
+            <h2>Sliders & values</h2>
+            <p>
+              Purple carries the display range. Orange is an alternative handle
+              accent, not an image-data color.
+            </p>
+          </div>
+        </header>
+        <div class="choices">
+          <article class="choice">
+            <h3><b>S1</b>Fine track, round handle</h3>
+            <div class="slider-row">
+              <div class="slider-label">
+                <span>Brightness</span><span class="number">+24</span>
+              </div>
+              <div class="track s1" style="--position: 62%">
+                <span class="track-fill"></span><span class="thumb"></span>
+              </div>
+            </div>
+            <div class="slider-row">
+              <div class="slider-label">
+                <span>Contrast</span><span class="number">100</span>
+              </div>
+              <div class="track s1" style="--position: 50%">
+                <span class="track-fill"></span><span class="thumb"></span>
+              </div>
+            </div>
+            <p class="caption">
+              Simple and light, with the value aligned on the right.
+            </p>
+          </article>
+          <article class="choice">
+            <h3><b>S2</b>Inset track, narrow handle</h3>
+            <div class="slider-row">
+              <div class="slider-label">
+                <span>Brightness</span><span class="number">+24</span>
+              </div>
+              <div class="track s2" style="--position: 62%">
+                <span class="track-fill"></span><span class="thumb"></span>
+              </div>
+            </div>
+            <div class="slider-row">
+              <div class="slider-label">
+                <span>Contrast</span><span class="number">100</span>
+              </div>
+              <div class="track s2" style="--position: 50%">
+                <span class="track-fill"></span><span class="thumb"></span>
+              </div>
+            </div>
+            <p class="caption">
+              More tactile. A small vertical grip suits a dense scientific
+              toolbar.
+            </p>
+          </article>
+          <article class="choice">
+            <h3><b>S3</b>Orange handle</h3>
+            <div class="slider-row">
+              <div class="slider-label">
+                <span>Brightness</span><span class="number">+24</span>
+              </div>
+              <div class="track s3" style="--position: 62%">
+                <span class="track-fill"></span><span class="thumb"></span>
+              </div>
+            </div>
+            <div class="slider-row">
+              <div class="slider-label">
+                <span>Contrast</span><span class="number">100</span>
+              </div>
+              <div class="track s3" style="--position: 50%">
+                <span class="track-fill"></span><span class="thumb"></span>
+              </div>
+            </div>
+            <p class="caption">
+              The warm handle stands out against the purple range.
+            </p>
+          </article>
+        </div>
+      </section>
+      <section id="panels">
+        <header class="section-heading">
+          <span class="section-id">06</span>
+          <div>
+            <h2>Panel framing & arrangement</h2>
+            <p>
+              Two treatments per panel. These are component previews, not
+              separate application themes. All contents are static.
+            </p>
+          </div>
+        </header>
+        <div class="panel-grid">
+          <article class="choice">
+            <h3><b>P1</b>Framed brightness</h3>
+            <div class="panel-stage">
+              <div class="tool-panel">
+                <div class="panel-heading">
+                  <span>Brightness & contrast</span
+                  ><svg aria-hidden="true"><use href="#close" /></svg>
+                </div>
+                <div class="panel-body">
+                  <svg
+                    class="graph"
+                    viewBox="0 0 200 56"
+                    preserveAspectRatio="none"
+                    aria-label="Display range diagram"
+                  >
+                    <path
+                      class="grid"
+                      d="M50 0v56M100 0v56M150 0v56M0 28h200"
+                    />
+                    <path d="M0 54H18L180 2H200" />
+                    <circle class="end" cx="18" cy="54" r="2" />
+                    <circle class="end" cx="180" cy="2" r="2" />
+                  </svg>
+                  <div class="range-label"><span>0</span><span>255</span></div>
+                  <div class="slider-row">
+                    <div class="slider-label">
+                      <span>Minimum</span><span class="number">0</span>
+                    </div>
+                    <div class="track s2" style="--position: 0%">
+                      <span class="track-fill"></span
+                      ><span class="thumb"></span>
+                    </div>
+                  </div>
+                  <div class="slider-row">
+                    <div class="slider-label">
+                      <span>Maximum</span><span class="number">255</span>
+                    </div>
+                    <div class="track s2" style="--position: 100%">
+                      <span class="track-fill"></span
+                      ><span class="thumb"></span>
+                    </div>
+                  </div>
+                  <div class="slider-row">
+                    <div class="slider-label">
+                      <span>Brightness</span><span class="number">0</span>
+                    </div>
+                    <div class="track s2" style="--position: 50%">
+                      <span class="track-fill"></span
+                      ><span class="thumb"></span>
+                    </div>
+                  </div>
+                  <div class="slider-row">
+                    <div class="slider-label">
+                      <span>Contrast</span><span class="number">100</span>
+                    </div>
+                    <div class="track s2" style="--position: 50%">
+                      <span class="track-fill"></span
+                      ><span class="thumb"></span>
+                    </div>
+                  </div>
+                  <div class="panel-footer">
+                    <button class="action b2">
+                      <svg aria-hidden="true"><use href="#reset" /></svg>Reset
+                    </button>
+                  </div>
+                </div>
+              </div>
+            </div>
+            <p class="caption">P1 · Tinted title strip, inset slider tracks.</p>
+          </article>
+          <article class="choice">
+            <h3><b>P2</b>Quiet brightness</h3>
+            <div class="panel-stage">
+              <div class="tool-panel p2">
+                <div class="panel-heading">
+                  <span>Brightness & contrast</span
+                  ><svg aria-hidden="true"><use href="#close" /></svg>
+                </div>
+                <div class="panel-body">
+                  <svg
+                    class="graph"
+                    viewBox="0 0 200 56"
+                    preserveAspectRatio="none"
+                    aria-label="Display range diagram"
+                  >
+                    <path
+                      class="grid"
+                      d="M50 0v56M100 0v56M150 0v56M0 28h200"
+                    />
+                    <path d="M0 54H18L180 2H200" />
+                    <circle class="end" cx="18" cy="54" r="2" />
+                    <circle class="end" cx="180" cy="2" r="2" />
+                  </svg>
+                  <div class="range-label"><span>0</span><span>255</span></div>
+                  <div class="slider-row">
+                    <div class="slider-label">
+                      <span>Minimum</span><span class="number">0</span>
+                    </div>
+                    <div class="track s3" style="--position: 0%">
+                      <span class="track-fill"></span
+                      ><span class="thumb"></span>
+                    </div>
+                  </div>
+                  <div class="slider-row">
+                    <div class="slider-label">
+                      <span>Maximum</span><span class="number">255</span>
+                    </div>
+                    <div class="track s3" style="--position: 100%">
+                      <span class="track-fill"></span
+                      ><span class="thumb"></span>
+                    </div>
+                  </div>
+                  <div class="slider-row">
+                    <div class="slider-label">
+                      <span>Brightness</span><span class="number">0</span>
+                    </div>
+                    <div class="track s3" style="--position: 50%">
+                      <span class="track-fill"></span
+                      ><span class="thumb"></span>
+                    </div>
+                  </div>
+                  <div class="slider-row">
+                    <div class="slider-label">
+                      <span>Contrast</span><span class="number">100</span>
+                    </div>
+                    <div class="track s3" style="--position: 50%">
+                      <span class="track-fill"></span
+                      ><span class="thumb"></span>
+                    </div>
+                  </div>
+                  <div class="panel-footer">
+                    <button class="action b2">
+                      <svg aria-hidden="true"><use href="#reset" /></svg>Reset
+                    </button>
+                  </div>
+                </div>
+              </div>
+            </div>
+            <p class="caption">
+              P2 · Plain title, fine tracks, orange handles.
+            </p>
+          </article>
+          <article class="choice">
+            <h3><b>M1</b>Stacked point options</h3>
+            <div class="panel-stage">
+              <div class="tool-panel">
+                <div class="panel-heading">
+                  <span>Multi-point</span
+                  ><svg aria-hidden="true"><use href="#close" /></svg>
+                </div>
+                <div class="panel-body">
+                  <div class="point-form">
+                    <label
+                      >Type<span class="select d2"
+                        ><span>Cross</span
+                        ><svg aria-hidden="true">
+                          <use href="#chevron" /></svg></span></label
+                    ><label
+                      >Color<span class="select d2"
+                        ><span>Purple</span
+                        ><svg aria-hidden="true">
+                          <use href="#chevron" /></svg></span></label
+                    ><label
+                      >Size<span class="select d2"
+                        ><span>Large</span
+                        ><svg aria-hidden="true">
+                          <use href="#chevron" /></svg></span
+                    ></label>
+                  </div>
+                  <div class="point-sample">
+                    <svg aria-hidden="true"><use href="#marker" /></svg
+                    ><span>1</span>
+                  </div>
+                  <div class="check-stack">
+                    <span class="check c2"
+                      ><span class="box checked"
+                        ><svg aria-hidden="true">
+                          <use href="#check" /></svg></span
+                      >Label points</span
+                    ><span class="check c2"
+                      ><span class="box"></span>Show on all slices</span
+                    >
+                  </div>
+                  <div class="counter">
+                    <div>
+                      Counter<span class="select d1"
+                        ><span>0</span
+                        ><svg aria-hidden="true"><use href="#chevron" /></svg
+                      ></span>
+                    </div>
+                    <span>Points&nbsp; 0</span>
+                  </div>
+                </div>
+              </div>
+            </div>
+            <p class="caption">
+              M1 · Full-width fields, preview on its own row.
+            </p>
+          </article>
+          <article class="choice">
+            <h3><b>M2</b>Compact point options</h3>
+            <div class="panel-stage">
+              <div class="tool-panel p2">
+                <div class="panel-heading">
+                  <span>Multi-point</span
+                  ><svg aria-hidden="true"><use href="#close" /></svg>
+                </div>
+                <div class="panel-body">
+                  <div class="point-inline">
+                    <div class="point-form">
+                      <label
+                        >Type<span class="select d1"
+                          ><span>Cross</span
+                          ><svg aria-hidden="true">
+                            <use href="#chevron" /></svg></span></label
+                      ><label
+                        >Color<span class="select d1"
+                          ><span>Purple</span
+                          ><svg aria-hidden="true">
+                            <use href="#chevron" /></svg></span></label
+                      ><label
+                        >Size<span class="select d1"
+                          ><span>Large</span
+                          ><svg aria-hidden="true">
+                            <use href="#chevron" /></svg></span
+                      ></label>
+                    </div>
+                    <div class="point-sample">
+                      <svg aria-hidden="true"><use href="#marker" /></svg>
+                    </div>
+                  </div>
+                  <div class="mini-caption">Point appearance</div>
+                  <div class="check-stack">
+                    <span class="check c1"
+                      ><span class="box checked"
+                        ><svg aria-hidden="true">
+                          <use href="#check" /></svg></span
+                      >Label points</span
+                    ><span class="check c1"
+                      ><span class="box"></span>Show on all slices</span
+                    >
+                  </div>
+                  <div class="counter">
+                    <div>
+                      Counter<span class="select d1"
+                        ><span>0</span
+                        ><svg aria-hidden="true"><use href="#chevron" /></svg
+                      ></span>
+                    </div>
+                    <span>Points&nbsp; 0</span>
+                  </div>
+                </div>
+              </div>
+            </div>
+            <p class="caption">
+              M2 · Preview beside the fields, tighter grouping.
+            </p>
+          </article>
+        </div>
+      </section>
+      <footer>
+        <p class="recommendation">
+          Starting combination: T1 toggles, B2 buttons, C2 checkboxes, D2
+          dropdowns, S2 sliders, with P1 / M1 panels. Purple identifies active
+          controls; orange stays a small secondary accent.
+        </p>
+        <p>
+          Static HTML · No image processing<br />Use component IDs when giving
+          feedback.
+        </p>
+      </footer>
+    </main>
+  </body>
+</html>
