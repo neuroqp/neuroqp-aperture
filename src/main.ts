@@ -5,6 +5,8 @@ import { open, save, confirm } from "@tauri-apps/plugin-dialog";
 import { AnnotationViewer } from "./annotation-viewer";
 import {
   addPoint,
+  movePoint,
+  deletePoint,
   counterCount,
   settingsForRois,
   updatePointRois,
@@ -101,19 +103,29 @@ let annotationsReady = false;
 let annotationError: string | null = null;
 let dirty = false;
 let saving = false;
-const annotationViewer = new AnnotationViewer(
-  viewer,
-  (point) => {
-    if (!currentImage || !annotationsReady || saving) return;
-    const next = addPoint(rois, point, tools.pointSettings(), currentImage);
-    if (!next) return;
-    rois = next;
-    dirty = true;
-    annotationViewer.setRois(rois);
-    updatePointTool();
+function editAnnotations(next: PointRoi[] | null) {
+  if (!next || next === rois || !annotationsReady || saving) return;
+  rois = next;
+  dirty = true;
+  annotationViewer.setRois(rois);
+  updatePointTool();
+}
+
+const annotationViewer = new AnnotationViewer(viewer, {
+  add: (point) => {
+    if (currentImage)
+      editAnnotations(
+        addPoint(rois, point, tools.pointSettings(), currentImage),
+      );
   },
-  () => tools.pointsActive() && annotationsReady && !saving,
-);
+  move: (reference, point) => {
+    if (currentImage)
+      editAnnotations(movePoint(rois, reference, point, currentImage));
+  },
+  delete: (reference) => editAnnotations(deletePoint(rois, reference)),
+  active: () => tools.pointsActive(),
+  editable: () => annotationsReady && !saving,
+});
 
 function updatePointTool(key?: keyof AnnotationSettings) {
   if (key === "counter" && annotationsReady && !saving) {
@@ -142,15 +154,7 @@ function updatePointTool(key?: keyof AnnotationSettings) {
       control.disabled = saving || !annotationsReady;
     });
   const active = tools.pointsActive();
-  for (const gestures of [
-    viewer.gestureSettingsByDeviceType("mouse"),
-    viewer.gestureSettingsByDeviceType("touch"),
-    viewer.gestureSettingsByDeviceType("pen"),
-  ]) {
-    gestures.dragToPan = !active;
-    gestures.dblClickToZoom = !active;
-  }
-  $("viewer").classList.toggle("point-mode", active);
+  annotationViewer.updateInteraction();
   $("pan-button").classList.toggle("selected", !active);
   const count = counterCount(rois, tools.pointSettings().counter);
   $("point-count").textContent = String(count);
@@ -158,7 +162,9 @@ function updatePointTool(key?: keyof AnnotationSettings) {
     `${rois.reduce((sum, roi) => sum + roi.points.length, 0)} points total`;
   $("filename").classList.toggle("unsaved", dirty);
   $<HTMLButtonElement>("save-button").disabled =
-    !annotationsReady || !rois.some((roi) => roi.points.length > 0) || saving;
+    !annotationsReady ||
+    (!dirty && !rois.some((roi) => roi.points.length > 0)) ||
+    saving;
 }
 
 async function discardChanges() {

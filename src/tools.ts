@@ -59,19 +59,20 @@ export const toolPanels = `
       <div class="point-counter">
         <div class="counter-controls">
           <span id="point-counter-label">Counter</span>
-          <div class="counter-help">
-            <button id="counter-help-button" class="counter-help-button" type="button" aria-label="About ImageJ counters" aria-describedby="counter-help-text" aria-controls="counter-help-text" aria-expanded="false">${icon("help")}</button>
-            <div id="counter-help-text" class="counter-tooltip" role="tooltip" popover="manual" hidden>
-              <strong>ImageJ counters are categories</strong>
-              <p>A fresh selection using counter 0 labels points in order: 1, 2, 3. Selecting a higher counter switches to category labels, so points in counter 1 all read 1. Returning to 0 keeps category labels until you start a fresh selection.</p>
-              <p>Points shows how many belong to the selected counter in this selection. Label points only controls label visibility.</p>
-              <p>Type and Size apply to the whole point selection. Color applies in the initial counter 0 mode; category labels use ImageJ's fixed colors.</p>
-            </div>
-          </div>
           <div class="counter-picker">
             <button id="point-counter" class="counter-trigger" type="button" value="0" aria-labelledby="point-counter-label point-counter-value" aria-haspopup="listbox" aria-controls="point-counter-options" aria-expanded="false"><span id="point-counter-value">0</span>${icon("dropdown")}</button>
             <div id="point-counter-options" class="counter-options" role="listbox" aria-labelledby="point-counter-label" popover="manual" hidden>
-              ${Array.from({ length: 10 }, (_, counter) => `<button id="counter-option-${counter}" type="button" role="option" data-counter="${counter}" aria-selected="${counter === 0}" tabindex="-1">${counter}</button>`).join("")}
+              ${Array.from({ length: 100 }, (_, counter) => `<button id="counter-option-${counter}" type="button" role="option" data-counter="${counter}" aria-selected="${counter === 0}" tabindex="-1">${counter}</button>`).join("")}
+            </div>
+          </div>
+          <div class="counter-help">
+            <button id="counter-help-button" class="counter-help-button" type="button" aria-label="About counters" aria-describedby="counter-help-text" aria-controls="counter-help-text" aria-expanded="false">${icon("help")}</button>
+            <div id="counter-help-text" class="counter-tooltip" role="tooltip" popover="manual" hidden>
+              <strong>Counters group points into categories</strong>
+              <p>Choose a counter from 0 to 99 to assign new points to that category. Points shows the selected category's total in this selection.</p>
+              <p>A fresh selection using counter 0 labels points in order: 1, 2, 3. Selecting a higher counter switches to category labels, so points in counter 1 all read 1. Returning to 0 keeps category labels until you start a fresh selection.</p>
+              <p>Label points only changes label visibility. Type and Size apply to the whole selection. Color applies in the initial counter 0 mode; afterward, colors are assigned by category.</p>
+              <p>Compatible with ImageJ’s multi-point tool.</p>
             </div>
           </div>
         </div>
@@ -93,6 +94,8 @@ export function bindTools(
   const helpButton = document.getElementById("counter-help-button")!;
   const helpText = document.getElementById("counter-help-text")!;
   const help = helpButton.parentElement!;
+  let counterDigits = "";
+  let counterTypedAt = 0;
   const positionPopup = (popup: HTMLElement, anchor: HTMLElement) => {
     const rect = anchor.getBoundingClientRect();
     popup.style.left = `${Math.max(12, Math.min(rect.right - popup.offsetWidth, window.innerWidth - popup.offsetWidth - 12))}px`;
@@ -138,16 +141,18 @@ export function bindTools(
     }
   };
   const openCounter = () => {
+    counterDigits = "";
     showHelp(false);
     counterOptions.hidden = false;
     counterOptions.showPopover();
     positionPopup(counterOptions, counter);
     counter.setAttribute("aria-expanded", "true");
-    (
+    const selected =
       counterButtons.find(
         (button) => button.dataset.counter === counter.value,
-      ) ?? counterButtons[0]
-    ).focus();
+      ) ?? counterButtons[0];
+    selected.focus({ preventScroll: true });
+    selected.scrollIntoView({ block: "nearest" });
   };
   counter.addEventListener("click", () => {
     if (counterOptions.hidden) openCounter();
@@ -181,10 +186,19 @@ export function bindTools(
       next = (index + counterButtons.length - 1) % counterButtons.length;
     else if (event.key === "Home") next = 0;
     else if (event.key === "End") next = counterButtons.length - 1;
-    else if (/^[0-9]$/.test(event.key)) next = Number(event.key);
-    else return;
+    else if (/^[0-9]$/.test(event.key)) {
+      const now = Date.now();
+      counterDigits =
+        now - counterTypedAt < 700 && counterDigits.length === 1
+          ? counterDigits + event.key
+          : event.key;
+      counterTypedAt = now;
+      next = Number(counterDigits);
+    } else return;
+    if (!/^[0-9]$/.test(event.key)) counterDigits = "";
     event.preventDefault();
-    counterButtons[next].focus();
+    counterButtons[next].focus({ preventScroll: true });
+    counterButtons[next].scrollIntoView({ block: "nearest" });
   });
   counterOptions.addEventListener("focusout", (event) => {
     if (

@@ -241,3 +241,37 @@ response supplied by the harness; native filename entry was not exercised.
 Local ignored screenshots include counter-menu-light.native.png,
 counter-menu-dark.native.png, counter-help-light.native.png and
 counter-help-dark.native.png under test-data/.
+
+## Point placement, dragging, deletion and temporary panning
+
+Thirty-five frontend and twenty-one Rust tests pass. The new model checks cover
+category 99, immutable movement/deletion, subpixel edge positions, nearest and
+topmost screen-space hit testing, and pan-over-edit precedence. Deleting the
+last point leaves an empty active selection and does not promote earlier ROIs
+in memory or on save. ImageJ interoperability now includes category 99 and
+clearing all points while retaining an unrelated rectangle overlay.
+
+Native Tauri/WebDriver interaction verified that points appear on mouse-down
+before release, with pointer drift creating no extra point. Space and Ctrl each
+pan the viewport without adding points or switching off Multi-point, then
+restore placement on release. Hover/drag moved an existing category-99 point
+without changing its style or count; Save/reopen retained its coordinates.
+Alt-hover selected the minus cursor, and Alt-click removed the point. Saving
+after deleting every point reopened without point annotations. The native Save
+check supplied only the filename-dialog response; it used the actual frontend
+and Rust save command.
+
+The Counter dropdown exposes 0–99, scrolls to the current choice, and accepts
+two-digit keyboard selection. Native light/dark screenshots verify the help icon
+to its right and the explanation followed by ImageJ compatibility text. Browser
+checks at 640 by 480 cover scrolling to 99 and popup bounds. Screenshots remain
+ignored under test-data/: counter-99-menu-{light,dark}.native.png,
+counter-updated-help-{light,dark}.native.png, point-dragged.native.png and
+point-delete-hover.native.png. WebDriver screenshots do not include the mouse
+pointer, so cursor checks inspect computed CSS and interaction state.
+
+Targeted native checks also passed with toolbar focus retained before the first
+canvas press, held modifiers, modifier changes during a drag, outside release,
+and actual window focus loss. Cancelled drags did not resume or alter saved
+coordinates. Pointer-cancel cleanup was exercised with a synthetic event;
+hardware-generated pointer cancellation was not exercised.

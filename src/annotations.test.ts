@@ -2,6 +2,8 @@ import assert from "node:assert/strict";
 import { test } from "node:test";
 import {
   addPoint,
+  movePoint,
+  deletePoint,
   counterCount,
   flipCoordinate,
   imageToStored,
@@ -141,7 +143,7 @@ test("all-slice additions preserve an existing fixed-slice ROI and use a new com
     bounds,
   )!;
   assert.equal(next.length, 2);
-  assert.strictEqual(next[0], fixed);
+  assert.deepEqual(next[0], { ...fixed, overlay: true });
   assert.equal(next[1].position, 0);
   assert.equal(next[1].slice, 0);
   assert.equal(next[1].points[0].position, 0);
@@ -156,7 +158,7 @@ test("hidden active ROIs stay untouched and new points get a fresh first-page RO
   assert.strictEqual(selectCounter([hidden], 9)[0], hidden);
   const next = addPoint([mixed, hidden], { x: 3, y: 4 }, settings, bounds)!;
   assert.strictEqual(next[0], mixed);
-  assert.strictEqual(next[1], hidden);
+  assert.deepEqual(next[1], { ...hidden, overlay: true });
   assert.equal(next.length, 3);
   assert.equal(next[2].position, 1);
   assert.equal(next[2].channel, 0);
@@ -318,7 +320,7 @@ test("outside clicks and invalid counters cannot add points", () => {
     assert.equal(addPoint([], point, settings, bounds), null);
   }
   assert.equal(
-    addPoint([], { x: 1, y: 1 }, { ...settings, counter: 10 }, bounds),
+    addPoint([], { x: 1, y: 1 }, { ...settings, counter: 100 }, bounds),
     null,
   );
 });
@@ -361,4 +363,88 @@ test("stored pixel centers align with OSD pixel areas, including mirrored images
   });
   assert.ok(addPoint([], { x: -0.5, y: -0.5 }, settings, bounds));
   assert.equal(addPoint([], { x: 3999.5, y: 0 }, settings, bounds), null);
+});
+
+test("moving a visible overlay point preserves categories, positions, styles and metadata", () => {
+  const overlay = { ...mixed, overlay: true };
+  const rois = [overlay, { ...mixed, sourceIndex: 8 }];
+  const reference = { roiIndex: 0, pointIndex: 0 };
+  const before = structuredClone(rois);
+  const moved = movePoint(rois, reference, { x: -0.25, y: 12.125 }, bounds);
+  assert.deepEqual(moved[0], {
+    ...overlay,
+    points: [
+      { ...mixed.points[0], x: -0.25, y: 12.125 },
+      ...mixed.points.slice(1),
+    ],
+  });
+  assert.strictEqual(moved[1], rois[1]);
+  assert.strictEqual(moved[0].raw, overlay.raw);
+  assert.deepEqual(rois, before);
+  assert.strictEqual(
+    movePoint(moved, reference, { x: -0.25, y: 12.125 }, bounds),
+    moved,
+  );
+  assert.strictEqual(
+    movePoint(rois, { roiIndex: 8, pointIndex: 0 }, { x: 2, y: 3 }, bounds),
+    rois,
+  );
+  assert.strictEqual(
+    movePoint(rois, reference, { x: NaN, y: 3 }, bounds),
+    rois,
+  );
+  const edge = movePoint(rois, reference, { x: -100, y: 5000 }, bounds)[0]
+    .points[0];
+  assert.equal(edge.x, -0.5);
+  assert.ok(edge.y < bounds.height - 0.5);
+  assert.ok(edge.y > bounds.height - 0.500001);
+});
+
+test("deletion keeps empty active selection metadata and never promotes a previous ROI", () => {
+  const previous = { ...mixed, sourceIndex: 0 };
+  const active = { ...mixed, points: [mixed.points[0]], sourceIndex: 7 };
+  const rois = [previous, active];
+  const deleted = deletePoint(rois, { roiIndex: 1, pointIndex: 0 });
+  assert.strictEqual(deleted[0], previous);
+  assert.deepEqual(deleted[1], { ...active, points: [], nCounters: 3 });
+  assert.equal(counterCount(deleted, 2), 0);
+  assert.equal(settingsForRois(deleted, 0).labels, active.showLabels);
+  assert.equal(active.points.length, 1);
+  assert.strictEqual(
+    deletePoint(deleted, { roiIndex: 1, pointIndex: 0 }),
+    deleted,
+  );
+  const next = addPoint(deleted, { x: 2, y: 3 }, settings, bounds)!;
+  assert.equal(next.length, 2);
+  assert.equal(next[1].sourceIndex, 7);
+  assert.equal(next[1].points.length, 1);
+});
+
+test("the ImageJ counter range includes 99 and rejects 100", () => {
+  assert.equal(
+    addPoint([], { x: 1, y: 2 }, { ...settings, counter: 99 }, bounds)![0]
+      .points[0].counter,
+    99,
+  );
+  assert.equal(
+    addPoint([], { x: 1, y: 2 }, { ...settings, counter: 100 }, bounds),
+    null,
+  );
+});
+
+test("a new selection demotes the previous active ROI even when the new selection is later emptied", () => {
+  const original = { ...mixed, position: 1, slice: 1, overlay: false };
+  const added = addPoint(
+    [original],
+    { x: 5, y: 6 },
+    { ...settings, allSlices: true },
+    bounds,
+  )!;
+  assert.deepEqual(added[0], { ...original, overlay: true });
+  assert.strictEqual(added[0].raw, original.raw);
+  const deleted = deletePoint(added, { roiIndex: 1, pointIndex: 0 });
+  assert.equal(deleted[0].overlay, true);
+  assert.equal(deleted[1].points.length, 0);
+  assert.equal(counterCount(deleted, 2), 0);
+  assert.equal(original.overlay, false);
 });

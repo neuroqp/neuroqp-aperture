@@ -62,8 +62,9 @@ fn edited_metadata(
         .active_roi
         .filter(|bytes| matches!(roi::decode(bytes), Ok(None)))
         .unwrap_or_default();
+    let active_index = rois.iter().rposition(|roi| !roi.overlay);
     let mut encoded = vec![];
-    for mut current in rois {
+    for (index, mut current) in rois.into_iter().enumerate() {
         // Restore source metadata without accepting arbitrary ROI bytes through IPC.
         current.raw = match current.source_index {
             Some(index) => existing
@@ -74,7 +75,7 @@ fn edited_metadata(
             None => vec![],
         };
         if !current.points.is_empty() {
-            encoded.push((current.overlay, roi::encode(&current)?));
+            encoded.push((Some(index) != active_index, roi::encode(&current)?));
         }
     }
     if let Some(index) = encoded.iter().rposition(|(overlay, _)| !overlay) {
@@ -242,6 +243,43 @@ mod tests {
         let (active, overlays) = edited_metadata(original, vec![submitted]).unwrap();
         assert_eq!(active, bytes);
         assert_eq!(overlays, vec![nonpoint.clone(), nonpoint]);
+    }
+
+    #[test]
+    fn deleting_all_points_clears_active_and_point_overlays_but_preserves_other_rois() {
+        let bytes = include_bytes!("fixtures/imagej-points.roi").to_vec();
+        let mut rectangle = bytes.clone();
+        rectangle[6] = 1;
+        let original = TiffAnnotations {
+            active_roi: Some(bytes.clone()),
+            overlays: vec![bytes, rectangle.clone()],
+        };
+        let mut cleared = points(&original).unwrap();
+        for roi in &mut cleared {
+            roi.points.clear();
+        }
+        let (active, overlays) = edited_metadata(original, cleared).unwrap();
+        assert!(active.is_empty());
+        assert_eq!(overlays, vec![rectangle]);
+    }
+
+    #[test]
+    fn deleting_the_last_active_selection_does_not_promote_an_earlier_selection() {
+        let original = TiffAnnotations {
+            active_roi: Some(roi::encode(&point()).unwrap()),
+            overlays: vec![],
+        };
+        let previous = points(&original).unwrap().remove(0);
+        let mut cleared = point();
+        cleared.points.clear();
+        let (active, overlays) =
+            edited_metadata(original, vec![previous.clone(), cleared]).unwrap();
+        assert!(active.is_empty());
+        assert_eq!(overlays.len(), 1);
+        assert_eq!(
+            roi::decode(&overlays[0]).unwrap().unwrap().points,
+            previous.points
+        );
     }
 
     #[test]

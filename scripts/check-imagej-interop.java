@@ -109,7 +109,7 @@ class ImageJInterop {
             FloatPolygon xy = active.getFloatPolygon();
             check(xy.npoints == 2 && xy.xpoints[0] == 12.25f && xy.ypoints[0] == 16.75f && xy.xpoints[1] == 7.125f && xy.ypoints[1] == 8.875f, "coordinates changed");
             check(active.getPointType() == 2 && active.getSize() == 3 && active.getStrokeColor().getRGB() == 0xffff8000 && active.getShowLabels(), "point style changed");
-            check(Arrays.equals(active.getCounters(), new int[]{2, 4}), "counters changed");
+            check(Arrays.equals(active.getCounters(), new int[]{2, 99}), "counters changed");
             if (!name.equals("plain.tif")) {
                 check(active.getName().equals("synthetic-active") && active.getProperty("source").equals("synthetic"), "ROI properties lost");
                 check(saved.getCalibration().pixelWidth == original.getCalibration().pixelWidth && saved.getCalibration().pixelHeight == original.getCalibration().pixelHeight && saved.getCalibration().getUnit().equals(original.getCalibration().getUnit()), "calibration changed");
@@ -123,12 +123,17 @@ class ImageJInterop {
                 check(Arrays.equals(extra.getCounters(), new int[]{(2 << 8) | 2, (1 << 8) | 4}), "point overlay counters/positions changed");
             }
             if (name.equals("float32.tif")) {
-                active.setCounter(4);
+                active.setCounter(99);
                 active.addPoint(19.25, 20.75);
                 check(active.getFloatPolygon().npoints == 3, "ROI could not be edited");
                 save(saved, directory.resolve("imagej-edited.tif"));
             }
         }
+        ImagePlus cleared = open(directory.resolve("saved-cleared.tif"));
+        check(cleared.getRoi() == null, "deleted active points reappeared");
+        check(cleared.getOverlay() != null && cleared.getOverlay().size() == 1
+            && cleared.getOverlay().get(0).getName().equals("untouched-rectangle"),
+            "deleted point overlay reappeared or unrelated overlay lost");
         for (String name : new String[]{"saved-split.tif", "saved-split-reopened.tif"}) {
             ImagePlus saved = open(directory.resolve(name));
             PointRoi added = (PointRoi)saved.getRoi();

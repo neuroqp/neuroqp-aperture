@@ -32,6 +32,7 @@ export type AnnotationSettings = PointSettings & {
   allSlices: boolean;
   counter: number;
 };
+export type PointReference = { roiIndex: number; pointIndex: number };
 export type ImageBounds = { width: number; height: number };
 
 const imageJTypes = { Cross: 1, Dot: 2, Circle: 3 };
@@ -209,7 +210,7 @@ export function addPoint(
     point.y >= bounds.height - 0.5 ||
     !Number.isInteger(settings.counter) ||
     settings.counter < 0 ||
-    settings.counter > 9
+    settings.counter > 99
   )
     return null;
   const existing = activeRoi(rois);
@@ -237,7 +238,9 @@ export function addPoint(
     ];
   }
   return [
-    ...rois,
+    ...rois.map((roi, index) =>
+      existing && index === rois.length - 1 ? { ...roi, overlay: true } : roi,
+    ),
     {
       ...(visible ? existing : {}),
       points: [nextPoint],
@@ -259,5 +262,55 @@ export function counterCount(rois: PointRoi[], counter: number) {
   return (
     activeRoi(rois)?.points.filter((point) => point.counter === counter)
       .length ?? 0
+  );
+}
+
+export function movePoint(
+  rois: PointRoi[],
+  reference: PointReference,
+  point: { x: number; y: number },
+  bounds: ImageBounds,
+): PointRoi[] {
+  const original = rois[reference.roiIndex]?.points[reference.pointIndex];
+  if (!original || !Number.isFinite(point.x) || !Number.isFinite(point.y))
+    return rois;
+  const x = Math.min(
+    bounds.width - 0.5 - Number.EPSILON * bounds.width,
+    Math.max(-0.5, point.x),
+  );
+  const y = Math.min(
+    bounds.height - 0.5 - Number.EPSILON * bounds.height,
+    Math.max(-0.5, point.y),
+  );
+  if (original.x === x && original.y === y) return rois;
+  return rois.map((roi, index) =>
+    index === reference.roiIndex
+      ? {
+          ...roi,
+          points: roi.points.map((entry, index) =>
+            index === reference.pointIndex ? { ...entry, x, y } : entry,
+          ),
+        }
+      : roi,
+  );
+}
+
+export function deletePoint(
+  rois: PointRoi[],
+  reference: PointReference,
+): PointRoi[] {
+  const roi = rois[reference.roiIndex];
+  if (!roi?.points[reference.pointIndex]) return rois;
+  // Keep empty selections so deletion cannot promote a previous ROI or discard its style.
+  return rois.map((roi, index) =>
+    index === reference.roiIndex
+      ? {
+          ...roi,
+          points: roi.points.filter(
+            (_, index) => index !== reference.pointIndex,
+          ),
+          nCounters: numberOfCounters(roi),
+        }
+      : roi,
   );
 }

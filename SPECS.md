@@ -12,8 +12,7 @@ preview as soon as possible, and stays responsive while loading large images.
 - Support ordinary images and large TIFFs, including BigTIFF. Exact compression,
   pixel-type, and multi-page coverage must be documented as support is added.
 - Keep the interface and implementation small. Image editing, analysis,
-  specialist microscopy formats, and annotation movement/deletion are outside
-  the current scope. Display-range adjustment is display-only. Multi-point
+  and specialist microscopy formats are outside the current scope. Display-range adjustment is display-only. Multi-point
   annotations are editable metadata, kept separate from source image pixels.
 
 ## Technology decisions
@@ -62,7 +61,8 @@ Two thin horizontal header bars sit above the image viewer.
 
 Open selects a local image and replaces the current image. Save creates a
 separate annotated TIFF copy with ImageJ ROI metadata; never overwrite the
-opened source image. Enable Save when annotations are available. Confirm before
+opened source image. Enable Save when annotations are available or deletions
+need saving, including after removing the final point. Confirm before
 discarding unsaved annotations on Open or Close. Ctrl+S opens Save.
 
 ## Tool option panels
@@ -83,8 +83,8 @@ discarding unsaved annotations on Open or Close. Ctrl+S opens Save.
 - Multi-point: icon toggle rows for Cross/Dot/Circle, color, and size. Each row
   previews its choices using the other two current selections. Include Label
   points, Show on all slices, Counter, and the selected counter's point count.
-  With the tool active, primary clicks inside the image add points using the
-  current point-selection settings. Counter assigns a category to new points
+  With the tool active, primary mouse-down inside the image adds a point using
+  the current point-selection settings, even if the pointer is moving. Counter assigns a category to new points
   within the active selection, following ImageJ. Type, size and base color apply
   to the active selection; Label points also updates point overlays. Counter
   changes do not restore separate styles. A fresh selection using counter 0
@@ -92,9 +92,15 @@ discarding unsaved annotations on Open or Close. Ctrl+S opens Save.
   IDs and markers use ImageJ's counter colors. Returning to counter 0 retains
   this mode for that selection. The point count reports the selected category
   in the active selection. Explain these rules through a question-mark tooltip
-  beside Counter. Its dropdown must follow the app's light/dark theme.
-  Closing the panel or selecting Pan leaves point-placement mode. Do not add
-  movement, deletion, or custom pan gestures yet.
+  to the right of Counter's dropdown. Explain the behavior first, then note
+  compatibility with ImageJ's multi-point tool. Categories range from 0 to 99;
+  the scrollable dropdown must follow the app's light/dark theme.
+  Hovering a visible point in multi-point mode shows a grab cursor; dragging
+  moves it. Alt-hover shows a minus cursor and Alt-click removes that point.
+  Space or Ctrl held temporarily overrides the current tool with panning and
+  a hand cursor; releasing restores the tool. Panning takes precedence over
+  point editing. Losing window focus clears transient keys and gestures.
+  Closing the panel or selecting Pan leaves point-placement mode.
 - Preserve option values while closing and reopening panels during the session.
 - Use the approved T1/B2/C1/D1/S1/P2/M2 styling: recessed lavender toggles, tinted
   action buttons, solid purple checkboxes, raised dropdowns, fine round-handle
@@ -154,7 +160,7 @@ using representative Linux files, including tiled and strip-based TIFFs.
 
 ## Future scope and open decisions
 
-- Add point movement/deletion and a richer overview of marked cells and counts.
+- Add a richer overview of marked cells and counts.
 - Add specialist microscopy formats as needed, preserving the meaning of
   scenes, channels, Z slices, timepoints, and image metadata.
 - Validate and package the application for Windows and macOS.

@@ -15,7 +15,7 @@ fn main() {
         assert_eq!(active.points.len(), 3);
         assert_eq!(active.points[2].x, 19.25);
         assert_eq!(active.points[2].y, 20.75);
-        assert_eq!(active.points[2].counter, 4);
+        assert_eq!(active.points[2].counter, 99);
         assert_eq!(active.points[2].position, 0);
         return;
     }
@@ -65,7 +65,7 @@ fn main() {
         active.points.push(roi::Point {
             x: 7.125,
             y: 8.875,
-            counter: 4,
+            counter: 99,
             position: 0,
         });
         let overlays: Vec<_> = annotations
@@ -93,6 +93,13 @@ fn main() {
     }
     let source = directory.join("gray16-stack.tif");
     let loaded = annotation_io::load(&source).unwrap();
+    let mut cleared = loaded.clone();
+    for selection in &mut cleared {
+        selection.points.clear();
+    }
+    let cleared_target = directory.join("saved-cleared.tif");
+    annotation_io::save(&source, &cleared_target, cleared).unwrap();
+    assert!(annotation_io::load(&cleared_target).unwrap().is_empty());
     let mut split = vec![];
     for (index, counter) in [(1, 2), (0, 4), (1, 4), (0, 2)] {
         let mut group = loaded[index].clone();
