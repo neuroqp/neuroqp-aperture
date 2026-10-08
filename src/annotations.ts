@@ -23,6 +23,9 @@ export type PointRoi = {
   frame: number;
   raw: number[];
   sourceIndex?: number;
+  // ImageJ setCounter remembers the highest selected category during a session.
+  nCounters?: number;
+  overlay?: boolean;
 };
 export type AnnotationSettings = PointSettings & {
   labels: boolean;
@@ -36,14 +39,12 @@ const imageJSizes = Object.keys(pointSizes) as PointSettings["size"][];
 const imageJColor = (color: PointSettings["color"]) =>
   (0xff000000 | Number.parseInt(pointColors[color].slice(1), 16)) >>> 0;
 
-export function settingsForCounter(
+export function settingsForRois(
   rois: PointRoi[],
   counter: number,
 ): AnnotationSettings {
-  const roi = rois.find((roi) =>
-    roi.points.some((point) => point.counter === counter),
-  );
-  const point = roi?.points.find((point) => point.counter === counter);
+  const roi = activeRoi(rois);
+  const point = roi?.points.at(-1);
   return {
     type:
       (Object.keys(imageJTypes) as PointSettings["type"][]).find(
@@ -66,9 +67,8 @@ export function settingsForCounter(
   };
 }
 
-export function updateCounter<K extends keyof PointSettings | "labels">(
+export function updatePointRois<K extends keyof PointSettings | "labels">(
   rois: PointRoi[],
-  counter: number,
   key: K,
   value: AnnotationSettings[K],
 ): PointRoi[] {
@@ -89,17 +89,82 @@ export function updateCounter<K extends keyof PointSettings | "labels">(
           ? imageJColor(value as PointSettings["color"])
           : value;
   let changed = false;
-  const next = rois.flatMap((roi) => {
-    const selected = roi.points.filter((point) => point.counter === counter);
-    if (!selected.length || roi[field] === encoded) return [roi];
+  const next = rois.map((roi, index) => {
+    if (
+      (key !== "labels" &&
+        (index !== rois.length - 1 || roi.overlay || !onFirstPage(roi))) ||
+      roi[field] === encoded
+    )
+      return roi;
     changed = true;
-    const remaining = roi.points.filter((point) => point.counter !== counter);
-    const updated = { ...roi, [field]: encoded, points: selected };
-    return remaining.length
-      ? [{ ...roi, points: remaining }, updated]
-      : [updated];
+    return { ...roi, [field]: encoded };
   });
   return changed ? next : rois;
+}
+
+export function onFirstPage(roi: PointRoi) {
+  return (
+    (roi.position <= 1 || roi.position === 0xfffffffe) &&
+    roi.channel <= 1 &&
+    roi.slice <= 1 &&
+    roi.frame <= 1
+  );
+}
+
+export function activeRoi(rois: PointRoi[]) {
+  const roi = rois.at(-1);
+  return roi?.overlay ? undefined : roi;
+}
+
+export function numberOfCounters(roi: PointRoi) {
+  return roi.points.reduce(
+    (count, point) => Math.max(count, point.counter + 1),
+    roi.nCounters ?? 1,
+  );
+}
+
+export function selectCounter(rois: PointRoi[], counter: number) {
+  const roi = activeRoi(rois);
+  if (!roi || !onFirstPage(roi) || counter < numberOfCounters(roi)) return rois;
+  return [...rois.slice(0, -1), { ...roi, nCounters: counter + 1 }];
+}
+
+// java.awt.Color constants used by ImageJ PointRoi.getColor, categories 0-9.
+const counterColors = [
+  "#ffff00",
+  "#ff00ff",
+  "#00ffff",
+  "#ffc800",
+  "#00ff00",
+  "#0000ff",
+  "#ffffff",
+  "#404040",
+  "#ffafaf",
+  "#c0c0c0",
+];
+
+export function pointAppearance(
+  roi: PointRoi,
+  index: number,
+  multiple = numberOfCounters(roi) > 1,
+) {
+  const counter = roi.points[index].counter;
+  if (multiple && !counterColors[counter]) {
+    // ImageJ caches random colors for imported categories beyond its first ten.
+    const color = Math.floor(Math.random() * 0x1000000);
+    counterColors[counter] = `#${color.toString(16).padStart(6, "0")}`;
+  }
+  return {
+    color: multiple
+      ? counterColors[counter]
+      : roi.color === null
+        ? "#ffff00"
+        : `#${(roi.color & 0xffffff).toString(16).padStart(6, "0")}`,
+    label:
+      roi.showLabels && roi.points.length > 1
+        ? String(multiple ? counter : index + 1)
+        : null,
+  };
 }
 
 // OSD handles rotation in its coordinate conversions, but not image flipping.
@@ -147,55 +212,52 @@ export function addPoint(
     settings.counter > 9
   )
     return null;
-  const existing = rois.find((roi) =>
-    roi.points.some((point) => point.counter === settings.counter),
-  );
-  const style = {
-    pointType: existing?.pointType ?? imageJTypes[settings.type],
-    size: existing?.size ?? imageJSizes.indexOf(settings.size),
-    color: existing ? existing.color : imageJColor(settings.color),
-    showLabels: existing?.showLabels ?? settings.labels,
-    position: settings.allSlices ? 0 : 1,
-    channel: 0,
-    slice: 0,
-    frame: 0,
-  };
+  const existing = activeRoi(rois);
   const nextPoint = {
     ...point,
     counter: settings.counter,
-    position: style.position,
+    position: settings.allSlices ? 0 : 1,
   };
-  const index = rois.findIndex(
-    (roi) =>
-      roi.points.some((point) => point.counter === settings.counter) &&
-      roi.pointType === style.pointType &&
-      roi.size === style.size &&
-      roi.color === style.color &&
-      roi.showLabels === style.showLabels &&
-      roi.position <= 1 &&
-      roi.channel <= 1 &&
-      roi.slice <= 1 &&
-      roi.frame <= 1 &&
-      (!settings.allSlices ||
-        (roi.position === 0 &&
-          roi.channel === 0 &&
-          roi.slice === 0 &&
-          roi.frame === 0)),
-  );
-  if (index !== -1)
-    return rois.map((roi, roiIndex) =>
-      roiIndex === index ? { ...roi, points: [...roi.points, nextPoint] } : roi,
-    );
+  const visible = existing && onFirstPage(existing);
+  const allSlicesScope =
+    existing &&
+    existing.position === 0 &&
+    existing.channel === 0 &&
+    existing.slice === 0 &&
+    existing.frame === 0;
+  if (visible && (!settings.allSlices || allSlicesScope)) {
+    // Per-point positions can vary without changing the imported ROI's scope.
+    return [
+      ...rois.slice(0, -1),
+      {
+        ...existing,
+        nCounters: Math.max(numberOfCounters(existing), settings.counter + 1),
+        points: [...existing.points, nextPoint],
+      },
+    ];
+  }
   return [
     ...rois,
-    { ...existing, ...style, points: [nextPoint], raw: existing?.raw ?? [] },
+    {
+      ...(visible ? existing : {}),
+      points: [nextPoint],
+      pointType: visible ? existing.pointType : imageJTypes[settings.type],
+      size: visible ? existing.size : imageJSizes.indexOf(settings.size),
+      color: visible ? existing.color : imageJColor(settings.color),
+      showLabels: visible ? existing.showLabels : settings.labels,
+      position: nextPoint.position,
+      channel: 0,
+      slice: 0,
+      frame: 0,
+      nCounters: settings.counter + 1,
+      raw: visible ? existing.raw : [],
+    },
   ];
 }
 
 export function counterCount(rois: PointRoi[], counter: number) {
-  return rois.reduce(
-    (total, roi) =>
-      total + roi.points.filter((point) => point.counter === counter).length,
-    0,
+  return (
+    activeRoi(rois)?.points.filter((point) => point.counter === counter)
+      .length ?? 0
   );
 }

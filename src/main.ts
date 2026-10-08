@@ -6,8 +6,9 @@ import { AnnotationViewer } from "./annotation-viewer";
 import {
   addPoint,
   counterCount,
-  settingsForCounter,
-  updateCounter,
+  settingsForRois,
+  updatePointRois,
+  selectCounter,
   type PointRoi,
   type AnnotationSettings,
 } from "./annotations";
@@ -96,7 +97,6 @@ const viewer = OpenSeadragon({
 
 let currentImage: ImageState | null = null;
 let rois: PointRoi[] = [];
-const counterSettings = new Map<number, AnnotationSettings>();
 let annotationsReady = false;
 let annotationError: string | null = null;
 let dirty = false;
@@ -116,26 +116,27 @@ const annotationViewer = new AnnotationViewer(
 );
 
 function updatePointTool(key?: keyof AnnotationSettings) {
-  if (key === "counter") {
-    const counter = tools.pointSettings().counter;
-    tools.setPointSettings(
-      counterSettings.get(counter) ?? settingsForCounter(rois, counter),
-    );
-  } else if (key) {
+  if (key === "counter" && annotationsReady && !saving) {
+    rois = selectCounter(rois, tools.pointSettings().counter);
+    annotationViewer.setRois(rois);
+  } else if (
+    key &&
+    annotationsReady &&
+    !saving &&
+    key !== "allSlices" &&
+    key !== "counter"
+  ) {
     const settings = tools.pointSettings();
-    counterSettings.set(settings.counter, settings);
-    if (annotationsReady && !saving && key !== "allSlices") {
-      const next = updateCounter(rois, settings.counter, key, settings[key]);
-      if (next !== rois) {
-        rois = next;
-        dirty = true;
-        annotationViewer.setRois(rois);
-      }
+    const next = updatePointRois(rois, key, settings[key]);
+    if (next !== rois) {
+      rois = next;
+      dirty = true;
+      annotationViewer.setRois(rois);
     }
   }
   document
     .querySelectorAll<HTMLButtonElement | HTMLInputElement | HTMLSelectElement>(
-      ".point-choice, #point-labels, #point-all-slices, select#point-counter",
+      ".point-choice, #point-labels, #point-all-slices, #point-counter, [data-counter]",
     )
     .forEach((control) => {
       control.disabled = saving || !annotationsReady;
@@ -242,8 +243,7 @@ function resetViewer() {
   currentId = null;
   currentImage = null;
   rois = [];
-  counterSettings.clear();
-  tools.setPointSettings(settingsForCounter([], 0));
+  tools.setPointSettings(settingsForRois([], 0));
   annotationsReady = false;
   annotationError = null;
   dirty = false;
@@ -278,7 +278,7 @@ function showImage(state: ImageState) {
         if (currentId !== state.id) return;
         rois = loaded;
         tools.setPointSettings(
-          settingsForCounter(rois, tools.pointSettings().counter),
+          settingsForRois(rois, tools.pointSettings().counter),
         );
         annotationsReady = true;
         annotationViewer.setRois(rois);

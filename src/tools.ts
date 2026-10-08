@@ -14,13 +14,6 @@ import {
   type DisplaySettings,
 } from "./display-settings";
 
-const options = (values: string[], selected: string) =>
-  values
-    .map(
-      (value) =>
-        `<option${value === selected ? " selected" : ""}>${value}</option>`,
-    )
-    .join("");
 const slider = (
   key: keyof DisplaySettings,
   label: string,
@@ -64,10 +57,24 @@ export const toolPanels = `
         <label><input id="point-all-slices" type="checkbox">Show on all slices</label>
       </div>
       <div class="point-counter">
-        <label for="point-counter">Counter<select id="point-counter">${options(
-          Array.from({ length: 10 }, (_, i) => String(i)),
-          "0",
-        )}</select></label>
+        <div class="counter-controls">
+          <span id="point-counter-label">Counter</span>
+          <div class="counter-help">
+            <button id="counter-help-button" class="counter-help-button" type="button" aria-label="About ImageJ counters" aria-describedby="counter-help-text" aria-controls="counter-help-text" aria-expanded="false">${icon("help")}</button>
+            <div id="counter-help-text" class="counter-tooltip" role="tooltip" popover="manual" hidden>
+              <strong>ImageJ counters are categories</strong>
+              <p>A fresh selection using counter 0 labels points in order: 1, 2, 3. Selecting a higher counter switches to category labels, so points in counter 1 all read 1. Returning to 0 keeps category labels until you start a fresh selection.</p>
+              <p>Points shows how many belong to the selected counter in this selection. Label points only controls label visibility.</p>
+              <p>Type and Size apply to the whole point selection. Color applies in the initial counter 0 mode; category labels use ImageJ's fixed colors.</p>
+            </div>
+          </div>
+          <div class="counter-picker">
+            <button id="point-counter" class="counter-trigger" type="button" value="0" aria-labelledby="point-counter-label point-counter-value" aria-haspopup="listbox" aria-controls="point-counter-options" aria-expanded="false"><span id="point-counter-value">0</span>${icon("dropdown")}</button>
+            <div id="point-counter-options" class="counter-options" role="listbox" aria-labelledby="point-counter-label" popover="manual" hidden>
+              ${Array.from({ length: 10 }, (_, counter) => `<button id="counter-option-${counter}" type="button" role="option" data-counter="${counter}" aria-selected="${counter === 0}" tabindex="-1">${counter}</button>`).join("")}
+            </div>
+          </div>
+        </div>
         <span>Points <output id="point-count">0</output></span>
       </div>
     </section>
@@ -78,6 +85,123 @@ export function bindTools(
   onPointsChange: (key?: keyof AnnotationSettings) => void = () => {},
 ) {
   const container = document.querySelector<HTMLElement>("#tool-panels")!;
+  const counter = document.getElementById("point-counter") as HTMLButtonElement;
+  const counterOptions = document.getElementById("point-counter-options")!;
+  const counterButtons = Array.from(
+    counterOptions.querySelectorAll<HTMLButtonElement>("[data-counter]"),
+  );
+  const helpButton = document.getElementById("counter-help-button")!;
+  const helpText = document.getElementById("counter-help-text")!;
+  const help = helpButton.parentElement!;
+  const positionPopup = (popup: HTMLElement, anchor: HTMLElement) => {
+    const rect = anchor.getBoundingClientRect();
+    popup.style.left = `${Math.max(12, Math.min(rect.right - popup.offsetWidth, window.innerWidth - popup.offsetWidth - 12))}px`;
+    popup.style.top = `${Math.max(12, rect.top - popup.offsetHeight)}px`;
+  };
+  let helpPinned = false;
+  const showHelp = (show: boolean) => {
+    helpText.hidden = !show;
+    if (show) {
+      helpText.showPopover();
+      positionPopup(helpText, helpButton);
+    } else helpText.hidePopover();
+    helpButton.setAttribute("aria-expanded", String(show));
+    if (!show) helpPinned = false;
+  };
+  help.addEventListener("mouseenter", () => showHelp(true));
+  help.addEventListener("mouseleave", () => {
+    if (!helpPinned && document.activeElement !== helpButton) showHelp(false);
+  });
+  helpButton.addEventListener("focus", () => showHelp(true));
+  helpButton.addEventListener("blur", () => {
+    if (!helpPinned) showHelp(false);
+  });
+  helpButton.addEventListener("click", () => {
+    const pin = !helpPinned;
+    showHelp(pin);
+    helpPinned = pin;
+  });
+  const closeCounter = (restoreFocus = false) => {
+    counterOptions.hidePopover();
+    counterOptions.hidden = true;
+    counter.setAttribute("aria-expanded", "false");
+    if (restoreFocus) counter.focus();
+  };
+  const setCounter = (value: number) => {
+    counter.value = String(value);
+    document.getElementById("point-counter-value")!.textContent = counter.value;
+    for (const button of counterButtons) {
+      button.setAttribute(
+        "aria-selected",
+        String(button.dataset.counter === counter.value),
+      );
+    }
+  };
+  const openCounter = () => {
+    showHelp(false);
+    counterOptions.hidden = false;
+    counterOptions.showPopover();
+    positionPopup(counterOptions, counter);
+    counter.setAttribute("aria-expanded", "true");
+    (
+      counterButtons.find(
+        (button) => button.dataset.counter === counter.value,
+      ) ?? counterButtons[0]
+    ).focus();
+  };
+  counter.addEventListener("click", () => {
+    if (counterOptions.hidden) openCounter();
+    else closeCounter();
+  });
+  counter.addEventListener("keydown", (event) => {
+    if (event.key === "ArrowDown" || event.key === "ArrowUp") {
+      event.preventDefault();
+      openCounter();
+    }
+  });
+  for (const button of counterButtons) {
+    button.addEventListener("click", () => {
+      setCounter(Number(button.dataset.counter));
+      closeCounter(true);
+      onPointsChange("counter");
+    });
+  }
+  counterOptions.addEventListener("keydown", (event) => {
+    if (event.key === "Tab" && event.shiftKey) {
+      event.preventDefault();
+      closeCounter(true);
+      return;
+    }
+    const index = counterButtons.indexOf(
+      document.activeElement as HTMLButtonElement,
+    );
+    let next = index;
+    if (event.key === "ArrowDown") next = (index + 1) % counterButtons.length;
+    else if (event.key === "ArrowUp")
+      next = (index + counterButtons.length - 1) % counterButtons.length;
+    else if (event.key === "Home") next = 0;
+    else if (event.key === "End") next = counterButtons.length - 1;
+    else if (/^[0-9]$/.test(event.key)) next = Number(event.key);
+    else return;
+    event.preventDefault();
+    counterButtons[next].focus();
+  });
+  counterOptions.addEventListener("focusout", (event) => {
+    if (
+      event.relatedTarget !== counter &&
+      !counterOptions.contains(event.relatedTarget as Node | null)
+    )
+      closeCounter();
+  });
+  counter.addEventListener("blur", (event) => {
+    if (!counterOptions.contains(event.relatedTarget as Node | null))
+      closeCounter();
+  });
+  document.addEventListener("pointerdown", (event) => {
+    const target = event.target as Node;
+    if (!counter.parentElement!.contains(target)) closeCounter();
+    if (!help.contains(target)) showHelp(false);
+  });
   const names = ["brightness", "points"] as const;
   type PanelName = (typeof names)[number];
   const openPanels = new Set<PanelName>();
@@ -89,9 +213,21 @@ export function bindTools(
     button.setAttribute("aria-pressed", String(open));
     button.setAttribute("aria-expanded", String(open));
     document.getElementById(`${name}-panel`)!.hidden = !open;
+    if (name === "points" && !open) {
+      closeCounter();
+      showHelp(false);
+    }
     if (name === "points") onPointsChange();
   };
   const close = () => {
+    if (!counterOptions.hidden) {
+      closeCounter(true);
+      return true;
+    }
+    if (!helpText.hidden) {
+      showHelp(false);
+      return true;
+    }
     // Escape closes the focused panel, otherwise the most recently opened one.
     const focused = names.find(
       (name) =>
@@ -258,7 +394,6 @@ export function bindTools(
   for (const [id, key] of [
     ["point-labels", "labels"],
     ["point-all-slices", "allSlices"],
-    ["point-counter", "counter"],
   ] as const) {
     document
       .getElementById(id)!
@@ -282,9 +417,7 @@ export function bindTools(
       (
         document.getElementById("point-all-slices") as HTMLInputElement
       ).checked = settings.allSlices;
-      (
-        document.querySelector("select#point-counter") as HTMLSelectElement
-      ).value = String(settings.counter);
+      setCounter(settings.counter);
       refreshPoints();
     },
     pointSettings: () => ({
@@ -294,10 +427,7 @@ export function bindTools(
       allSlices: (
         document.getElementById("point-all-slices") as HTMLInputElement
       ).checked,
-      counter: Number(
-        (document.querySelector("select#point-counter") as HTMLSelectElement)
-          .value,
-      ),
+      counter: Number(counter.value),
     }),
   };
 }

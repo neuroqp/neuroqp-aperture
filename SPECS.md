@@ -84,11 +84,15 @@ discarding unsaved annotations on Open or Close. Ctrl+S opens Save.
   previews its choices using the other two current selections. Include Label
   points, Show on all slices, Counter, and the selected counter's point count.
   With the tool active, primary clicks inside the image add points using the
-  selected counter's configuration. Counter selects the group being edited:
-  changing type, color, size, or Label points updates every existing point in
-  that counter and future points. Other counters stay unchanged. Switching
-  counters recalls their settings; point numbering is per counter. Empty-counter
-  settings are remembered during the current image session.
+  current point-selection settings. Counter assigns a category to new points
+  within the active selection, following ImageJ. Type, size and base color apply
+  to the active selection; Label points also updates point overlays. Counter
+  changes do not restore separate styles. A fresh selection using counter 0
+  labels points sequentially. Once a higher counter is used, labels show category
+  IDs and markers use ImageJ's counter colors. Returning to counter 0 retains
+  this mode for that selection. The point count reports the selected category
+  in the active selection. Explain these rules through a question-mark tooltip
+  beside Counter. Its dropdown must follow the app's light/dark theme.
   Closing the panel or selecting Pan leaves point-placement mode. Do not add
   movement, deletion, or custom pan gestures yet.
 - Preserve option values while closing and reopening panels during the session.
@@ -102,10 +106,11 @@ discarding unsaved annotations on Open or Close. Ctrl+S opens Save.
 
 - Load active multi-point selections and point overlays embedded in ImageJ TIFFs.
   Store positions in original-image pixel-center coordinates with subpixel precision.
-  Imported points participate in the same point groups as new annotations.
+  Imported selections retain their ROI boundaries and metadata.
 - Preserve marker type, size, ARGB color, labels, counters, slice positions, ROI
-  names/properties, and unrelated metadata when saving. The newest group becomes
-  ImageJ's active selection; other groups remain editable ImageJ overlays.
+  names/properties, and unrelated metadata when saving. Preserve the distinction
+  between ImageJ's active selection and point overlays. Adding points when only
+  overlays exist creates a new active selection without changing those overlays.
 - Display the first page only. Preserve annotations for other slices/channels/time
   points without displaying or reassigning them. Show on all slices sets new
   points' position to zero; it does not add stack navigation.

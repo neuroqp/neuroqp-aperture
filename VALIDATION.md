@@ -214,3 +214,30 @@ restore group controls and counts. Screenshot `test-data/counter-groups.native.p
 is local and ignored. The review's loading-state issue was fixed by disabling
 point controls until annotation loading completes. Empty groups keep preferences
 for the current image only; Show on all slices still controls new-point positions.
+
+## ImageJ counter semantics and themed controls
+
+Supersedes Counter-group editing above. Counter now selects a category inside
+the active point selection. Type, size and base color are shared by that
+selection; label visibility also applies to point overlays. Default counter-0
+selections show point indices; selecting a higher category switches to category
+labels and ImageJ colors, retained when returning to 0. Aperture switches
+immediately, without reproducing ImageJ's temporary missing-label behavior
+before its per-point counter array is allocated.
+
+Twenty-nine frontend and nineteen Rust tests pass, alongside Prettier, rustfmt,
+Clippy, TypeScript/Vite and the native debug build. Regression coverage includes
+overlay-only imports, preserved active/nonpoint selection roles, mixed-slice
+positions, category labels/colors, shared styling and immutable point addition.
+The installed ImageJ interoperability check passes after the metadata changes.
+
+The Counter menu uses an app-themed HTML popover instead of GTK's native select
+popup. A dedicated T3 browser tab verified actual clicks, keyboard selection,
+Escape/Tab dismissal, and readable help/menu layouts at 640 by 480 in both themes.
+Native Tauri/WebDriver checks verified category switching, placement, counts,
+shared appearance, labels, and Save/reopen with one ROI containing both counters.
+Save used the real frontend and Rust command with only the filename-dialog
+response supplied by the harness; native filename entry was not exercised.
+Local ignored screenshots include counter-menu-light.native.png,
+counter-menu-dark.native.png, counter-help-light.native.png and
+counter-help-dark.native.png under test-data/.

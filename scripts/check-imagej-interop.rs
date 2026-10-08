@@ -48,6 +48,7 @@ fn main() {
                 slice: 0,
                 frame: 0,
                 source_index: None,
+                overlay: false,
                 raw: vec![],
             },
         };

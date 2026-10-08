@@ -31,9 +31,12 @@ pub struct PointRoi {
     pub slice: u32,
     #[serde(default)]
     pub frame: u32,
-    /// Original point ROI in the opened image; shared by groups split by counter.
+    /// Original point ROI in the opened image, used to preserve its metadata.
     #[serde(default)]
     pub source_index: Option<usize>,
+    /// Distinguish imported overlays from the active point selection.
+    #[serde(default)]
+    pub overlay: bool,
     /// Retained on the backend, never accepted from the frontend.
     #[serde(skip)]
     pub raw: Vec<u8>,
@@ -156,6 +159,7 @@ pub fn decode(data: &[u8]) -> Result<Option<PointRoi>, String> {
         slice,
         frame,
         source_index: None,
+        overlay: false,
         raw: data.to_vec(),
     }))
 }
@@ -181,6 +185,7 @@ pub fn encode(roi: &PointRoi) -> Result<Vec<u8>, String> {
         let mut current = roi.clone();
         current.raw.clear();
         current.source_index = None;
+        current.overlay = false;
         if original == current {
             return Ok(roi.raw.clone());
         }
@@ -268,6 +273,7 @@ mod tests {
             slice: 0,
             frame: 0,
             source_index: None,
+            overlay: false,
             raw: vec![],
         }
     }

@@ -20,8 +20,18 @@ fn points(annotations: &TiffAnnotations) -> Result<Vec<PointRoi>, String> {
     let mut rois: Vec<PointRoi> = annotations
         .overlays
         .iter()
-        .chain(annotations.active_roi.iter())
-        .filter_map(|bytes| roi::decode(bytes).transpose())
+        .map(|bytes| (bytes, true))
+        .chain(annotations.active_roi.iter().map(|bytes| (bytes, false)))
+        .filter_map(|(bytes, overlay)| {
+            roi::decode(bytes)
+                .map(|decoded| {
+                    decoded.map(|mut roi| {
+                        roi.overlay = overlay;
+                        roi
+                    })
+                })
+                .transpose()
+        })
         .collect::<Result<_, _>>()?;
     for (index, roi) in rois.iter_mut().enumerate() {
         roi.source_index = Some(index);
@@ -54,8 +64,7 @@ fn edited_metadata(
         .unwrap_or_default();
     let mut encoded = vec![];
     for mut current in rois {
-        // Splitting a mixed-counter ROI retains its original metadata for each
-        // group, without accepting arbitrary ROI bytes through IPC.
+        // Restore source metadata without accepting arbitrary ROI bytes through IPC.
         current.raw = match current.source_index {
             Some(index) => existing
                 .get(index)
@@ -65,16 +74,17 @@ fn edited_metadata(
             None => vec![],
         };
         if !current.points.is_empty() {
-            encoded.push(roi::encode(&current)?);
+            encoded.push((current.overlay, roi::encode(&current)?));
         }
     }
-    if let Some(last) = encoded.pop() {
+    if let Some(index) = encoded.iter().rposition(|(overlay, _)| !overlay) {
+        let (_, last) = encoded.remove(index);
         if !active.is_empty() {
             overlays.push(active);
         }
         active = last;
     }
-    overlays.extend(encoded);
+    overlays.extend(encoded.into_iter().map(|(_, bytes)| bytes));
     Ok((active, overlays))
 }
 
@@ -173,6 +183,48 @@ mod tests {
         roi::decode(include_bytes!("fixtures/imagej-points.roi"))
             .unwrap()
             .unwrap()
+    }
+
+    #[test]
+    fn overlay_only_points_remain_overlays_without_creating_an_active_selection() {
+        let bytes = include_bytes!("fixtures/imagej-points.roi").to_vec();
+        let original = TiffAnnotations {
+            active_roi: None,
+            overlays: vec![bytes.clone()],
+        };
+        let loaded = points(&original).unwrap();
+        assert!(loaded[0].overlay);
+        let (active, overlays) = edited_metadata(original, loaded).unwrap();
+        assert!(active.is_empty());
+        assert_eq!(overlays, vec![bytes]);
+    }
+
+    #[test]
+    fn point_overlays_preserve_nonpoint_active_selection_until_a_new_point_selection_is_added() {
+        let bytes = include_bytes!("fixtures/imagej-points.roi").to_vec();
+        let mut nonpoint = bytes.clone();
+        nonpoint[6] = 1;
+        let original = || TiffAnnotations {
+            active_roi: Some(nonpoint.clone()),
+            overlays: vec![bytes.clone()],
+        };
+        let loaded = points(&original()).unwrap();
+        assert!(loaded[0].overlay);
+        let (active, overlays) = edited_metadata(original(), loaded.clone()).unwrap();
+        assert_eq!(active, nonpoint);
+        assert_eq!(overlays, vec![bytes.clone()]);
+
+        let mut submitted = loaded;
+        let mut new_selection = point();
+        new_selection.points[0].x += 1.0;
+        assert!(!new_selection.overlay);
+        submitted.push(new_selection.clone());
+        let (active, overlays) = edited_metadata(original(), submitted).unwrap();
+        assert_eq!(
+            roi::decode(&active).unwrap().unwrap().points,
+            new_selection.points
+        );
+        assert_eq!(overlays, vec![nonpoint, bytes]);
     }
 
     #[test]

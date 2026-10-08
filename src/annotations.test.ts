@@ -5,9 +5,11 @@ import {
   counterCount,
   flipCoordinate,
   imageToStored,
-  settingsForCounter,
+  settingsForRois,
   storedToImage,
-  updateCounter,
+  updatePointRois,
+  pointAppearance,
+  selectCounter,
   type AnnotationSettings,
   type PointRoi,
 } from "./annotations.ts";
@@ -21,49 +23,6 @@ const settings: AnnotationSettings = {
   counter: 2,
 };
 const bounds = { width: 4000, height: 2000 };
-
-test("switching counters recalls their style and adds to their existing group", () => {
-  const first = addPoint([], { x: 100.25, y: 900.5 }, settings, bounds)!;
-  first[0].raw = [73, 111, 117, 116];
-  const second = addPoint(
-    first,
-    { x: 111, y: 222 },
-    { ...settings, counter: 3 },
-    bounds,
-  )!;
-  assert.equal(first[0].points.length, 1);
-  assert.equal(second.length, 2);
-  assert.deepEqual(second[0].raw, first[0].raw);
-  const changed = updateCounter(second, 2, "color", "Cyan");
-  const third = addPoint(
-    changed,
-    { x: 1, y: 1 },
-    { ...settings, color: "Cyan" },
-    bounds,
-  )!;
-  assert.equal(third.length, 2);
-  assert.equal(third[0].color, 0xff00bbce);
-  assert.equal(third[1].color, 0xff6c3e89);
-  assert.equal(third[0].points.length, 2);
-  assert.strictEqual(third[1], second[1]);
-  assert.deepEqual(settingsForCounter(third, 2), {
-    ...settings,
-    color: "Cyan",
-  });
-  assert.deepEqual(settingsForCounter(third, 3), { ...settings, counter: 3 });
-  assert.equal(counterCount(third, 2), 2);
-  assert.equal(counterCount(third, 3), 1);
-  assert.equal(third[1].points[0].position, 1);
-  assert.equal(
-    addPoint(
-      third,
-      { x: 1, y: 1 },
-      { ...settings, allSlices: true },
-      bounds,
-    )!.at(-1)!.position,
-    0,
-  );
-});
 
 const mixed: PointRoi & { name: string } = {
   points: [
@@ -84,124 +43,268 @@ const mixed: PointRoi & { name: string } = {
   name: "Imported group",
 };
 
-test("editing a mixed ROI splits only the selected counter and preserves metadata", () => {
-  const before = structuredClone(mixed);
-  const rois = [mixed];
-  const updated = updateCounter(rois, 2, "color", "Cyan");
-  assert.equal(updated.length, 2);
-  assert.deepEqual(updated[0], {
-    ...mixed,
-    points: [mixed.points[1]],
+test("counters append categories to one ROI and share its style", () => {
+  const first = addPoint([], { x: 100.25, y: 900.5 }, settings, bounds)!;
+  const second = addPoint(
+    first,
+    { x: 111, y: 222 },
+    { ...settings, counter: 3 },
+    bounds,
+  )!;
+  assert.equal(first[0].points.length, 1);
+  assert.equal(second.length, 1);
+  assert.deepEqual(
+    second[0].points.map((point) => point.counter),
+    [2, 3],
+  );
+  const changed = updatePointRois(second, "color", "Cyan");
+  const third = addPoint(changed, { x: 1, y: 1 }, settings, bounds)!;
+  assert.equal(third.length, 1);
+  assert.equal(third[0].color, 0xff00bbce);
+  assert.equal(third[0].points.length, 3);
+  assert.deepEqual(settingsForRois(third, 3), {
+    ...settings,
+    color: "Cyan",
+    counter: 3,
   });
+  assert.equal(counterCount(third, 2), 2);
+  assert.equal(counterCount(third, 3), 1);
+  assert.equal(third[0].points[0].position, 1);
+});
+
+test("ROI-wide edits preserve point order and metadata without splitting or changing other ROIs", () => {
+  const overlay = { ...mixed, sourceIndex: 0 };
+  const before = structuredClone(mixed);
+  const rois = [overlay, mixed];
+  const color = updatePointRois(rois, "color", "Cyan");
+  const type = updatePointRois(color, "type", "Circle");
+  const updated = updatePointRois(type, "size", "Small");
+  assert.equal(updated.length, 2);
+  assert.strictEqual(updated[0], overlay);
   assert.deepEqual(updated[1], {
     ...mixed,
     color: 0xff00bbce,
-    points: [mixed.points[0], mixed.points[2]],
-  });
-  assert.deepEqual(mixed, before);
-  assert.strictEqual(updated[0].raw, mixed.raw);
-  assert.strictEqual(updated[1].raw, mixed.raw);
-  assert.strictEqual(updateCounter(updated, 2, "color", "Cyan"), updated);
-  assert.strictEqual(updateCounter(rois, 9, "labels", true), rois);
-});
-
-test("labels update every ROI of a counter without resetting unsupported imported styles", () => {
-  const hidden = {
-    ...mixed,
-    position: 5,
-    channel: 2,
-    slice: 5,
-    frame: 3,
-    points: [{ ...mixed.points[2], position: 5 }],
-  };
-  const rois = [mixed, hidden];
-  const updated = updateCounter(rois, 2, "labels", true);
-  assert.equal(updated.length, 3);
-  assert.equal(updated[0].showLabels, false);
-  assert.equal(updated[1].showLabels, true);
-  assert.deepEqual(updated[2], { ...hidden, showLabels: true });
-  for (const roi of updated) {
-    assert.equal(roi.pointType, 0);
-    assert.equal(roi.size, 6);
-    assert.equal(roi.color, 0x80123456);
-  }
-  assert.equal(hidden.showLabels, false);
-  assert.deepEqual(settingsForCounter(updated, 2), {
-    ...settings,
-    labels: true,
-  });
-  assert.deepEqual(settingsForCounter([], 9), { ...settings, counter: 9 });
-});
-
-test("type and size edits apply only their selected field to every counter point", () => {
-  const type = updateCounter([mixed], 2, "type", "Circle");
-  const sized = updateCounter(type, 2, "size", "Small");
-  assert.deepEqual(sized[0], { ...mixed, points: [mixed.points[1]] });
-  assert.deepEqual(sized[1], {
-    ...mixed,
     pointType: 3,
     size: 1,
-    points: [mixed.points[0], mixed.points[2]],
   });
-  assert.deepEqual(settingsForCounter(sized, 2), {
-    ...settings,
-    type: "Circle",
-    size: "Small",
-    labels: false,
-  });
+  assert.strictEqual(updated[1].points, mixed.points);
+  assert.strictEqual(updated[1].raw, mixed.raw);
+  assert.deepEqual(mixed, before);
+  assert.strictEqual(updatePointRois(updated, "size", "Small"), updated);
+  assert.equal(counterCount(updated, 2), 2);
 });
 
-test("new points inherit existing raw style while existing slice positions stay intact", () => {
-  const updated = updateCounter([mixed], 2, "labels", true);
-  const next = addPoint(updated, { x: 3, y: 4 }, settings, bounds)!;
-  assert.equal(next.length, 2);
-  assert.equal(next[1].points.length, 3);
-  assert.deepEqual(next[1].points.slice(0, 2), [
-    mixed.points[0],
-    mixed.points[2],
+test("labels apply to active ROI and all overlays without resetting imported styles", () => {
+  const hidden = { ...mixed, position: 5, channel: 2, slice: 5, frame: 3 };
+  const updated = updatePointRois([mixed, hidden], "labels", true);
+  assert.deepEqual(updated, [
+    { ...mixed, showLabels: true },
+    { ...hidden, showLabels: true },
   ]);
-  assert.deepEqual(next[1].points[2], {
-    x: 3,
-    y: 4,
-    counter: 2,
-    position: 1,
-  });
-  assert.equal(next[1].pointType, 0);
-  assert.equal(next[1].size, 6);
-  assert.equal(next[1].color, 0x80123456);
-  assert.equal(next[1].sourceIndex, 7);
-  assert.strictEqual(next[0], updated[0]);
+  assert.equal(mixed.showLabels, false);
+  assert.equal(hidden.showLabels, false);
+  assert.deepEqual(settingsForRois([], 9), { ...settings, counter: 9 });
 });
 
-test("adding on the current slice never reassigns imported ROI stack positions", () => {
-  const hidden = {
-    ...mixed,
-    position: 4,
-    channel: 2,
-    slice: 4,
-    frame: 3,
-  };
-  const next = addPoint([hidden], { x: 3, y: 4 }, settings, bounds)!;
-  assert.strictEqual(next[0], hidden);
-  assert.equal(next.length, 2);
-  assert.equal(next[1].position, 1);
-  assert.equal(next[1].channel, 0);
-  assert.equal(next[1].slice, 0);
-  assert.equal(next[1].frame, 0);
-  assert.equal(next[1].pointType, hidden.pointType);
-  assert.equal(next[1].size, hidden.size);
-  assert.equal(next[1].color, hidden.color);
-  assert.equal(next[1].sourceIndex, hidden.sourceIndex);
+test("appending preserves imported point positions and raw styles across categories", () => {
+  const next = addPoint(
+    [mixed],
+    { x: 3, y: 4 },
+    { ...settings, counter: 0 },
+    bounds,
+  )!;
+  assert.equal(next.length, 1);
+  assert.deepEqual(next[0].points.slice(0, 3), mixed.points);
+  assert.deepEqual(next[0].points[3], { x: 3, y: 4, counter: 0, position: 1 });
+  assert.equal(next[0].pointType, 0);
+  assert.equal(next[0].size, 6);
+  assert.equal(next[0].color, 0x80123456);
+  assert.equal(next[0].sourceIndex, 7);
+  assert.equal(next[0].position, mixed.position);
+  assert.equal((next[0] as typeof mixed).name, "Imported group");
   const allSlices = addPoint(
     next,
     { x: 5, y: 6 },
     { ...settings, allSlices: true },
     bounds,
   )!;
-  assert.equal(allSlices.length, 3);
-  assert.strictEqual(allSlices[0], hidden);
-  assert.equal(allSlices[2].position, 0);
-  assert.equal(allSlices[2].points[0].position, 0);
+  assert.equal(allSlices.length, 1);
+  assert.equal(allSlices[0].points[4].position, 0);
+});
+
+test("all-slice additions preserve an existing fixed-slice ROI and use a new compatible scope", () => {
+  const fixed = { ...mixed, position: 1, slice: 1 };
+  const next = addPoint(
+    [fixed],
+    { x: 5, y: 6 },
+    { ...settings, allSlices: true },
+    bounds,
+  )!;
+  assert.equal(next.length, 2);
+  assert.strictEqual(next[0], fixed);
+  assert.equal(next[1].position, 0);
+  assert.equal(next[1].slice, 0);
+  assert.equal(next[1].points[0].position, 0);
+  assert.equal(next[1].pointType, fixed.pointType);
+  assert.equal(next[1].size, fixed.size);
+  assert.equal(next[1].sourceIndex, fixed.sourceIndex);
+});
+
+test("hidden active ROIs stay untouched and new points get a fresh first-page ROI", () => {
+  const hidden = { ...mixed, position: 4, channel: 2, slice: 4, frame: 3 };
+  assert.strictEqual(updatePointRois([hidden], "size", "Small")[0], hidden);
+  assert.strictEqual(selectCounter([hidden], 9)[0], hidden);
+  const next = addPoint([mixed, hidden], { x: 3, y: 4 }, settings, bounds)!;
+  assert.strictEqual(next[0], mixed);
+  assert.strictEqual(next[1], hidden);
+  assert.equal(next.length, 3);
+  assert.equal(next[2].position, 1);
+  assert.equal(next[2].channel, 0);
+  assert.equal(next[2].slice, 0);
+  assert.equal(next[2].frame, 0);
+  assert.equal(next[2].sourceIndex, undefined);
+  assert.deepEqual(next[2].raw, []);
+});
+
+test("default counter0 labels use point indices within each ROI and hide single-point labels", () => {
+  const first = addPoint(
+    [],
+    { x: 1, y: 2 },
+    { ...settings, counter: 0 },
+    bounds,
+  )!;
+  assert.deepEqual(pointAppearance(first[0], 0), {
+    color: "#6c3e89",
+    label: null,
+  });
+  const second = addPoint(
+    first,
+    { x: 3, y: 4 },
+    { ...settings, counter: 0 },
+    bounds,
+  )!;
+  assert.deepEqual(pointAppearance(second[0], 0), {
+    color: "#6c3e89",
+    label: "1",
+  });
+  assert.equal(pointAppearance(second[0], 1).label, "2");
+  assert.equal(
+    pointAppearance({ ...second[0], showLabels: false }, 1).label,
+    null,
+  );
+});
+
+test("selecting a higher counter latches category colors and labels when returning to 0", () => {
+  const first = addPoint(
+    [],
+    { x: 1, y: 2 },
+    { ...settings, counter: 0 },
+    bounds,
+  )!;
+  const second = addPoint(
+    first,
+    { x: 3, y: 4 },
+    { ...settings, counter: 0 },
+    bounds,
+  )!;
+  const selected = selectCounter(second, 1);
+  assert.equal(selected[0].nCounters, 2);
+  assert.deepEqual(pointAppearance(selected[0], 0), {
+    color: "#ffff00",
+    label: "0",
+  });
+  assert.strictEqual(selectCounter(selected, 0), selected);
+  const mixed = addPoint(
+    selected,
+    { x: 5, y: 6 },
+    { ...settings, counter: 1 },
+    bounds,
+  )!;
+  assert.deepEqual(pointAppearance(mixed[0], 2), {
+    color: "#ff00ff",
+    label: "1",
+  });
+  assert.equal(
+    pointAppearance(
+      addPoint(mixed, { x: 7, y: 8 }, { ...settings, counter: 0 }, bounds)![0],
+      3,
+    ).label,
+    "0",
+  );
+});
+
+test("a nonzero category alone still uses ImageJ category labels and exact palette", () => {
+  const points = Array.from({ length: 10 }, (_, counter) => ({
+    x: counter,
+    y: 0,
+    counter,
+    position: 0,
+  }));
+  const roi = { ...mixed, points, showLabels: true };
+  assert.deepEqual(
+    points.map((_, index) => pointAppearance(roi, index)),
+    [
+      { color: "#ffff00", label: "0" },
+      { color: "#ff00ff", label: "1" },
+      { color: "#00ffff", label: "2" },
+      { color: "#ffc800", label: "3" },
+      { color: "#00ff00", label: "4" },
+      { color: "#0000ff", label: "5" },
+      { color: "#ffffff", label: "6" },
+      { color: "#404040", label: "7" },
+      { color: "#ffafaf", label: "8" },
+      { color: "#c0c0c0", label: "9" },
+    ],
+  );
+  const onlyOne = { ...roi, points: [points[1], { ...points[1], x: 2 }] };
+  assert.deepEqual(pointAppearance(onlyOne, 0), {
+    color: "#ff00ff",
+    label: "1",
+  });
+  assert.deepEqual(pointAppearance(onlyOne, 1), {
+    color: "#ff00ff",
+    label: "1",
+  });
+});
+
+test("imported categories above 9 keep a stable randomly assigned ImageJ-style category color", () => {
+  const roi = {
+    ...mixed,
+    points: [
+      { ...mixed.points[0], counter: 11 },
+      { ...mixed.points[1], counter: 11 },
+    ],
+    showLabels: true,
+  };
+  const first = pointAppearance(roi, 0);
+  assert.match(first.color, /^#[0-9a-f]{6}$/);
+  assert.equal(first.label, "11");
+  assert.deepEqual(pointAppearance(roi, 1), first);
+});
+
+test("overlay-only imports keep their styles and get a separate active selection", () => {
+  const overlay = { ...mixed, overlay: true };
+  const rois = [overlay];
+  assert.strictEqual(updatePointRois(rois, "size", "Small"), rois);
+  assert.strictEqual(selectCounter(rois, 9), rois);
+  assert.equal(counterCount(rois, 2), 0);
+  assert.deepEqual(settingsForRois(rois, 2), settings);
+  const next = addPoint(rois, { x: 1, y: 2 }, settings, bounds)!;
+  assert.equal(next.length, 2);
+  assert.strictEqual(next[0], overlay);
+  assert.ok(!next[1].overlay);
+  assert.equal(next[1].pointType, 1);
+  assert.equal(counterCount(next, 2), 1);
+});
+
+test("ImageJ mixed-position sentinel displays and preserves per-point stack positions", () => {
+  const roi = { ...mixed, position: 0xfffffffe };
+  const next = addPoint([roi], { x: 1, y: 2 }, settings, bounds)!;
+  assert.equal(next.length, 1);
+  assert.equal(next[0].position, roi.position);
+  assert.deepEqual(next[0].points.slice(0, 3), mixed.points);
+  assert.equal(next[0].points[3].position, 1);
+  assert.equal(updatePointRois(next, "size", "Small")[0].size, 1);
 });
 
 test("outside clicks and invalid counters cannot add points", () => {
