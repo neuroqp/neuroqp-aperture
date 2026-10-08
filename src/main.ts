@@ -25,7 +25,7 @@ const icons: Record<string, string> = {
   point: '<path d="M10 2v16M2 10h16"/><circle cx="10" cy="10" r="3"/>',
   wand: '<path d="m3 17 10-10M11 9l2 2M13 2v2M18 7h-2M17 3l-2 2M8 3l2 2"/>',
   text: '<path d="M3 5V3h14v2M10 3v14M7 17h6"/>',
-  hand: '<path d="M5 10V6a1.5 1.5 0 0 1 3 0V3a1.5 1.5 0 0 1 3 0v3a1.5 1.5 0 0 1 3 0v1a1.5 1.5 0 0 1 3 0v5c0 4-2 6-5 6H9c-2 0-3-1-4-3l-3-4a1.5 1.5 0 0 1 2-2Z"/>',
+  hand: '<path d="M5 10V5.5a1.25 1.25 0 0 1 2.5 0V9 3.5a1.25 1.25 0 0 1 2.5 0V9 4.5a1.25 1.25 0 0 1 2.5 0V9 6.5a1.25 1.25 0 0 1 2.5 0V12c0 4-2 6-5 6H8c-2 0-3-1-4-3l-2-4a1.5 1.5 0 0 1 2-2Z"/>',
   zoomIn: '<circle cx="8" cy="8" r="5.5"/><path d="m12 12 5 5M5 8h6M8 5v6"/>',
   zoomOut: '<circle cx="8" cy="8" r="5.5"/><path d="m12 12 5 5M5 8h6"/>',
   fit: '<path d="M7 3H3v4M13 3h4v4M3 13v4h4M17 13v4h-4"/><rect x="6" y="6" width="8" height="8"/>',
