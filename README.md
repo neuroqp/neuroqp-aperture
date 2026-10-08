@@ -64,6 +64,8 @@ The ignored `test-data/` directory contains source links and a metadata
 manifest. The application itself does not use Python. See
 [the fixture notes](tests/fixtures/README.md) for coverage and
 [SPECS.md](SPECS.md) for product requirements and future scope.
+Measured native application results and limitations are recorded in
+[VALIDATION.md](VALIDATION.md).
 
 For direct application checks in an active Linux desktop session, install
 `tauri-driver` and WebKitWebDriver, start `tauri-driver`, then run:
@@ -73,9 +75,10 @@ python scripts/native-smoke.py src-tauri/target/debug/aperture \
   tests/fixtures/rgb-65x49.png test-data/real-gray16-stripped-bigtiff.tif
 ```
 
-The current native harness uses Hyprland, `ydotool`, and `grim` to operate the
-real file chooser and capture the application window. It controls the keyboard
-and focus while running. Results and screenshots stay in ignored `test-data/`.
+The current native harness uses Hyprland, `ydotool`, `wl-copy`, and `grim` to
+operate the real file chooser and capture the application window. It uses the
+keyboard, clipboard, and window focus while running. Results and screenshots
+stay in ignored `test-data/`.
 
 ## Proof-of-concept boundaries
 

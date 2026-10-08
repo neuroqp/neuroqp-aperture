@@ -24,9 +24,15 @@ def main():
     )
     parser.add_argument("--timeout", type=float, default=180)
     parser.add_argument("--expect-error", type=Path, action="append", default=[])
+    parser.add_argument(
+        "--cancel-after-preview", type=Path, action="append", default=[]
+    )
+    parser.add_argument("--window-controls", action="store_true")
+    parser.add_argument("--leave-open", action="store_true")
     args = parser.parse_args()
     args.output.parent.mkdir(parents=True, exist_ok=True)
     error_paths = {path.resolve() for path in args.expect_error}
+    cancel_paths = {path.resolve() for path in args.cancel_after_preview}
     env = {
         **os.environ,
         "YDOTOOL_SOCKET": str(Path(os.environ["XDG_RUNTIME_DIR"]) / ".ydotool_socket"),
@@ -43,7 +49,11 @@ def main():
         with urlopen(req, timeout=30) as response:
             result = json.load(response)
         value = result.get("value")
-        if isinstance(value, dict) and isinstance(value.get("error"), str):
+        if (
+            isinstance(value, dict)
+            and isinstance(value.get("error"), str)
+            and "message" in value
+        ):
             raise RuntimeError(value)
         return value
 
@@ -61,16 +71,31 @@ def main():
         },
     )
     sid = session["sessionId"]
+    args.output.with_suffix(".session.json").write_text(
+        json.dumps({"session_id": sid}) + "\n"
+    )
     route = f"/session/{sid}"
 
     def js(script):
         return request("POST", route + "/execute/sync", {"script": script, "args": []})
 
+    def click(element_id):
+        return js(
+            f"document.getElementById({json.dumps(element_id)}).click(); return true;"
+        )
+
+    def backend_state():
+        return request(
+            "POST",
+            route + "/execute/async",
+            {
+                "script": "const done = arguments[arguments.length - 1]; window.__TAURI_INTERNALS__.invoke('image_state').then(done);",
+                "args": [],
+            },
+        )
+
     def state():
         return js("""
-          const canvas = document.querySelector('#viewer canvas');
-          let pixel = null;
-          try { if(canvas) pixel = Array.from(canvas.getContext('2d')?.getImageData(canvas.width/2, canvas.height/2, 1, 1).data || []); } catch(e) {}
           return {
             filename: document.querySelector('#filename')?.textContent,
             status: document.querySelector('#status')?.textContent,
@@ -79,8 +104,7 @@ def main():
             error: document.querySelector('#status')?.classList.contains('error'),
             fitDisabled: document.querySelector('#fit-button')?.disabled,
             cancelHidden: document.querySelector('#cancel-button')?.hidden,
-            saveDisabled: document.querySelector('#save-button')?.disabled,
-            pixel
+            saveDisabled: document.querySelector('#save-button')?.disabled
           };
         """)
 
@@ -90,7 +114,7 @@ def main():
         )
 
     def open_native(path):
-        js("document.querySelector('#open-button').click(); return true;")
+        click("open-button")
         dialog_by = time.monotonic() + 10
         while True:
             active = json.loads(
@@ -106,7 +130,11 @@ def main():
             time.sleep(0.15)
         keys("29:1", "38:1", "38:0", "29:0")  # Ctrl+L focuses GTK's location entry.
         time.sleep(0.5)
-        previous_clipboard = subprocess.run(["wl-paste", "--no-newline"], stdout=subprocess.PIPE, stderr=subprocess.DEVNULL)
+        previous_clipboard = subprocess.run(
+            ["wl-paste", "--no-newline"],
+            stdout=subprocess.PIPE,
+            stderr=subprocess.DEVNULL,
+        )
         subprocess.run(["wl-copy"], input=str(path.absolute()).encode(), check=True)
         keys("29:1", "30:1", "30:0", "29:0")  # Select the location field's contents.
         keys("29:1", "47:1", "47:0", "29:0")  # Paste the exact Unicode path.
@@ -115,8 +143,36 @@ def main():
         keys("28:1", "28:0")
         time.sleep(0.5)
         active = json.loads(subprocess.check_output(["hyprctl", "-j", "activewindow"]))
-        if active.get("class", "").lower() == "aperture" and active.get("title") == "Open File":
+        if (
+            active.get("class", "").lower() == "aperture"
+            and active.get("title") == "Open File"
+        ):
             keys("28:1", "28:0")
+        time.sleep(0.3)
+        dialogs = [
+            w
+            for w in json.loads(subprocess.check_output(["hyprctl", "-j", "clients"]))
+            if w.get("class") == "aperture" and w.get("title") == "Open File"
+        ]
+        if dialogs:
+            # Open button center observed in this machine's GTK chooser screenshots.
+            dialog = dialogs[0]
+            x, y = dialog["at"][0] + dialog["size"][0] - 47, dialog["at"][1] + 23
+            subprocess.run(
+                [
+                    "hyprctl",
+                    "eval",
+                    f"hl.dispatch(hl.dsp.cursor.move({{x = {x}, y = {y}}}))",
+                ],
+                check=True,
+                stdout=subprocess.DEVNULL,
+            )
+            subprocess.run(
+                ["ydotool", "click", "0xC0"],
+                env=env,
+                check=True,
+                stdout=subprocess.DEVNULL,
+            )
         if previous_clipboard.returncode == 0:
             subprocess.run(["wl-copy"], input=previous_clipboard.stdout, check=True)
         return selected_at
@@ -157,22 +213,89 @@ def main():
 
         for image in args.images:
             expect_error = image.resolve() in error_paths
+            expect_cancel = image.resolve() in cancel_paths
             expected_names = {image.name, image.resolve().name}
             source_stat = image.stat()
             picker_start = time.monotonic()
             start = open_native(image)
-            first_pixels = None
+            preview_ready = None
+            preview_screenshot_seconds = None
+            cancel_requested = False
+            pan_zoom_seconds = None
             peak_rss = tree_rss_mb()
             last = {}
             while time.monotonic() - start < args.timeout:
                 last = state()
-                peak_rss = max(peak_rss, tree_rss_mb())
+                backend = backend_state()
+                if backend and backend.get("previewReady"):
+                    preview_ready = preview_ready or time.monotonic() - start
                 if (
-                    any(name in (last.get("filename") or "") for name in expected_names)
-                    and last.get("pixel", [0, 0, 0, 0])
-                    and last["pixel"][3] > 0
+                    expect_cancel
+                    and not cancel_requested
+                    and last.get("phase") == "loading"
+                    and not last.get("fitDisabled")
                 ):
-                    first_pixels = first_pixels or time.monotonic() - start
+                    action_started = time.monotonic()
+                    windows = json.loads(
+                        subprocess.check_output(["hyprctl", "-j", "clients"])
+                    )
+                    window = next(
+                        w
+                        for w in windows
+                        if w.get("class") == "aperture" and w.get("title") == "Aperture"
+                    )
+                    click("zoom-in-button")
+                    point = js(
+                        "const r=document.querySelector('#viewer').getBoundingClientRect(); return {x:Math.round(r.x+r.width/2), y:Math.round(r.y+r.height/2)};"
+                    )
+                    request(
+                        "POST",
+                        route + "/actions",
+                        {
+                            "actions": [
+                                {
+                                    "type": "pointer",
+                                    "id": "mouse",
+                                    "parameters": {"pointerType": "mouse"},
+                                    "actions": [
+                                        {
+                                            "type": "pointerMove",
+                                            "duration": 0,
+                                            "origin": "viewport",
+                                            "x": point["x"],
+                                            "y": point["y"],
+                                        },
+                                        {"type": "pointerDown", "button": 0},
+                                        {
+                                            "type": "pointerMove",
+                                            "duration": 250,
+                                            "origin": "viewport",
+                                            "x": point["x"] + 70,
+                                            "y": point["y"] + 35,
+                                        },
+                                        {"type": "pointerUp", "button": 0},
+                                    ],
+                                }
+                            ]
+                        },
+                    )
+                    pan_zoom_seconds = time.monotonic() - action_started
+                    time.sleep(0.3)
+                    x, y = window["at"]
+                    width, height = window["size"]
+                    subprocess.run(
+                        [
+                            "grim",
+                            "-g",
+                            f"{x},{y} {width}x{height}",
+                            str(args.output.parent / "cancel-loading-zoom.native.png"),
+                        ],
+                        check=True,
+                    )
+                    preview_screenshot_seconds = time.monotonic() - start
+                    click("cancel-button")
+                    cancel_requested = True
+                peak_rss = max(peak_rss, tree_rss_mb())
                 if any(
                     name in (last.get("filename") or "") for name in expected_names
                 ) and (
@@ -185,13 +308,25 @@ def main():
             elapsed = time.monotonic() - start
             record = {
                 "image": str(image),
-                "expected": "error" if expect_error else "ready",
+                "expected": (
+                    "cancelled"
+                    if expect_cancel
+                    else "error" if expect_error else "ready"
+                ),
+                "backend_preview_ready_seconds": (
+                    None if preview_ready is None else round(preview_ready, 3)
+                ),
+                "preview_loading_screenshot_seconds": (
+                    None
+                    if preview_screenshot_seconds is None
+                    else round(preview_screenshot_seconds, 3)
+                ),
                 "picker_seconds": round(start - picker_start, 3),
+                "pan_zoom_action_seconds": (
+                    None if pan_zoom_seconds is None else round(pan_zoom_seconds, 3)
+                ),
                 "elapsed_seconds": round(elapsed, 3),
                 "sampled_process_tree_peak_rss_mb": round(peak_rss, 1),
-                "first_pixels_seconds": (
-                    None if first_pixels is None else round(first_pixels, 3)
-                ),
                 "state": last,
             }
             after_stat = image.stat()
@@ -200,9 +335,9 @@ def main():
                 source_stat.st_mtime_ns,
             ) == (after_stat.st_size, after_stat.st_mtime_ns)
             if not last.get("fitDisabled"):
-                js("document.querySelector('#zoom-in-button').click(); return true;")
+                click("zoom-in-button")
                 time.sleep(0.25)
-                js("document.querySelector('#fit-button').click(); return true;")
+                click("fit-button")
                 time.sleep(0.3)
             windows = json.loads(subprocess.check_output(["hyprctl", "-j", "clients"]))
             window = next(
@@ -237,12 +372,31 @@ def main():
                 )
                 + "\n"
             )
-            print(json.dumps(record), flush=True)
+            print(
+                json.dumps(
+                    {
+                        key: record[key]
+                        for key in [
+                            "image",
+                            "expected",
+                            "elapsed_seconds",
+                            "backend_preview_ready_seconds",
+                            "sampled_process_tree_peak_rss_mb",
+                            "source_unchanged",
+                        ]
+                    }
+                ),
+                flush=True,
+            )
             assert any(
                 name in (last.get("filename") or "") for name in expected_names
             ), f"Image was not selected: {last}"
             assert last.get("cancelHidden"), f"Load timed out: {last}"
-            if expect_error:
+            if expect_cancel:
+                assert (
+                    cancel_requested and last.get("phase") == "cancelled"
+                ), f"Expected cancellation: {last}"
+            elif expect_error:
                 assert last.get("phase") == "error" or last.get(
                     "error"
                 ), f"Expected an error: {last}"
@@ -250,9 +404,19 @@ def main():
                 assert last.get("phase") == "ready" and not last.get(
                     "error"
                 ), f"Image load failed: {last}"
-            assert expect_error or not any(
-                word in (last.get("status") or "").lower()
-                for word in ["error", "failed", "unsupported", "unable", "cancelled"]
+            assert (
+                expect_error
+                or expect_cancel
+                or not any(
+                    word in (last.get("status") or "").lower()
+                    for word in [
+                        "error",
+                        "failed",
+                        "unsupported",
+                        "unable",
+                        "cancelled",
+                    ]
+                )
             ), f"Image load failed: {last}"
             assert last[
                 "saveDisabled"
@@ -260,8 +424,105 @@ def main():
             assert record[
                 "source_unchanged"
             ], "Source size or modification timestamp changed"
+        if args.window_controls:
+            subprocess.run(
+                [
+                    "hyprctl",
+                    "eval",
+                    'local w = hl.get_windows({class = "aperture"})[1]; hl.dispatch(hl.dsp.window.float({action = "set", window = w})); hl.dispatch(hl.dsp.focus({window = w}))',
+                ],
+                check=True,
+                stdout=subprocess.DEVNULL,
+            )
+            time.sleep(0.7)
+            controls = {}
+
+            def control_state():
+                return {
+                    "title": js(
+                        "return document.querySelector('#maximize-button').title;"
+                    ),
+                    "maximized": request(
+                        "POST",
+                        route + "/execute/async",
+                        {
+                            "script": "const done=arguments[arguments.length-1]; window.__TAURI_INTERNALS__.invoke('plugin:window|is_maximized',{label:'main'}).then(done);",
+                            "args": [],
+                        },
+                    ),
+                    "window": next(
+                        w
+                        for w in json.loads(
+                            subprocess.check_output(["hyprctl", "-j", "clients"])
+                        )
+                        if w.get("class") == "aperture" and w.get("title") == "Aperture"
+                    ),
+                }
+
+            controls["before"] = control_state()
+            click("maximize-button")
+            time.sleep(0.5)
+            controls["maximized"] = control_state()
+            click("maximize-button")
+            time.sleep(0.5)
+            controls["restored"] = control_state()
+            controls["maximize_result"] = (
+                "changed"
+                if controls["before"]["window"]["size"]
+                != controls["maximized"]["window"]["size"]
+                else "ignored_by_compositor"
+            )
+            args.output.with_suffix(".controls.json").write_text(
+                json.dumps(controls, indent=2) + "\n"
+            )
+            subprocess.run(
+                [
+                    "hyprctl",
+                    "eval",
+                    'local w = hl.get_windows({class = "aperture"})[1]; hl.dispatch(hl.dsp.window.float({action = "set", window = w})); hl.dispatch(hl.dsp.window.resize({x = 640, y = 400, relative = false, window = w})); hl.dispatch(hl.dsp.focus({window = w}))',
+                ],
+                check=True,
+                stdout=subprocess.DEVNULL,
+            )
+            time.sleep(0.5)
+            window = next(
+                w
+                for w in json.loads(
+                    subprocess.check_output(["hyprctl", "-j", "clients"])
+                )
+                if w.get("class") == "aperture" and w.get("title") == "Aperture"
+            )
+            controls["minimum_requested"] = [640, 400]
+            controls["minimum_actual"] = window["size"]
+            args.output.with_suffix(".controls.json").write_text(
+                json.dumps(controls, indent=2) + "\n"
+            )
+            assert js("return document.body.scrollWidth <= window.innerWidth;")
+            x, y = window["at"]
+            subprocess.run(
+                [
+                    "grim",
+                    "-g",
+                    f"{x},{y} {window['size'][0]}x{window['size'][1]}",
+                    str(args.output.parent / "minimum-window.native.png"),
+                ],
+                check=True,
+            )
+            click("close-button")
+            time.sleep(0.7)
+            assert not any(
+                w.get("class") == "aperture"
+                for w in json.loads(
+                    subprocess.check_output(["hyprctl", "-j", "clients"])
+                )
+            )
+            print(
+                "Native Close passed; compositor maximize/resize results recorded separately.",
+                flush=True,
+            )
     finally:
-        request("DELETE", route)
+        if not args.leave_open:
+            request("DELETE", route)
 
 
 if __name__ == "__main__":
