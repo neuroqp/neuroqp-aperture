@@ -373,3 +373,42 @@ allowing E placement without an extra click; keyboard and typing focus remain
 intact. Save-dialog Escape and Tab/Space cancellation retain dirty edits.
 Imported TIFF marker and label attributes retain half alpha and zero alpha,
 including the black label halo.
+
+## Color connections (October 9, 2026)
+
+The Color implementation passes 46 frontend tests and 32 Rust tests, a production
+frontend build, an embedded Tauri debug build, Prettier, rustfmt, and strict
+Clippy. Pixel tests cover additive many-to-many routes, independent transfer
+settings, custom RGB coefficients, identity/reset behavior, and immutable input
+planes. Backend tests decode five-band and five-channel ImageJ TIFF fixtures,
+check distinct 16-to-8-bit PNG samples, warm-cache reuse, bounded asset paths,
+unsupported layouts, and unchanged source bytes.
+
+Native WebKitWebDriver checks used the embedded Linux app, not a browser preview.
+Generated grayscale16, RGB, five-channel ImageJ and five-band TIFFs displayed
+successfully. Actual canvas pixel reads verified rerouting, multiple inputs to
+one output, channel-5 isolation, empty connections producing black, custom hex
+colors, rapid slider changes, exact reset at an unchanged viewport, and recoloring
+retained after zoom/pan/Fit. Source-file SHA-256 hashes and existing PNG/JPEG cache
+contents stayed unchanged across color edits. Annotation SVG content stayed
+unchanged when the image colors changed. Light/dark panels and the compact picker
+were inspected in native screenshots. A native wire-drag followed by click
+activation exposed stale click suppression; the fix passed the same sequence.
+
+Cancellation during metadata loading recovered to a valid image. A five-channel
+2048-by-2048 image was recolored while detail was loading, then replaced by RGB;
+late requests did not corrupt the new image or report stale errors. These
+focused checks invoked the normal native loading command and restored frontend
+state. A separate final-build smoke check opened the five-channel ImageJ TIFF
+through the real GTK file chooser, displayed it, and passed Zoom/Fit and source
+integrity checks (`test-data/color-native-chooser.json`).
+Local JSON and screenshot evidence stays ignored under `test-data/color-*`.
+
+Coverage is limited to the supported TIFF layouts and these generated fixtures.
+OME mapping, planar-separate multiband TIFFs, scientific alpha layouts, and
+single-directory contiguous ImageJ hyperstacks report explicit errors. Color
+uses 8-bit display samples; original 16-bit pixels remain intact. Compositing is
+on the UI thread with frame-coalesced updates and OSD visible-tile invalidation;
+32-channel, large-preview smoothness and large multichannel datasets have not
+been validated. Display range still samples the original preview histogram
+(first channel for scientific channel TIFFs), not the recolored composite.

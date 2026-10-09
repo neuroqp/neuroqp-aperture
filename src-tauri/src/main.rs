@@ -1,6 +1,7 @@
 #![cfg_attr(not(debug_assertions), windows_subsystem = "windows")]
 mod annotation_io;
 mod backend;
+mod channels;
 mod native;
 mod roi;
 mod tiff_annotations;
@@ -150,7 +151,21 @@ fn main() {
                 return;
             };
             let state = job.state.lock().unwrap().clone();
-            let Some(asset) = backend::asset(&path, &state.id, state.width, state.height) else {
+            let asset = backend::asset(&path, &state.id, state.width, state.height).or_else(|| {
+                state
+                    .channel_mode
+                    .then(|| {
+                        backend::channel_asset(
+                            &path,
+                            &state.id,
+                            state.width,
+                            state.height,
+                            state.channels.len(),
+                        )
+                    })
+                    .flatten()
+            });
+            let Some(asset) = asset else {
                 responder.respond(response(404, b"Invalid image asset.".to_vec()));
                 return;
             };
@@ -162,7 +177,10 @@ fn main() {
             let slots = backend.tile_slots.clone();
             tauri::async_runtime::spawn(async move {
                 // Preview delivery must not queue behind unfinished pyramid tiles.
-                let permit = if matches!(&asset, backend::Asset::Preview) {
+                let permit = if matches!(
+                    &asset,
+                    backend::Asset::Preview | backend::Asset::ChannelPreview { .. }
+                ) {
                     None
                 } else {
                     Some(slots.acquire_owned().await)
@@ -201,7 +219,9 @@ fn response(status: u16, bytes: Vec<u8>) -> tauri::http::Response<Vec<u8>> {
         .status(status)
         .header(
             "Content-Type",
-            if status == 200 {
+            if status == 200 && bytes.starts_with(b"\x89PNG\r\n\x1a\n") {
+                "image/png"
+            } else if status == 200 {
                 "image/jpeg"
             } else {
                 "text/plain; charset=utf-8"

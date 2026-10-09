@@ -1,4 +1,5 @@
 import { icon } from "./icons";
+import { colorPanelMarkup } from "./color-panel";
 import type { AnnotationSettings } from "./annotations";
 import {
   defaultPointSettings,
@@ -29,6 +30,7 @@ const closeButton = `<button class="tool panel-close" type="button" aria-label="
 
 export const toolPanels = `
   <aside id="tool-panels" aria-label="Tool options" hidden>
+    ${colorPanelMarkup}
     <section id="brightness-panel" class="tool-panel" aria-labelledby="brightness-title" hidden>
       <header class="panel-heading"><h2 id="brightness-title">Display range</h2>${closeButton}</header>
       <div class="histogram-container">
@@ -102,6 +104,7 @@ export const toolPanels = `
 export function bindTools(
   onDisplayChange: (settings: DisplaySettings) => void,
   onPointsChange: (key?: keyof AnnotationSettings) => void = () => {},
+  color?: { visibility: (open: boolean) => void; handleEscape: () => boolean },
 ) {
   const container = document.querySelector<HTMLElement>("#tool-panels")!;
   const counter = document.getElementById("point-counter") as HTMLButtonElement;
@@ -248,7 +251,7 @@ export function bindTools(
     for (const help of helps)
       if (!help.wrapper.contains(target)) help.show(false);
   });
-  const names = ["brightness", "points"] as const;
+  const names = ["brightness", "color", "points"] as const;
   type PanelName = (typeof names)[number];
   const openPanels = new Set<PanelName>();
   const setOpen = (name: PanelName, open: boolean) => {
@@ -259,6 +262,7 @@ export function bindTools(
     button.setAttribute("aria-pressed", String(open));
     button.setAttribute("aria-expanded", String(open));
     document.getElementById(`${name}-panel`)!.hidden = !open;
+    if (name === "color") color?.visibility(open);
     if (name === "points" && !open) {
       closeCounter();
       hideHelp();
@@ -266,6 +270,7 @@ export function bindTools(
     if (name === "points") onPointsChange();
   };
   const close = () => {
+    if (color?.handleEscape()) return true;
     if (!counterOptions.hidden) {
       closeCounter(true);
       return true;

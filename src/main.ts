@@ -19,6 +19,8 @@ import { icon, type IconName } from "./icons";
 import { bindTools, toolPanels } from "./tools";
 import { bindTheme } from "./theme";
 import { applyDisplay, loadHistogram } from "./display";
+import { bindColorPanel } from "./color-panel";
+import { bindColorRenderer } from "./color-renderer";
 import {
   ImageLoader,
   orientation,
@@ -52,6 +54,7 @@ document.querySelector<HTMLDivElement>("#app")!.innerHTML = `
   <nav class="quick-bar" aria-label="Image tools">
     <div class="tool-group" role="group" aria-label="Image adjustments and annotation tools">
       ${tool("brightness-button", "brightness", "Display range", true)}
+      ${tool("color-button", "color", "Color", true)}
       ${tool("points-button", "points", "Multi-point", true)}
     </div>
     <div class="load-status">
@@ -87,7 +90,13 @@ document.querySelector<HTMLDivElement>("#app")!.innerHTML = `
 
 const $ = <T extends HTMLElement = HTMLElement>(id: string) =>
   document.getElementById(id)! as T;
-const tools = bindTools(applyDisplay, updatePointTool);
+const tools = bindTools(applyDisplay, updatePointTool, {
+  visibility: (open) => {
+    if (open) colorPanel.redraw();
+    else colorPanel.closeTransient();
+  },
+  handleEscape: () => colorPanel.handleEscape(),
+});
 bindTheme();
 const native = isTauri();
 const windowHandle = native ? getCurrentWindow() : null;
@@ -97,6 +106,7 @@ const viewer = OpenSeadragon({
   showSequenceControl: false,
   showNavigator: false,
   drawer: "canvas",
+  crossOriginPolicy: "Anonymous",
   imageSmoothingEnabled: false,
   imageLoaderLimit: 4,
   maxImageCacheCount: 128,
@@ -109,6 +119,18 @@ const viewer = OpenSeadragon({
   pixelsPerArrowPress: 300,
   gestureSettingsMouse: { clickToZoom: false, dblClickToZoom: true },
 });
+
+let colorRenderer: ReturnType<typeof bindColorRenderer> | undefined;
+const colorPanel = bindColorPanel(() => colorRenderer?.refresh());
+colorRenderer = bindColorRenderer(
+  viewer,
+  () => colorPanel.settings(),
+  (message) => {
+    tileError = message;
+    if (currentImage) showImage(currentImage);
+  },
+);
+let colorImageId: string | null = null;
 
 let currentImage: ImageState | null = null;
 let rois: PointRoi[] = [];
@@ -316,6 +338,9 @@ function resetViewer() {
   pyramidAdded = false;
   tileError = null;
   viewer.close();
+  colorImageId = null;
+  colorPanel.setChannels([]);
+  colorPanel.setEnabled(false);
   tools.resetImage();
   document
     .querySelectorAll<HTMLButtonElement>("[data-image-control]")
@@ -355,6 +380,15 @@ function showImage(state: ImageState) {
     );
   }
   currentImage = state;
+  if (state.channels?.length && colorImageId !== state.id) {
+    colorImageId = state.id;
+    colorPanel.setChannels(
+      state.channels.map((channel, index) => ({
+        id: String(index),
+        ...channel,
+      })),
+    );
+  }
   if (state.width > 0) annotationViewer.setImage(state);
   $("filename").textContent = state.name;
   $("filename").classList.toggle("unsaved", dirty);
@@ -409,7 +443,12 @@ function showImage(state: ImageState) {
       },
     );
     viewer.addTiledImage({
-      tileSource: preview(state, tileUrl),
+      tileSource: colorRenderer!.wrapSource(
+        preview(state, tileUrl),
+        state,
+        true,
+        tileUrl(state.id),
+      ),
       ...transform,
       width: 1,
       index: 0,
@@ -422,6 +461,7 @@ function showImage(state: ImageState) {
         }
         viewer.viewport.goHome(true);
         tools.setImageReady(true);
+        colorPanel.setEnabled(Boolean(state.channels?.length));
         document
           .querySelectorAll<HTMLButtonElement>("[data-image-control]")
           .forEach((button) => (button.disabled = false));
@@ -442,7 +482,12 @@ function addPyramid(state: ImageState) {
   if (pyramidAdded || state.width <= 0 || state.height <= 0) return;
   pyramidAdded = true;
   viewer.addTiledImage({
-    tileSource: pyramid(state, tileUrl),
+    tileSource: colorRenderer!.wrapSource(
+      pyramid(state, tileUrl),
+      state,
+      false,
+      tileUrl(state.id),
+    ),
     ...orientation(state.orientation),
     width: 1,
     index: 1,
@@ -641,5 +686,6 @@ if (windowHandle) {
 window.addEventListener("beforeunload", () => {
   loader.dispose();
   annotationViewer.dispose();
+  colorRenderer?.dispose();
   viewer.destroy();
 });

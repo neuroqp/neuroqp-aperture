@@ -21,7 +21,7 @@
       }
     ],
     "security": {
-      "csp": "default-src 'self'; img-src 'self' aperture: http://aperture.localhost blob: data:; connect-src 'self' ipc: http://ipc.localhost; style-src 'self' 'unsafe-inline'"
+      "csp": "default-src 'self'; img-src 'self' aperture: http://aperture.localhost blob: data:; connect-src 'self' ipc: http://ipc.localhost aperture: http://aperture.localhost; style-src 'self' 'unsafe-inline'"
     }
   },
   "bundle": { "active": false, "icon": ["icons/icon.png"] }
