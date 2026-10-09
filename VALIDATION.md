@@ -886,3 +886,39 @@ dedicated cache/D-Bus session. The relevant native behavior is documented in
 [libtiff strip reads](https://libtiff.gitlab.io/libtiff/functions/TIFFReadEncodedStrip.html),
 [libtiff open options](https://libtiff.gitlab.io/libtiff/functions/TIFFOpen.html) and
 [libvips dzsave](https://github.com/libvips/libvips/blob/v8.18.6/libvips/foreign/dzsave.c).
+
+## Filename loading progress
+
+The filename now carries a quiet background fill and a percentage while loading.
+Backend notifications advance in five-percentage-point steps, at most twenty
+progress advances per load. Preview work occupies the first 20%, pyramid work
+occupies the next 79%, and completion is reserved for ready assets. These are
+approximate work weights, not elapsed-time estimates. Unknown metadata progress
+uses a static tint; completion, cancellation and errors clear the display.
+
+Raw TIFF progress counts completed rows across parallel partitions. Libvips
+progress uses public GLib evaluation hooks scoped to each synchronous sink,
+without accessing private Rust binding fields or enabling CLI stdout output.
+Worker reports use coarse buckets and a 250 ms throttle. Existing image events
+carry the fractions, including aggregate channel progress; no new polling or
+dependencies were added. Existing early cache/preview notification order remains.
+
+Validation passed with 52 Rust tests using the production worker, 62 frontend
+tests, frontend/native builds, formatting and strict Clippy. Tests cover streaming
+progress followed by terminal responses, invalid fractions, cancellation/reaping,
+raw pixel parity, actual native evaluation callbacks, and monotonic multichannel
+progress. Independent read-only review found no actionable defects.
+
+Native WebKit validation exercised the 1.58 GB Deflate TIFF through preview and
+pyramid generation. The observed work percentages advanced from 0 through 95%,
+then ready cleared the fill. Cancellation, opening another image, worker reaping,
+error recovery, cached pyramid zoom/fit and five-channel Color passed. Light/dark
+screenshots and raw results remain ignored in `artifacts/loading-progress/`.
+
+A three-trial fresh-display-cache comparison using the existing native harness
+reported median first draws of 2.005 s before and 1.767 s with progress. Source
+pages were not explicitly evicted. Trial variation and sequential ordering make
+this a regression screen, not evidence that progress itself speeds loading.
+The screenshot-instrumented full-load trial took 20.562 s and emitted fifteen
+known loading percentages, followed by ready. No physical display-presentation
+claim is made. Source files were opened read-only and left unchanged.

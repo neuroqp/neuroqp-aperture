@@ -132,13 +132,34 @@ svg {
   min-width: 0;
   height: 100%;
 }
-#filename {
+.filename-progress {
+  position: relative;
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  min-width: 0;
+  height: 26px;
+  padding: 0 6px;
+  margin-right: 12px;
+  border-radius: 3px;
+  overflow: hidden;
+}
+#filename,
+#loading-percent {
+  position: relative;
   font-size: 12px;
+}
+#filename {
+  min-width: 0;
   letter-spacing: 0.01em;
   white-space: nowrap;
   text-overflow: ellipsis;
   overflow: hidden;
-  padding-right: 12px;
+}
+#loading-percent {
+  flex-shrink: 0;
+  color: var(--muted);
+  font-variant-numeric: tabular-nums;
 }
 .file-actions {
   display: flex;
@@ -234,32 +255,19 @@ svg {
 }
 #progress {
   position: absolute;
-  bottom: -1px;
-  left: 0;
-  right: 0;
-  height: 2px;
-  overflow: hidden;
-  background: var(--soft);
-  z-index: 1;
+  inset: 0;
+  pointer-events: none;
 }
 #progress span {
   display: block;
   width: 100%;
   height: 100%;
   background: var(--accent);
+  opacity: 0.15;
   transform-origin: left;
 }
-#progress.indeterminate span {
-  width: 24%;
-  animation: progress 1.7s ease-in-out infinite;
-}
-@keyframes progress {
-  from {
-    transform: translateX(-100%);
-  }
-  to {
-    transform: translateX(520%);
-  }
+#progress.indeterminate {
+  background: var(--soft);
 }
 #viewer {
   position: relative;
@@ -303,14 +311,6 @@ svg {
     width: 32px;
   }
 }
-@media (prefers-reduced-motion: reduce) {
-  #progress.indeterminate span {
-    animation: none;
-    width: 100%;
-    opacity: 0.55;
-  }
-}
-
 /* Tool palettes sit over the image without changing its pan/zoom geometry. */
 .viewer-workspace {
   position: relative;

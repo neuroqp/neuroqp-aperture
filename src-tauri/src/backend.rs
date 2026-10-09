@@ -304,6 +304,23 @@ impl Job {
         };
         self.notify(&snapshot);
     }
+    fn report_progress(&self, fraction: f64) {
+        let snapshot = {
+            let mut state = self.state.lock().unwrap();
+            // Coarse overall progress keeps long multichannel conversions quiet.
+            let fraction = (fraction * 20.0).floor() / 20.0;
+            if self.cancel.load(Ordering::Relaxed)
+                || state.phase != "loading"
+                || state.progress.is_some_and(|previous| fraction <= previous)
+            {
+                return;
+            }
+            state.progress = Some(fraction);
+            state.revision += 1;
+            state.clone()
+        };
+        self.notify(&snapshot);
+    }
     fn notify(&self, state: &ImageState) {
         if let Some(notifier) = &self.notifier {
             notifier(state);
@@ -711,9 +728,10 @@ fn load(job: &Arc<Job>) -> Result<(), String> {
                     },
                 ),
             },
+            Some((0.0, 0.2)),
         )? == "used";
     if !raw_preview {
-        run(
+        run_with_progress(
             job,
             "vips",
             &[
@@ -725,12 +743,14 @@ fn load(job: &Arc<Job>) -> Result<(), String> {
                 )),
                 preview_scale.to_string().into(),
             ],
+            Some((0.0, 0.2)),
         )?;
     }
     fs::rename(preview_partial, dir.join("preview.jpg")).map_err(|e| e.to_string())?;
     job.update(|s| {
         s.preview_ready = true;
         s.tiles_ready = false;
+        s.progress = Some(0.2);
         s.detail = "Preview available. Sharper tiles are loading…".into();
     });
     *job.native.lock().unwrap() = native::discover(&header, &inspect, tiffinfo.as_deref());
@@ -748,7 +768,7 @@ fn load(job: &Arc<Job>) -> Result<(), String> {
         } else {
             "--suffix=.jpg[Q=85,strip,background=52 54 51]"
         };
-        run(
+        run_with_progress(
             job,
             "vips",
             &[
@@ -761,6 +781,7 @@ fn load(job: &Arc<Job>) -> Result<(), String> {
                 "--background=52 54 51".into(),
                 "--depth=onepixel".into(),
             ],
+            Some((0.2, 0.99)),
         )?;
     }
     if job.cancel.load(Ordering::Relaxed) {
@@ -918,6 +939,7 @@ fn load_channels(job: &Arc<Job>, width: u32, height: u32, ushort: bool) -> Resul
                     .ok_or("Image decoder path is not UTF-8")?
                     .into(),
             },
+            Some((0.0, 0.2)),
         )?;
     } else {
         for (index, plane) in planes.iter().enumerate() {
@@ -971,6 +993,7 @@ fn load_channels(job: &Arc<Job>, width: u32, height: u32, ushort: bool) -> Resul
     job.update(|state| {
         state.preview_ready = true;
         state.tiles_ready = !native;
+        state.progress = Some(0.2);
         state.detail = format!(
             "{} channel previews available. First Z/T plane; sharper tiles are loading…",
             planes.len()
@@ -979,6 +1002,8 @@ fn load_channels(job: &Arc<Job>, width: u32, height: u32, ushort: bool) -> Resul
     housekeeping(job)?;
     if !native {
         for (index, plane) in planes.iter().enumerate() {
+            let start = 0.2 + 0.79 * index as f64 / planes.len() as f64;
+            let end = 0.2 + 0.79 * (index + 1) as f64 / planes.len() as f64;
             let source = input(job, &format!("[page={},n=1,access=sequential]", plane.page));
             let destination = dir.join("channels").join(index.to_string()).join("tiles");
             if uses_worker(job) {
@@ -990,6 +1015,7 @@ fn load_channels(job: &Arc<Job>, width: u32, height: u32, ushort: bool) -> Resul
                         band: plane.band,
                         ushort,
                     },
+                    Some((start, end)),
                 )?;
             } else {
                 let normalized = job.work.join(format!("channel-{index}.v"));
@@ -1010,9 +1036,7 @@ fn load_channels(job: &Arc<Job>, width: u32, height: u32, ushort: bool) -> Resul
                 let _ = fs::remove_file(normalized);
                 result?;
             }
-            job.update(|state| {
-                state.progress = Some((index + 1) as f64 / planes.len() as f64);
-            });
+            job.report_progress(end);
         }
     }
     write_manifest(job, &dir)?;
@@ -1252,6 +1276,15 @@ fn budget_exceeded(job: &Job, finished: bool) -> bool {
 // Each decode lives in a killable process. libvips' operation cache is bounded;
 // codec memory is not a hard RSS limit and should be measured on representative files.
 pub(crate) fn run(job: &Job, program: &str, args: &[OsString]) -> Result<String, String> {
+    run_with_progress(job, program, args, None)
+}
+
+fn run_with_progress(
+    job: &Job,
+    program: &str,
+    args: &[OsString],
+    progress: Option<(f64, f64)>,
+) -> Result<String, String> {
     if job.cancel.load(Ordering::Relaxed) {
         return Err("Loading cancelled.".into());
     }
@@ -1270,6 +1303,7 @@ pub(crate) fn run(job: &Job, program: &str, args: &[OsString]) -> Result<String,
                 program: program.into(),
                 args,
             },
+            progress,
         );
     }
     let dir = job.work.clone();
@@ -1353,7 +1387,11 @@ fn uses_worker(job: &Job) -> bool {
     )
 }
 
-fn worker_call(job: &Job, request: &crate::vips_worker::Request) -> Result<String, String> {
+fn worker_call(
+    job: &Job,
+    request: &crate::vips_worker::Request,
+    progress: Option<(f64, f64)>,
+) -> Result<String, String> {
     let decoder = {
         let mut slot = job.decoder.lock().unwrap();
         if job.cancel.load(Ordering::Relaxed) {
@@ -1364,7 +1402,17 @@ fn worker_call(job: &Job, request: &crate::vips_worker::Request) -> Result<Strin
         }
         slot.as_ref().unwrap().clone()
     };
-    let output = decoder.call(request, &job.cancel, || budget_exceeded(job, false))?;
+    let output = decoder.call(
+        request,
+        &job.cancel,
+        || budget_exceeded(job, false),
+        |fraction| {
+            if let Some((start, end)) = progress {
+                // Rough work percentage: preview 20%, pyramid 79%, final writes 1%.
+                job.report_progress(start + (end - start) * fraction);
+            }
+        },
+    )?;
     if budget_exceeded(job, true) {
         return Err("Display cache limit reached.".into());
     }
@@ -1845,7 +1893,10 @@ mod tests {
             NEXT_ID.fetch_add(1, Ordering::Relaxed)
         ));
         fs::create_dir_all(&root).unwrap();
-        let backend = Backend::new(root.join("cache")).unwrap();
+        let mut backend = Backend::new(root.join("cache")).unwrap();
+        let events = Arc::new(Mutex::new(Vec::<ImageState>::new()));
+        let recorded = events.clone();
+        backend.set_notifier(move |state| recorded.lock().unwrap().push(state.clone()));
         for (name, bands, pages, description) in [
             ("bands.tif", 5, 1, ""),
             (
@@ -1872,6 +1923,53 @@ mod tests {
                 thread::sleep(Duration::from_millis(20));
             }
             let job = backend.current.lock().unwrap().clone().unwrap();
+            let id = job.state.lock().unwrap().id.clone();
+            while !events
+                .lock()
+                .unwrap()
+                .iter()
+                .any(|state| state.id == id && state.phase == "ready")
+            {
+                assert!(Instant::now() < deadline);
+                thread::sleep(Duration::from_millis(2));
+            }
+            let loading: Vec<_> = events
+                .lock()
+                .unwrap()
+                .iter()
+                .filter(|state| state.id == id && state.phase == "loading")
+                .cloned()
+                .collect();
+            let fractions: Vec<_> = loading.iter().filter_map(|state| state.progress).collect();
+            assert!(
+                loading.first().unwrap().progress.is_none(),
+                "metadata is indeterminate"
+            );
+            assert!(
+                fractions.windows(2).all(|pair| pair[0] <= pair[1]),
+                "progress regressed: {fractions:?}"
+            );
+            assert!(
+                fractions.iter().all(|fraction| *fraction < 1.0),
+                "100% is reserved for ready"
+            );
+            assert!(fractions.contains(&0.2), "preview completes the first 20%");
+            assert!(
+                fractions.contains(&0.35),
+                "first of five pyramids advances overall work to 35%"
+            );
+            assert!(
+                fractions.contains(&0.95),
+                "final pyramid leaves final writes pending"
+            );
+            let before = events.lock().unwrap().len();
+            job.report_progress(0.2);
+            job.report_progress(0.99);
+            assert_eq!(
+                events.lock().unwrap().len(),
+                before,
+                "ready ignores ancillary progress"
+            );
             for channel in 0..5 {
                 for asset in [
                     Asset::ChannelPreview { channel },

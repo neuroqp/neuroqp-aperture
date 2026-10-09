@@ -210,6 +210,11 @@ on Open or Close. Cancellation or save failure must retain unsaved edits.
   preview as usable image regions or resolution levels become available.
 - Show loading/conversion progress. Allow cancellation or opening another image
   without waiting for the previous load to complete.
+- Show a quiet percentage fill behind the filename, advancing in coarse steps.
+  TIFF progress uses processed preview rows and libvips evaluation work, with
+  approximate weights for preview and pyramid conversion. Do not show time
+  estimates. Reserve completion for ready assets; clear the fill on completion,
+  cancellation, or failure.
 - For huge images, read and display the regions and resolution needed for the
   current view. Keep memory and GPU usage bounded rather than proportional to
   the full decoded image size.

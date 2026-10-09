@@ -345,10 +345,20 @@ pub fn preview(path: &Path, max_edge: u32) -> io::Result<Option<Preview>> {
     )
 }
 
+#[cfg(test)]
 pub fn preview_with_threads(
     path: &Path,
     max_edge: u32,
     threads: usize,
+) -> io::Result<Option<Preview>> {
+    preview_with_progress(path, max_edge, threads, &|_| {})
+}
+
+pub fn preview_with_progress(
+    path: &Path,
+    max_edge: u32,
+    threads: usize,
+    progress: &(dyn Fn(f64) + Sync),
 ) -> io::Result<Option<Preview>> {
     let file = File::open(path)?;
     let Some(layout) = parse(&file)? else {
@@ -365,6 +375,23 @@ pub fn preview_with_threads(
     let threads = threads
         .clamp(1, if layout.compressed { 16 } else { 8 })
         .min(height);
+    // Partitions can share a boundary source row. Count the rows actually
+    // processed by every partition, rather than guessing from file offsets.
+    let total_rows = (0..threads)
+        .map(|index| {
+            let begin = (height * index / threads) as f64 * sy;
+            let end = (height * (index + 1) / threads) as f64 * sy;
+            (end.ceil() as usize).min(layout.height) - begin.floor() as usize
+        })
+        .sum::<usize>();
+    let completed = std::sync::Mutex::new(0_usize);
+    let report_rows = |rows: usize| {
+        if let Ok(mut completed) = completed.lock() {
+            *completed += rows;
+            progress(*completed as f64 / total_rows as f64);
+        }
+    };
+    progress(0.0);
     let sums = std::thread::scope(|scope| {
         let mut workers = Vec::new();
         for index in 0..threads {
@@ -372,9 +399,18 @@ pub fn preview_with_threads(
             let end_y = height * (index + 1) / threads;
             let layout = &layout;
             let file = &file;
+            let report_rows = &report_rows;
             workers.push(scope.spawn(move || {
                 let decoder = layout.compressed.then(|| Tiff::open(path)).transpose()?;
-                reduce_rows(file, layout, width, sx, sy, (begin_y, end_y), decoder)
+                reduce_rows(
+                    file,
+                    layout,
+                    width,
+                    (sx, sy),
+                    (begin_y, end_y),
+                    decoder,
+                    report_rows,
+                )
             }));
         }
         workers
@@ -406,10 +442,10 @@ fn reduce_rows(
     file: &File,
     layout: &Layout,
     width: usize,
-    sx: f64,
-    sy: f64,
+    (sx, sy): (f64, f64),
     (begin_y, end_y): (usize, usize),
     mut decoder: Option<Tiff>,
+    report_rows: &(dyn Fn(usize) + Sync),
 ) -> io::Result<Vec<f64>> {
     let mut result = vec![0.0_f64; width * (end_y - begin_y) * layout.bands];
     let mut prefix = vec![0_u64; (layout.width + 1) * layout.bands];
@@ -522,6 +558,7 @@ fn reduce_rows(
                     }
                 }
             }
+            report_rows(n);
         }
     }
     Ok(result)
@@ -706,6 +743,35 @@ mod tests {
                     }
                 }
             }
+        }
+    }
+
+    #[test]
+    fn raw_progress_counts_completed_parallel_work() {
+        for compression in [1, 8] {
+            let values = (0..19 * 23).map(|n| (n % 256) as u16).collect::<Vec<_>>();
+            let f = if compression == 1 {
+                fixture(false, true, 19, 23, 8, &values, None)
+            } else {
+                compressed_fixture((false, true, 1, 8, false, compression), 19, 23, 3, &values)
+            };
+            let updates = std::sync::Mutex::new(Vec::new());
+            let actual = preview_with_progress(&f.0, 7, 4, &|fraction| {
+                updates.lock().unwrap().push(fraction)
+            })
+            .unwrap()
+            .unwrap();
+            assert_eq!(
+                actual.pixels,
+                preview_with_threads(&f.0, 7, 4).unwrap().unwrap().pixels
+            );
+            let updates = updates.into_inner().unwrap();
+            assert_eq!(updates.first(), Some(&0.0));
+            assert_eq!(updates.last(), Some(&1.0));
+            assert!(updates
+                .iter()
+                .any(|fraction| *fraction > 0.0 && *fraction < 1.0));
+            assert!(updates.windows(2).all(|pair| pair[0] < pair[1]));
         }
     }
 
