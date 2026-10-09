@@ -19,6 +19,10 @@ import { icon, type IconName } from "./icons";
 import { bindTools, toolPanels } from "./tools";
 import { bindTheme } from "./theme";
 import { applyDisplay, loadHistogram } from "./display";
+import { channelHistograms } from "./display-settings";
+import { bindColorPanel } from "./color-panel";
+import { bindColorRenderer } from "./color-renderer";
+import { createGpuColorDrawer } from "./gpu-color-drawer";
 import {
   ImageLoader,
   orientation,
@@ -52,6 +56,7 @@ document.querySelector<HTMLDivElement>("#app")!.innerHTML = `
   <nav class="quick-bar" aria-label="Image tools">
     <div class="tool-group" role="group" aria-label="Image adjustments and annotation tools">
       ${tool("brightness-button", "brightness", "Display range", true)}
+      ${tool("color-button", "color", "Color", true)}
       ${tool("points-button", "points", "Multi-point", true)}
     </div>
     <div class="load-status">
@@ -87,16 +92,38 @@ document.querySelector<HTMLDivElement>("#app")!.innerHTML = `
 
 const $ = <T extends HTMLElement = HTMLElement>(id: string) =>
   document.getElementById(id)! as T;
-const tools = bindTools(applyDisplay, updatePointTool);
+const tools = bindTools(applyDisplay, updatePointTool, {
+  visibility: (open) => {
+    if (open) colorPanel.redraw();
+    else colorPanel.closeTransient();
+  },
+  handleEscape: () => colorPanel.handleEscape(),
+});
 bindTheme();
 const native = isTauri();
 const windowHandle = native ? getCurrentWindow() : null;
+let colorRenderer: ReturnType<typeof bindColorRenderer> | undefined;
+const colorPanel = bindColorPanel(() => colorRenderer?.refresh());
+const colorError = (message: string) => {
+  tileError = message;
+  if (currentImage) showImage(currentImage);
+};
+const GpuColorDrawer = createGpuColorDrawer(
+  OpenSeadragon,
+  () => colorPanel.settings(),
+  (message) => queueMicrotask(() => colorError(message)),
+);
 const viewer = OpenSeadragon({
   element: $("viewer"),
   showNavigationControl: false,
   showSequenceControl: false,
   showNavigator: false,
-  drawer: "canvas",
+  // A diagnostic switch keeps the previous renderer available for native A/B checks.
+  drawer:
+    new URLSearchParams(location.search).get("colorRenderer") === "cpu"
+      ? "canvas"
+      : [GpuColorDrawer, "canvas"],
+  crossOriginPolicy: "Anonymous",
   imageSmoothingEnabled: false,
   imageLoaderLimit: 4,
   maxImageCacheCount: 128,
@@ -109,6 +136,22 @@ const viewer = OpenSeadragon({
   pixelsPerArrowPress: 300,
   gestureSettingsMouse: { clickToZoom: false, dblClickToZoom: true },
 });
+if (new URLSearchParams(location.search).has("colorBenchmark")) {
+  Object.assign(window, { __apertureViewer: viewer });
+}
+
+colorRenderer = bindColorRenderer(
+  viewer,
+  () => colorPanel.settings(),
+  colorError,
+  (imageId, data) => {
+    if (currentId === imageId)
+      colorPanel.setHistograms(
+        channelHistograms(data.planes, data.width, data.height),
+      );
+  },
+);
+let colorImageId: string | null = null;
 
 let currentImage: ImageState | null = null;
 let rois: PointRoi[] = [];
@@ -316,6 +359,9 @@ function resetViewer() {
   pyramidAdded = false;
   tileError = null;
   viewer.close();
+  colorImageId = null;
+  colorPanel.setChannels([]);
+  colorPanel.setEnabled(false);
   tools.resetImage();
   document
     .querySelectorAll<HTMLButtonElement>("[data-image-control]")
@@ -355,6 +401,15 @@ function showImage(state: ImageState) {
     );
   }
   currentImage = state;
+  if (state.channels?.length && colorImageId !== state.id) {
+    colorImageId = state.id;
+    colorPanel.setChannels(
+      state.channels.map((channel, index) => ({
+        id: String(index),
+        ...channel,
+      })),
+    );
+  }
   if (state.width > 0) annotationViewer.setImage(state);
   $("filename").textContent = state.name;
   $("filename").classList.toggle("unsaved", dirty);
@@ -400,16 +455,26 @@ function showImage(state: ImageState) {
 
   if (state.previewReady && !previewAdded) {
     previewAdded = true;
-    void loadHistogram(`${tileUrl(state.id)}/preview.jpg`).then(
+    void loadHistogram(
+      `${tileUrl(state.id)}/preview.jpg`,
+      state.channelMode ? 0 : (state.channels?.length ?? 0),
+    ).then(
       (bins) => {
-        if (currentId === state.id) tools.setHistogram(bins);
+        if (currentId !== state.id) return;
+        tools.setHistogram(bins.display);
+        if (!state.channelMode) colorPanel.setHistograms(bins.channels);
       },
       () => {
         if (currentId === state.id) tools.setHistogram(null);
       },
     );
     viewer.addTiledImage({
-      tileSource: preview(state, tileUrl),
+      tileSource: colorRenderer!.wrapSource(
+        preview(state, tileUrl),
+        state,
+        true,
+        tileUrl(state.id),
+      ),
       ...transform,
       width: 1,
       index: 0,
@@ -422,6 +487,7 @@ function showImage(state: ImageState) {
         }
         viewer.viewport.goHome(true);
         tools.setImageReady(true);
+        colorPanel.setEnabled(Boolean(state.channels?.length));
         document
           .querySelectorAll<HTMLButtonElement>("[data-image-control]")
           .forEach((button) => (button.disabled = false));
@@ -442,7 +508,12 @@ function addPyramid(state: ImageState) {
   if (pyramidAdded || state.width <= 0 || state.height <= 0) return;
   pyramidAdded = true;
   viewer.addTiledImage({
-    tileSource: pyramid(state, tileUrl),
+    tileSource: colorRenderer!.wrapSource(
+      pyramid(state, tileUrl),
+      state,
+      false,
+      tileUrl(state.id),
+    ),
     ...orientation(state.orientation),
     width: 1,
     index: 1,
@@ -641,5 +712,6 @@ if (windowHandle) {
 window.addEventListener("beforeunload", () => {
   loader.dispose();
   annotationViewer.dispose();
+  colorRenderer?.dispose();
   viewer.destroy();
 });

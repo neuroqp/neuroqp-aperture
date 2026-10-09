@@ -4,7 +4,14 @@ A minimal Linux desktop image viewer built with Tauri, Rust, and OpenSeadragon.
 Two compact toolbars leave the rest of the window to the image. Large images
 load through a preview and progressively available detail tiles.
 
-Brightness and multi-point options open independently at the viewer's top-right.
+Display range, Color, and multi-point options open independently at the viewer's top-right.
+Color connects image channels to editable output colors, with a live display
+range, source histogram, presets and Reset per connection. Drag wires to reroute or remove them; click an
+output to pick its shade. These settings affect only the display.
+WebGL2 keeps image samples on the GPU and redraws cached tiles when colors change;
+unavailable or lost GPU contexts fall back to CPU rendering. No additional Rust
+renderer or graphics dependency is required. Loading and pyramid generation are
+separate from this rendering path.
 Point type, color, and size buttons preview the current combination. The header's
 sun/moon button switches light and dark modes and remembers your choice; the
 initial theme follows the system.
@@ -128,11 +135,14 @@ No microscopy source files are modified.
   temporarily pan without leaving the tool; WASD/arrows move at 7.5 times
   the viewer's default speed. The panel header's help explains the controls.
   Saved ROIs use ImageJ's active selection and overlays.
-- Multi-page images display their first page. Specialist microscopy metadata,
-  channels, Z stacks, and timepoints are not interpreted.
+- Ordinary multipage images display their first page. Color supports up to 32
+  unsigned 8/16-bit channels in interleaved multiband TIFFs and explicit ImageJ
+  channel stacks (first Z/time position). OME-TIFF mapping and contiguous
+  single-directory ImageJ hyperstacks are not supported. Ambiguous grayscale
+  alpha layouts are rejected rather than interpreted as scientific channels.
 - Supported display pixels are unsigned 8/16-bit grayscale, RGB, and RGBA in
   grayscale/RGB/sRGB color spaces. Signed, floating-point, CMYK, and other
-  channel layouts report an unsupported-image error.
+  unsupported channel layouts report an unsupported-image error.
 - Display previews and tiles are separate from the source pixels. They are not
   scientific data exports. Transparent images are composited against the canvas;
   unsigned 16-bit values are mapped to an 8-bit display range.

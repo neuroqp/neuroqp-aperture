@@ -2,8 +2,29 @@ import assert from "node:assert/strict";
 import { test } from "node:test";
 import {
   adjustDisplay,
+  channelHistograms,
   defaultDisplaySettings as defaults,
 } from "./display-settings.ts";
+
+test("channel histograms retain independent original samples and ignore transparency", () => {
+  const planes = [
+    Uint8Array.of(10, 10, 80, 200),
+    Uint8Array.of(90, 90, 0, 250),
+  ];
+  const bins = channelHistograms(planes, 2, 2, [255, 255, 255, 0]);
+  assert.equal(bins[0][10], 2);
+  assert.equal(bins[0][80], 1);
+  assert.equal(bins[0][200], 0);
+  assert.equal(bins[1][90], 2);
+  assert.equal(bins[1][0], 1);
+  assert.deepEqual([...planes[0]], [10, 10, 80, 200]);
+  const large = channelHistograms(
+    [new Uint8Array(1024 * 1024).fill(42)],
+    1024,
+    1024,
+  );
+  assert.equal(large[0][42], 256 * 256);
+});
 
 test("display range always retains at least one intensity step", () => {
   const limited = { ...defaults, minimum: 40, maximum: 80 };

@@ -11,8 +11,8 @@ preview as soon as possible, and stays responsive while loading large images.
 - Start with standard image formats, including JPEG/JPG, PNG, BMP, and TIFF/TIF.
 - Support ordinary images and large TIFFs, including BigTIFF. Exact compression,
   pixel-type, and multi-page coverage must be documented as support is added.
-- Keep the interface and implementation small. Image editing, analysis,
-  and specialist microscopy formats are outside the current scope. Display-range adjustment is display-only. Multi-point
+- Keep the interface and implementation small. Destructive image editing, analysis,
+  and specialist microscopy formats are outside the current scope. Display range and channel coloring are display-only. Multi-point
   annotations are editable metadata, kept separate from source image pixels.
 
 ## Technology decisions
@@ -52,7 +52,7 @@ Two thin horizontal header bars sit above the image viewer.
    title bar.
 2. **Quick toolbar:** a compact row of icon buttons inspired by ImageJ. These
    use Lucide icons, with a matching custom multi-point icon. Display range and
-   multi-point toggles sit on the left; pan, zoom, and fit controls sit on the
+   Color and multi-point toggles sit on the left; pan, zoom, and fit controls sit on the
    right. Remove unused placeholder tools.
 3. **Image viewer:** fill all remaining window space. Show the image against a
    neutral background, preserve its aspect ratio, and support smooth pan and
@@ -116,6 +116,45 @@ on Open or Close. Cancellation or save failure must retain unsaved edits.
   adding with the mouse or E, dragging, deletion, and temporary panning. Marker
   appearance settings do not change image pixels.
 - Preserve option values while closing and reopening panels during the session.
+- Color: a compact connection diagram maps source channels to seven editable
+  output colors. Several inputs can feed one output, and one input can feed
+  several outputs. Click or drag from an input to an output to connect them.
+  Select a wire to adjust its display range independently, using the same
+  histogram, Minimum/Maximum, percentile presets, Linear/Log and Reset controls
+  as Display range. Its histogram samples the original input channel, before
+  tinting or mixing. Range presets and Reset affect only the selected connection.
+  Selection and keyboard focus follow the curved wire with a glow in its current
+  line color, without a
+  rectangular outline. Keep the panel compact and center the arrow between
+  source and color names in the connection header. Drag the
+  wire itself to another output to reroute it; dropping in empty space deletes
+  it. Escape cancels a drag. A trash button removes only the selected wire.
+  Disconnected output dots use their color as an outline; connected dots are
+  filled. Do not add wire handles or redundant column labels.
+  Clicking an output when no connection is pending opens a compact shade, hue,
+  and hex picker. Exact preset colors retain their names; custom colors use the
+  nearest hue family's name with an -ish suffix and a muted hex value beneath.
+  Neutral custom shades belong to Gray. The Gray preset is white so a grayscale
+  channel retains its full intensity range. A header help tooltip explains the
+  interactions. Support both app themes and keyboard access.
+- Color settings update the GPU view live, without decoding the source
+  again, rebuilding pyramids, or modifying source pixels or annotations. Each
+  connection adjusts its source intensity, tints it with its output color, and
+  contributes additively to a clamped RGB composite. Display range then adjusts
+  this composite; its approximate histogram continues to describe the original
+  display preview. Closing Color retains its settings; opening another image
+  resets them. Saving annotations never bakes Color or Display range into pixels.
+  Initially support unsigned 8/16-bit grayscale/RGB, interleaved multiband TIFF,
+  and explicit ImageJ channel pages at first Z/time, up to 32 channels. Reject
+  unsupported OME mapping and ambiguous alpha layouts with an explicit error.
+  Channel TIFF display caches retain separate lossless 8-bit planes (16-bit
+  inputs use their high byte); these are display samples, not scientific exports.
+  Use WebGL2 to retain immutable channel textures and apply a small color lookup
+  in the shader. Coalesce settings changes within an event-loop turn and redraw
+  the last displayed tile geometry immediately; OpenSeadragon still owns tile
+  selection, pan, zoom, and cache eviction. Fall back to CPU compositing if WebGL2
+  is unavailable or the context is lost. GPU optimization must not change the
+  image-loading or pyramid-generation pipeline.
 - Use the approved T1/B2/C1/D1/S1/P2/M2 styling: recessed lavender toggles, tinted
   action buttons, solid purple checkboxes, raised dropdowns, fine round-handle
   sliders, and quiet compact panels. Use purple and orange accents in light and
@@ -131,7 +170,9 @@ on Open or Close. Cancellation or save failure must retain unsaved edits.
   names/properties, and unrelated metadata when saving. Preserve the distinction
   between ImageJ's active selection and point overlays. Adding points when only
   overlays exist creates a new active selection without changing those overlays.
-- Display the first page only. Preserve annotations for other slices/channels/time
+- Display the first page for ordinary multipage TIFFs. Explicit ImageJ channel
+  stacks display their channels at the first Z/time position; do not guess
+  channel dimensions from an arbitrary page stack. Preserve annotations for other slices/channels/time
   points without displaying or reassigning them. Show on all slices sets new
   points' position to zero; it does not add stack navigation.
 - TIFF saving copies the original file and appends replacement metadata without

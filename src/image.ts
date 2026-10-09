@@ -10,6 +10,8 @@ export type ImageState = {
   error: string | null;
   detail?: string;
   orientation?: number;
+  channels?: { name: string; color: string }[];
+  channelMode?: boolean;
 };
 
 // OSD flips stored pixels horizontally before applying clockwise rotation.
@@ -30,7 +32,7 @@ export function tileFailure(
     !url.startsWith(`${currentUrl}/`)
   )
     return null;
-  return url.endsWith("/preview.jpg")
+  return /\/preview\.(jpg|png)$/.test(url)
     ? "Could not display the image preview."
     : "Detail could not load. Preview remains available.";
 }
