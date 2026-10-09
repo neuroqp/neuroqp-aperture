@@ -1,15 +1,19 @@
+import {
+  adjustDisplay,
+  defaultDisplaySettings,
+  type DisplaySettings,
+} from "./display-settings.ts";
+
 export interface ColorChannel {
   id: string;
   name: string;
   color?: string;
 }
 
-export interface ColorConnection {
+export interface ColorConnection extends DisplaySettings {
   id: number;
   source: string;
   color: string;
-  brightness: number;
-  contrast: number;
 }
 
 export interface ColorSettings {
@@ -102,8 +106,7 @@ export function defaultColorSettings(
       id: index + 1,
       source: channel.id,
       color,
-      brightness: 0,
-      contrast: 100,
+      ...defaultDisplaySettings,
     };
   });
   return { colors, connections };
@@ -146,8 +149,7 @@ export function connectColor(
             id: Math.max(0, ...settings.connections.map((item) => item.id)) + 1,
             source,
             color,
-            brightness: 0,
-            contrast: 100,
+            ...defaultDisplaySettings,
           },
         ],
   };
@@ -166,20 +168,34 @@ export function removeColorConnection(
 export function adjustColorConnection(
   settings: ColorSettings,
   id: number,
-  field: "brightness" | "contrast",
+  field: keyof DisplaySettings,
   value: number,
 ): ColorSettings {
   if (!Number.isFinite(value)) return settings;
-  const bounded = Math.round(
-    Math.max(
-      field === "brightness" ? -100 : 0,
-      Math.min(field === "brightness" ? 100 : 200, value),
+  return {
+    ...settings,
+    connections: settings.connections.map((edge) =>
+      edge.id === id ? { ...edge, ...adjustDisplay(edge, field, value) } : edge,
     ),
+  };
+}
+
+export function setColorConnectionRange(
+  settings: ColorSettings,
+  id: number,
+  range: DisplaySettings,
+): ColorSettings {
+  if (!Number.isFinite(range.minimum) || !Number.isFinite(range.maximum))
+    return settings;
+  const bounded = adjustDisplay(
+    adjustDisplay(defaultDisplaySettings, "minimum", range.minimum),
+    "maximum",
+    range.maximum,
   );
   return {
     ...settings,
     connections: settings.connections.map((edge) =>
-      edge.id === id ? { ...edge, [field]: bounded } : edge,
+      edge.id === id ? { ...edge, ...bounded } : edge,
     ),
   };
 }

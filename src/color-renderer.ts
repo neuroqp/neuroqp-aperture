@@ -1,6 +1,7 @@
 import type OpenSeadragon from "openseadragon";
 import type { ColorSettings } from "./color-settings";
 import { copyColorSettings } from "./color-settings.ts";
+import { displayValue } from "./display-settings.ts";
 import type { ImageState } from "./image";
 
 export const planeType = "aperturePlanes";
@@ -53,15 +54,7 @@ export function colorLookup(count: number, settings: ColorSettings) {
       parseInt(hex.slice(start, start + 2), 16),
     );
     for (let value = 0; value < 256; value++) {
-      const intensity = Math.max(
-        0,
-        Math.min(
-          1,
-          (value / 255 - 0.5) * (route.contrast / 100) +
-            0.5 +
-            route.brightness / 100,
-        ),
-      );
+      const intensity = displayValue(value, route);
       for (let component = 0; component < 3; component++)
         table[value * 3 + component] += intensity * color[component];
     }
@@ -98,8 +91,8 @@ function identity(settings: ColorSettings, count: number) {
       return (
         routes.length === 1 &&
         settings.colors[routes[0].color]?.toLowerCase() === color &&
-        routes[0].brightness === 0 &&
-        routes[0].contrast === 100
+        routes[0].minimum === 0 &&
+        routes[0].maximum === 255
       );
     })
   );
@@ -137,6 +130,7 @@ export function bindColorRenderer(
   viewer: OpenSeadragon.Viewer,
   getSettings: () => ColorSettings,
   onError: (message: string) => void,
+  onPreviewPlanes?: (imageId: string, planes: Planes) => void,
 ) {
   // Lazy import keeps the pixel compositor usable in Node tests without a DOM.
   const converterReady = import("openseadragon").then(({ default: osd }) => {
@@ -292,15 +286,13 @@ export function bindColorRenderer(
               )
             )
               throw new Error("Channel tile dimensions differ.");
-            job.finish(
-              {
-                width,
-                height,
-                planes: channels.map((channel) => channel.plane),
-              },
-              null,
-              planeType,
-            );
+            const data = {
+              width,
+              height,
+              planes: channels.map((channel) => channel.plane),
+            };
+            if (isPreview) onPreviewPlanes?.(image.id, data);
+            job.finish(data, null, planeType);
           })().catch((error) => {
             if (!controller.signal.aborted) {
               controller.abort();

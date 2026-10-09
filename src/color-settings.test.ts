@@ -8,10 +8,12 @@ import {
   defaultColorSettings,
   normalizeHex,
   removeColorConnection,
+  setColorConnectionRange,
   setOutputColor,
   toHex,
   toHSV,
 } from "./color-settings.ts";
+import { defaultDisplaySettings } from "./display-settings.ts";
 
 test("default connections retain RGB and grayscale identity with metadata channel IDs", () => {
   const settings = defaultColorSettings([
@@ -28,6 +30,10 @@ test("default connections retain RGB and grayscale identity with metadata channe
     ],
   );
   assert.equal(settings.colors.Gray, "#ffffff");
+  for (const connection of settings.connections) {
+    assert.equal(connection.minimum, 0);
+    assert.equal(connection.maximum, 255);
+  }
   assert.deepEqual(defaultColorSettings([]).connections, []);
   const custom = defaultColorSettings([
     { id: "x", name: "Metadata color", color: "#234567" },
@@ -42,9 +48,15 @@ test("many-to-many connections move only the output and preserve other edges", (
   ]);
   const extra = connectColor(connectColor(original, "a", "Green"), "b", "Red");
   assert.equal(extra.connections.length, 4);
-  const moved = connectColor(extra, "a", "Blue", 1);
+  assert.equal(extra.connections[2].minimum, 0);
+  assert.equal(extra.connections[2].maximum, 255);
+  const adjusted = setColorConnectionRange(extra, 1, {
+    minimum: 50,
+    maximum: 150,
+  });
+  const moved = connectColor(adjusted, "a", "Blue", 1);
   assert.deepEqual(moved.connections[0], {
-    ...extra.connections[0],
+    ...adjusted.connections[0],
     color: "Blue",
   });
   assert.deepEqual(moved.connections.slice(1), extra.connections.slice(1));
@@ -56,21 +68,89 @@ test("many-to-many connections move only the output and preserve other edges", (
 });
 
 test("connection adjustments and snapshots cannot mutate the original state", () => {
-  const original = defaultColorSettings([{ id: "a", name: "A" }]);
+  const original = connectColor(
+    defaultColorSettings([{ id: "a", name: "A" }]),
+    "a",
+    "Red",
+  );
   const changed = adjustColorConnection(
-    adjustColorConnection(original, 1, "brightness", -200),
+    adjustColorConnection(original, 1, "minimum", 40.6),
     1,
-    "contrast",
+    "maximum",
     299,
   );
-  assert.equal(changed.connections[0].brightness, -100);
-  assert.equal(changed.connections[0].contrast, 200);
-  assert.equal(adjustColorConnection(original, 1, "brightness", NaN), original);
+  assert.equal(changed.connections[0].minimum, 41);
+  assert.equal(changed.connections[0].maximum, 255);
+  assert.equal(changed.connections[1], original.connections[1]);
+  assert.equal(original.connections[0].minimum, 0);
+  assert.equal(
+    adjustColorConnection(changed, 1, "minimum", 999).connections[0].minimum,
+    254,
+  );
+  assert.equal(
+    adjustColorConnection(changed, 1, "maximum", -5).connections[0].maximum,
+    42,
+  );
+  assert.equal(
+    adjustColorConnection(changed, 1, "minimum", -5).connections[0].minimum,
+    0,
+  );
+  assert.equal(adjustColorConnection(original, 1, "minimum", NaN), original);
+  assert.equal(
+    adjustColorConnection(original, 1, "maximum", Infinity),
+    original,
+  );
   const copy = copyColorSettings(original);
   copy.connections[0].source = "other";
   copy.colors.Gray = "#000000";
   assert.equal(original.connections[0].source, "a");
   assert.equal(original.colors.Gray, "#ffffff");
+});
+
+test("presets and reset replace only the selected connection's range", () => {
+  const original = connectColor(
+    defaultColorSettings([{ id: "a", name: "A" }]),
+    "a",
+    "Red",
+  );
+  const first = setColorConnectionRange(original, 1, {
+    minimum: 200,
+    maximum: 210,
+  });
+  const preset = setColorConnectionRange(first, 1, {
+    minimum: 20,
+    maximum: 80,
+  });
+  assert.deepEqual(preset.connections[0], {
+    ...original.connections[0],
+    minimum: 20,
+    maximum: 80,
+  });
+  assert.equal(preset.connections[1], original.connections[1]);
+  assert.deepEqual(
+    setColorConnectionRange(preset, 1, defaultDisplaySettings),
+    original,
+  );
+  assert.equal(first.connections[0].minimum, 200);
+  for (const range of [
+    { minimum: 255, maximum: 255 },
+    { minimum: -5, maximum: -1 },
+    { minimum: 90, maximum: 10 },
+    { minimum: 30.4, maximum: 30.4 },
+  ]) {
+    const connection = setColorConnectionRange(original, 1, range)
+      .connections[0];
+    assert.ok(connection.minimum >= 0 && connection.maximum <= 255);
+    assert.ok(connection.maximum >= connection.minimum + 1);
+  }
+  assert.equal(
+    setColorConnectionRange(original, 1, { minimum: NaN, maximum: 80 }),
+    original,
+  );
+  assert.equal(
+    setColorConnectionRange(original, 1, { minimum: 0, maximum: Infinity }),
+    original,
+  );
 });
 
 test("picker accepts hex, names by hue, and round trips colors", () => {

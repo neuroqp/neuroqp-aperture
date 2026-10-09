@@ -15,8 +15,8 @@ const route = (
   id: 1,
   source,
   color,
-  brightness: 0,
-  contrast: 100,
+  minimum: 0,
+  maximum: 255,
   ...adjustment,
 });
 const settings = (...connections: ColorConnection[]): ColorSettings => ({
@@ -77,19 +77,19 @@ test("many-to-many routes include channels beyond RGB and clamp after additive c
   assert.deepEqual([...composeColorPixels(planes, settings())], [0, 0, 0, 255]);
 });
 
-test("route brightness and contrast are independent and clip before color mixing", () => {
+test("route display ranges are independent and clip before color mixing", () => {
   const plane = new Uint8Array([0, 64, 128, 192, 255]);
   const display = settings(
-    route("0", "Red", { brightness: 100 }),
-    route("0", "Green", { contrast: 0 }),
-    route("0", "Blue", { contrast: 200, brightness: -25 }),
+    route("0", "Red", { minimum: 64, maximum: 192 }),
+    route("0", "Green", { minimum: 0, maximum: 128 }),
+    route("0", "Blue", { minimum: 128, maximum: 255 }),
   );
   const pixels = composeColorPixels([plane], display);
   assert.deepEqual(
     [...pixels],
     [
-      255, 128, 0, 255, 255, 128, 0, 255, 255, 128, 65, 255, 255, 128, 193, 255,
-      255, 128, 255, 255,
+      0, 0, 0, 255, 0, 128, 0, 255, 128, 255, 0, 255, 255, 255, 129, 255, 255,
+      255, 255, 255,
     ],
   );
   display.colors.Red = "#102030";
@@ -111,6 +111,37 @@ test("route brightness and contrast are independent and clip before color mixing
     ],
     [16, 32, 48, 255],
   );
+});
+
+test("clipping precedes tinting and additive mixing, and reset restores identity", async () => {
+  const { defaultDisplaySettings } = await import("./display-settings.ts");
+  const { setColorConnectionRange } = await import("./color-settings.ts");
+  const display: ColorSettings = {
+    colors: { tint: "#102030" },
+    connections: [route("0", "tint", { minimum: 50, maximum: 150 })],
+  };
+  const plane = new Uint8Array([0, 50, 100, 150, 255]);
+  assert.deepEqual(
+    [...composeColorPixels([plane], display)],
+    [
+      0, 0, 0, 255, 0, 0, 0, 255, 8, 16, 24, 255, 16, 32, 48, 255, 16, 32, 48,
+      255,
+    ],
+  );
+  const overlapping = settings(
+    route("0", "Red", { minimum: 50, maximum: 150 }),
+    route("0", "Yellow", { minimum: 0, maximum: 200 }),
+  );
+  assert.deepEqual(
+    [...composeColorPixels([new Uint8Array([255])], overlapping)],
+    [255, 255, 0, 255],
+  );
+  const reset = setColorConnectionRange(display, 1, defaultDisplaySettings);
+  assert.deepEqual(
+    [...composeColorPixels([new Uint8Array([255])], reset)],
+    [16, 32, 48, 255],
+  );
+  assert.equal(display.connections[0].minimum, 50);
 });
 
 test("mismatched channel dimensions fail instead of silently misaligning channels", () => {

@@ -5,8 +5,8 @@ Two compact toolbars leave the rest of the window to the image. Large images
 load through a preview and progressively available detail tiles.
 
 Display range, Color, and multi-point options open independently at the viewer's top-right.
-Color connects image channels to editable output colors, with live brightness
-and contrast per connection. Drag wires to reroute or remove them; click an
+Color connects image channels to editable output colors, with a live display
+range, source histogram, presets and Reset per connection. Drag wires to reroute or remove them; click an
 output to pick its shade. These settings affect only the display.
 WebGL2 keeps image samples on the GPU and redraws cached tiles when colors change;
 unavailable or lost GPU contexts fall back to CPU rendering. No additional Rust

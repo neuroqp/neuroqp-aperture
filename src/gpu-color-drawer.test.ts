@@ -12,24 +12,27 @@ import {
 const route = (
   source: string,
   color: string,
-  brightness = 0,
-  contrast = 100,
-): ColorConnection => ({ id: 1, source, color, brightness, contrast });
+  minimum = 0,
+  maximum = 255,
+): ColorConnection => ({ id: 1, source, color, minimum, maximum });
 
 test("GPU lookup keeps clipped route sums above one until final composition", () => {
   const settings: ColorSettings = {
     colors: { ...colorPresets },
     connections: [
-      route("0", "Red", 100),
-      route("0", "Yellow", 100),
-      route("31", "Blue", -25, 200),
+      route("0", "Red", 50, 150),
+      route("0", "Yellow", 0, 200),
+      route("31", "Blue", 128, 255),
     ],
   };
   const lookup = gpuColorLookup(settings);
   assert.equal(lookup.length, 256 * 32 * 4);
-  assert.equal(lookup[0], 2);
-  assert.equal(lookup[1], 1);
-  assert.equal(lookup[2], 0);
+  assert.equal(lookup[255 * 4], 2);
+  assert.equal(lookup[255 * 4 + 1], 1);
+  assert.equal(lookup[255 * 4 + 2], 0);
+  assert.equal(lookup[0], 0);
+  assert.equal(lookup[100 * 4], 1);
+  assert.equal(lookup[100 * 4 + 1], 0.5);
   assert.equal(lookup[(31 * 256 + 255) * 4 + 2], 1);
   assert.equal(lookup[31 * 256 * 4 + 2], 0);
 });
@@ -41,14 +44,14 @@ test("GPU float lookup agrees with CPU for all intensities and 32-channel routes
       route(
         String(channel),
         ["Red", "Green", "Blue", "custom"][channel % 4],
-        ((channel * 5) % 201) - 100,
-        (channel * 17) % 201,
+        (channel * 5) % 128,
+        128 + ((channel * 17) % 128),
       ),
     ),
   };
   settings.connections.push(
     route("4", "custom", 35, 190),
-    route("4", "Blue", -55, 10),
+    route("4", "Blue", 110, 111),
   );
   const planes = Array.from({ length: 32 }, (_, channel) =>
     Uint8Array.from(
@@ -282,12 +285,12 @@ test("cached recoloring coalesces edits and renders the newest state without til
   const { drawer, canvas, calls, settings } = replayHarness();
   settings({
     colors: { ...colorPresets },
-    connections: [route("0", "Gray", 40)],
+    connections: [route("0", "Gray", 40, 200)],
   });
   drawer.refreshColors();
   settings({
     colors: { ...colorPresets },
-    connections: [route("0", "Gray", -70)],
+    connections: [route("0", "Gray", 150, 200)],
   });
   drawer.refreshColors();
   assert.equal(calls.draws, 0);

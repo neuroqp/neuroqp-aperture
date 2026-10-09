@@ -19,6 +19,7 @@ import { icon, type IconName } from "./icons";
 import { bindTools, toolPanels } from "./tools";
 import { bindTheme } from "./theme";
 import { applyDisplay, loadHistogram } from "./display";
+import { channelHistograms } from "./display-settings";
 import { bindColorPanel } from "./color-panel";
 import { bindColorRenderer } from "./color-renderer";
 import { createGpuColorDrawer } from "./gpu-color-drawer";
@@ -143,6 +144,12 @@ colorRenderer = bindColorRenderer(
   viewer,
   () => colorPanel.settings(),
   colorError,
+  (imageId, data) => {
+    if (currentId === imageId)
+      colorPanel.setHistograms(
+        channelHistograms(data.planes, data.width, data.height),
+      );
+  },
 );
 let colorImageId: string | null = null;
 
@@ -448,9 +455,14 @@ function showImage(state: ImageState) {
 
   if (state.previewReady && !previewAdded) {
     previewAdded = true;
-    void loadHistogram(`${tileUrl(state.id)}/preview.jpg`).then(
+    void loadHistogram(
+      `${tileUrl(state.id)}/preview.jpg`,
+      state.channelMode ? 0 : (state.channels?.length ?? 0),
+    ).then(
       (bins) => {
-        if (currentId === state.id) tools.setHistogram(bins);
+        if (currentId !== state.id) return;
+        tools.setHistogram(bins.display);
+        if (!state.channelMode) colorPanel.setHistograms(bins.channels);
       },
       () => {
         if (currentId === state.id) tools.setHistogram(null);

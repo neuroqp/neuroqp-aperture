@@ -7,11 +7,18 @@ import {
   defaultColorSettings,
   removeColorConnection,
   setOutputColor,
+  setColorConnectionRange,
   toHex,
   toHSV,
   type ColorChannel,
   type ColorSettings,
 } from "./color-settings";
+import {
+  defaultDisplaySettings,
+  displayValue,
+  percentileRange,
+  type DisplaySettings,
+} from "./display-settings";
 import "./color-panel.css";
 
 const trash = icon("trash");
@@ -24,7 +31,7 @@ export const colorPanelMarkup = `
           <strong>Color connections</strong><ul>
             <li>Drag a channel to a color, or click them in order. Channels and colors can have several connections.</li>
             <li>Click a color to change its shade or hex value.</li>
-            <li>Click a wire to adjust its brightness and contrast. These adjustments change the display only.</li>
+            <li>Click a wire to adjust its display range using the source channel histogram. These adjustments change the display only.</li>
             <li>Drag a wire to another color to move it. Drop in empty space to remove it. Escape cancels.</li>
             <li>The trash button removes the selected wire.</li>
             <li>With a wire focused, Enter selects, R starts moving, and Delete removes. Then choose a color with Tab and Enter.</li>
@@ -80,6 +87,8 @@ export function bindColorPanel(onChange: (settings: ColorSettings) => void) {
     settings = defaultColorSettings([]),
     enabled = false,
     selected: number | null = null;
+  let histograms: readonly (Uint32Array | null)[] = [],
+    logarithmic = false;
   let editing: string | null = null,
     hsv = { h: 0, s: 1, v: 1 },
     helpPinned = false,
@@ -132,10 +141,68 @@ export function bindColorPanel(onChange: (settings: ColorSettings) => void) {
           to = outputButton(edge.color)?.querySelector(".color-dot");
         if (!from || !to) return "";
         const d = curve(point(from), point(to));
-        return `<path class="color-wire ${edge.id === selected ? "selected" : ""}" d="${d}" stroke="${portColor(settings.colors[edge.color])}"/><path class="color-wire-hit" data-edge="${edge.id}" d="${d}" tabindex="${enabled ? 0 : -1}" role="button" aria-pressed="${edge.id === selected}" aria-label="${escape(label(edge))} connection"/>`;
+        return `<g class="color-connection ${edge.id === selected ? "selected" : ""}" style="--wire-color:${portColor(settings.colors[edge.color])}"><path class="color-wire" d="${d}" stroke="${portColor(settings.colors[edge.color])}"/><path class="color-wire-hit" data-edge="${edge.id}" d="${d}" tabindex="${enabled ? 0 : -1}" role="button" aria-pressed="${edge.id === selected}" aria-label="${escape(label(edge))} connection"/></g>`;
       })
       .join("");
     if (focus) focusEdge(Number(focus));
+  }
+  const selectedHistogram = () => {
+    const edge = edgeById(selected);
+    return edge
+      ? (histograms[
+          channels.findIndex((channel) => channel.id === edge.source)
+        ] ?? null)
+      : null;
+  };
+  function refreshInspectorRange() {
+    const edge = edgeById(selected);
+    if (!edge) return;
+    for (const field of ["minimum", "maximum"] as const) {
+      const input = get<HTMLInputElement>(`range-${field}`);
+      if (!input) continue;
+      input.value = String(edge[field]);
+      input.style.setProperty(
+        "--fill",
+        `${((edge[field] - Number(input.min)) / (Number(input.max) - Number(input.min))) * 100}%`,
+      );
+      get(`value-${field}`).textContent = String(edge[field]);
+      const cutoff = document.getElementById(`color-cutoff-${field}`)!;
+      cutoff.setAttribute("x1", String(edge[field]));
+      cutoff.setAttribute("x2", String(edge[field]));
+    }
+    document
+      .getElementById("color-range-line")!
+      .setAttribute(
+        "d",
+        Array.from(
+          { length: 256 },
+          (_, x) =>
+            `${x === 0 ? "M" : "L"}${x} ${64 * (1 - displayValue(x, edge))}`,
+        ).join(""),
+      );
+  }
+  function refreshInspectorHistogram() {
+    if (!edgeById(selected)) return;
+    const bins = selectedHistogram(),
+      peak = bins ? Math.max(...bins) : 0;
+    document
+      .getElementById("color-histogram-bars")!
+      .setAttribute(
+        "d",
+        bins && peak > 0
+          ? `M0 64${Array.from(bins, (count, x) => `L${x} ${64 - 62 * (logarithmic ? Math.log1p(count) / Math.log1p(peak) : count / peak)}`).join("")}L255 64Z`
+          : "",
+      );
+    get("inspector")
+      .querySelectorAll<HTMLButtonElement>("[data-color-percentile]")
+      .forEach((button) => (button.disabled = !enabled || !peak));
+    get("histogram-description").textContent = bins
+      ? `Approximate original source channel histogram from an 8-bit preview sample; ${logarithmic ? "logarithmic" : "linear"} counts`
+      : "Source channel histogram unavailable";
+    const scale = get<HTMLButtonElement>("histogram-scale");
+    scale.textContent = logarithmic ? "Log" : "Linear";
+    scale.setAttribute("aria-pressed", String(logarithmic));
+    scale.title = `Switch to ${logarithmic ? "linear" : "logarithmic"} scale`;
   }
   function renderInspector() {
     const edge = edgeById(selected),
@@ -145,10 +212,32 @@ export function bindColorPanel(onChange: (settings: ColorSettings) => void) {
       inspector.innerHTML = "";
       return;
     }
-    inspector.innerHTML = `<div class="color-inspector-heading"><span class="color-swatch" style="background:${settings.colors[edge.color]}"></span><span>${escape(label(edge))}</span><button id="delete-color-connection" class="tool" type="button" aria-label="Delete ${escape(label(edge))} connection" title="Delete connection">${trash}</button></div>${(["brightness", "contrast"] as const).map((field) => `<label class="adjustment"><span>${field === "brightness" ? "Brightness" : "Contrast"}</span><input type="range" data-color-field="${field}" min="${field === "brightness" ? -100 : 0}" max="${field === "brightness" ? 100 : 200}" value="${edge[field]}" style="--fill:${field === "brightness" ? (edge[field] + 100) / 2 : edge[field] / 2}%" aria-label="${escape(label(edge))} ${field}" ${enabled ? "" : "disabled"}><output>${edge[field]}${field === "contrast" ? "%" : ""}</output></label>`).join("")}`;
-    (
-      document.getElementById("delete-color-connection") as HTMLButtonElement
-    ).disabled = !enabled;
+    const source =
+        channels.find((channel) => channel.id === edge.source)?.name ??
+        edge.source,
+      color = colorName(settings.colors[edge.color]);
+    inspector.innerHTML = `<div class="color-inspector-heading">
+      <span class="color-connection-source" title="${escape(source)}">${escape(source)}</span>
+      <svg class="color-connection-arrow" viewBox="0 0 24 24" aria-hidden="true"><path d="M5 12h14m-7-7 7 7-7 7"/></svg>
+      <span class="color-connection-output" title="${escape(color)}"><span class="color-swatch" style="background:${settings.colors[edge.color]}"></span><span>${escape(color)}</span></span>
+      <button id="delete-color-connection" class="tool" type="button" aria-label="Delete ${escape(label(edge))} connection" title="Delete connection" ${enabled ? "" : "disabled"}>${trash}</button>
+    </div>
+    <div class="histogram-container">
+      <svg class="range-graph" viewBox="0 0 255 64" preserveAspectRatio="none" role="img" aria-label="Approximate source channel histogram">
+        <title id="color-histogram-description"></title>
+        <path class="graph-grid" d="M63.75 0v64M127.5 0v64M191.25 0v64M0 32h255"/>
+        <path id="color-histogram-bars"/>
+        <path id="color-range-line"/>
+        <line id="color-cutoff-minimum" class="histogram-cutoff" y1="0" y2="64"/>
+        <line id="color-cutoff-maximum" class="histogram-cutoff" y1="0" y2="64"/>
+      </svg>
+      <button id="color-histogram-scale" class="text-button histogram-scale" type="button" aria-label="Logarithmic histogram scale" ${enabled ? "" : "disabled"}></button>
+    </div>
+    <div class="range-labels"><span>0</span><span>255</span></div>
+    ${(["minimum", "maximum"] as const).map((field) => `<label class="adjustment" for="color-range-${field}"><span>${field === "minimum" ? "Minimum" : "Maximum"}</span><input id="color-range-${field}" type="range" data-color-field="${field}" min="${field === "minimum" ? 0 : 1}" max="${field === "minimum" ? 254 : 255}" aria-label="${escape(label(edge))} ${field}" ${enabled ? "" : "disabled"}><output id="color-value-${field}" for="color-range-${field}"></output></label>`).join("")}
+    <footer class="panel-footer display-presets">${[0, 0.1, 0.5, 1].map((tail) => `<button class="text-button" type="button" data-color-percentile="${tail}" title="${tail === 0 ? "Set display range to the sampled source channel minimum and maximum" : `Set display range to the ${tail}–${100 - tail} percentiles`}">${tail}–${100 - tail}</button>`).join("")}<button id="color-reset-range" class="text-button" type="button" ${enabled ? "" : "disabled"}>${icon("reset")}Reset</button></footer>`;
+    refreshInspectorRange();
+    refreshInspectorHistogram();
   }
   function renderOutputs() {
     const current = edgeById(selected);
@@ -378,16 +467,36 @@ export function bindColorPanel(onChange: (settings: ColorSettings) => void) {
     }
   });
   get("inspector").addEventListener("click", (event) => {
-    if (
-      enabled &&
-      selected !== null &&
-      (event.target as Element).closest("#delete-color-connection")
-    )
+    if (!enabled || selected === null) return;
+    const target = event.target as Element;
+    if (target.closest("#delete-color-connection")) {
       removeEdge(selected);
+      return;
+    }
+    if (target.closest("#color-histogram-scale")) {
+      logarithmic = !logarithmic;
+      refreshInspectorHistogram();
+      return;
+    }
+    const preset = target.closest<HTMLButtonElement>("[data-color-percentile]");
+    let range: DisplaySettings;
+    if (preset) {
+      const bins = selectedHistogram();
+      if (!bins) return;
+      range = percentileRange(
+        Array.from(bins),
+        Number(preset.dataset.colorPercentile),
+      );
+    } else if (target.closest("#color-reset-range"))
+      range = defaultDisplaySettings;
+    else return;
+    settings = setColorConnectionRange(settings, selected, range);
+    refreshInspectorRange();
+    publish();
   });
   get("inspector").addEventListener("input", (event) => {
     const input = event.target as HTMLInputElement,
-      field = input.dataset.colorField as "brightness" | "contrast" | undefined;
+      field = input.dataset.colorField as keyof DisplaySettings | undefined;
     if (!enabled || !field || selected === null) return;
     settings = adjustColorConnection(
       settings,
@@ -395,12 +504,7 @@ export function bindColorPanel(onChange: (settings: ColorSettings) => void) {
       field,
       input.valueAsNumber,
     );
-    input.style.setProperty(
-      "--fill",
-      `${((input.valueAsNumber - Number(input.min)) / (Number(input.max) - Number(input.min))) * 100}%`,
-    );
-    input.closest("label")!.querySelector("output")!.textContent =
-      input.value + (field === "contrast" ? "%" : "");
+    refreshInspectorRange();
     publish();
   });
   document.getElementById("reset-colors")!.addEventListener("click", () => {
@@ -576,10 +680,15 @@ export function bindColorPanel(onChange: (settings: ColorSettings) => void) {
     setChannels(next: readonly ColorChannel[]) {
       closeTransient();
       channels = next.map((channel) => ({ ...channel }));
+      histograms = [];
       settings = defaultColorSettings(channels);
       selected = settings.connections[0]?.id ?? null;
       render();
       publish();
+    },
+    setHistograms(next: readonly (Uint32Array | null)[]) {
+      histograms = next;
+      refreshInspectorHistogram();
     },
     settings: () => copyColorSettings(settings),
     setEnabled(ready: boolean) {

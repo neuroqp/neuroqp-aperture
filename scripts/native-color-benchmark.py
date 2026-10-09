@@ -363,8 +363,8 @@ def main():
     parser.add_argument(
         "--output", type=Path, default=Path("test-data/color-benchmark.json")
     )
-    parser.add_argument("--selector", default='[data-color-field="brightness"]')
-    parser.add_argument("--values", type=float, nargs=2, default=[-40, 40])
+    parser.add_argument("--selector", default='[data-color-field="maximum"]')
+    parser.add_argument("--values", type=float, nargs=2, default=[64, 220])
     parser.add_argument("--trials", type=int, default=40)
     parser.add_argument("--warmup", type=int, default=4)
     parser.add_argument("--interval-ms", type=float, default=40)

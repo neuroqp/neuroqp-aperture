@@ -1,5 +1,5 @@
 #color-panel {
-  flex-basis: 398px;
+  flex-basis: 350px;
   --color-neutral-port: var(--muted);
 }
 :root[data-theme="dark"] #color-panel {
@@ -125,9 +125,14 @@
   stroke-width: 2;
   opacity: 0.65;
 }
-.color-wire.selected {
+.color-connection.selected .color-wire {
   stroke-width: 3;
   opacity: 1;
+  filter: drop-shadow(0 0 2px var(--wire-color));
+}
+.color-connection.selected .color-wire-hit {
+  stroke: color-mix(in srgb, var(--wire-color) 16%, transparent);
+  filter: blur(2px);
 }
 .color-wire-hit {
   fill: none;
@@ -136,9 +141,17 @@
   pointer-events: stroke;
   cursor: grab;
 }
-.color-wire-hit:focus-visible {
-  stroke: color-mix(in srgb, var(--accent) 25%, transparent);
+#color-panel .color-wire-hit:focus {
   outline: none;
+}
+#color-panel .color-wire-hit:focus-visible {
+  outline: none;
+  stroke: color-mix(in srgb, var(--wire-color) 35%, transparent);
+  filter: blur(2px);
+}
+.color-connection:has(.color-wire-hit:focus-visible) .color-wire {
+  opacity: 1;
+  filter: drop-shadow(0 0 2px var(--wire-color));
 }
 .color-ghost {
   stroke-width: 2.5;
@@ -150,24 +163,48 @@
   padding-top: 7px;
 }
 .color-inspector-heading {
-  display: flex;
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) 16px minmax(0, 1fr) 23px;
   align-items: center;
   gap: 6px;
   min-height: 26px;
+  margin-bottom: 6px;
   font-size: 11px;
 }
-.color-inspector-heading > span:nth-child(2) {
+.color-connection-source,
+.color-connection-output > span:last-child {
   overflow: hidden;
   text-overflow: ellipsis;
   white-space: nowrap;
 }
+.color-connection-output {
+  display: flex;
+  align-items: center;
+  justify-content: flex-end;
+  gap: 6px;
+  min-width: 0;
+}
 .color-inspector-heading > .tool {
-  flex-shrink: 0;
-  margin-left: auto;
+  margin-left: 0;
+}
+#color-histogram-bars {
+  fill: var(--accent);
+  fill-opacity: 0.3;
+  stroke: none;
+}
+#color-range-line {
+  stroke-width: 1;
+  opacity: 0.8;
+}
+.color-inspector .display-presets {
+  gap: 2px;
+}
+.color-inspector .display-presets .text-button {
+  padding-inline: 3px;
 }
 .color-inspector .adjustment {
   margin-top: 8px;
-  grid-template-columns: 64px minmax(40px, 1fr) 35px;
+  grid-template-columns: 64px minmax(0, 1fr) 27px;
 }
 .color-swatch {
   width: 10px;

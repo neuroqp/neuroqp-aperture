@@ -119,7 +119,14 @@ on Open or Close. Cancellation or save failure must retain unsaved edits.
 - Color: a compact connection diagram maps source channels to seven editable
   output colors. Several inputs can feed one output, and one input can feed
   several outputs. Click or drag from an input to an output to connect them.
-  Select a wire to adjust its brightness and contrast independently. Drag the
+  Select a wire to adjust its display range independently, using the same
+  histogram, Minimum/Maximum, percentile presets, Linear/Log and Reset controls
+  as Display range. Its histogram samples the original input channel, before
+  tinting or mixing. Range presets and Reset affect only the selected connection.
+  Selection and keyboard focus follow the curved wire with a glow in its current
+  line color, without a
+  rectangular outline. Keep the panel compact and center the arrow between
+  source and color names in the connection header. Drag the
   wire itself to another output to reroute it; dropping in empty space deletes
   it. Escape cancels a drag. A trash button removes only the selected wire.
   Disconnected output dots use their color as an outline; connected dots are

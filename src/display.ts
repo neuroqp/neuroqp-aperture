@@ -1,6 +1,7 @@
 import {
   displayFilter,
   histogram,
+  channelHistograms,
   type DisplaySettings,
 } from "./display-settings";
 
@@ -12,7 +13,7 @@ export function applyDisplay(settings: DisplaySettings) {
   viewer.classList.toggle("display-adjusted", !identity);
 }
 
-export async function loadHistogram(url: string) {
+export async function loadHistogram(url: string, channels = 0) {
   const image = new Image();
   image.crossOrigin = "anonymous";
   image.src = url;
@@ -26,7 +27,17 @@ export async function loadHistogram(url: string) {
   canvas.height = Math.max(1, Math.round(image.naturalHeight * scale));
   const context = canvas.getContext("2d", { willReadFrequently: true })!;
   context.drawImage(image, 0, 0, canvas.width, canvas.height);
-  return histogram(
-    context.getImageData(0, 0, canvas.width, canvas.height).data,
-  );
+  const rgba = context.getImageData(0, 0, canvas.width, canvas.height).data;
+  const pixels = canvas.width * canvas.height;
+  return {
+    display: histogram(rgba),
+    channels: channelHistograms(
+      Array.from({ length: channels }, (_, channel) =>
+        Uint8Array.from({ length: pixels }, (_, i) => rgba[i * 4 + channel]),
+      ),
+      canvas.width,
+      canvas.height,
+      Uint8Array.from({ length: pixels }, (_, i) => rgba[i * 4 + 3]),
+    ),
+  };
 }

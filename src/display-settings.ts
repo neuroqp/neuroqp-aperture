@@ -53,6 +53,26 @@ export function histogram(rgba: ArrayLike<number>) {
   return bins;
 }
 
+// Sample original display planes once, independently of their color/range mapping.
+export function channelHistograms(
+  planes: readonly ArrayLike<number>[],
+  width: number,
+  height: number,
+  alpha?: ArrayLike<number>,
+) {
+  const bins = planes.map(() => new Uint32Array(256));
+  const step = Math.max(1, Math.ceil(Math.max(width, height) / 256));
+  for (let y = 0; y < height; y += step) {
+    for (let x = 0; x < width; x += step) {
+      const pixel = y * width + x;
+      if (alpha?.[pixel] === 0) continue;
+      for (let channel = 0; channel < planes.length; channel++)
+        bins[channel][planes[channel][pixel]]++;
+    }
+  }
+  return bins;
+}
+
 export function percentileRange(bins: number[], tail: number) {
   const total = bins.reduce((sum, count) => sum + count, 0);
   if (total === 0) return { minimum: 0, maximum: 255 };

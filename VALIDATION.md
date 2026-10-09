@@ -496,3 +496,26 @@ rendering. GPU horizontal flip matched the exact mirrored framebuffer. A final
 with only lookup uploads; a 120-input RGB run also retained the final setting.
 Independent renderer and benchmark reviews found no remaining blockers. Rust
 source and image conversion are unchanged by this GPU follow-up.
+
+## Connection display ranges and compact panel
+
+Connections now use the same minimum/maximum transfer and percentile presets as
+Display range, replacing brightness/contrast. Histograms sample original input
+channels once per preview, before tinting or mixing. Scientific channel
+histograms reuse the decoded preview planes; ordinary RGB/gray histograms share
+the existing preview histogram read. Slider edits do not resample histograms.
+
+All 56 frontend tests, formatting and the embedded Tauri build pass. Native RGB
+checks verified independent connection ranges, isolated presets/reset, unchanged
+global Display range settings, exact pixel restoration after Reset, and that
+Linear/Log changes the histogram without changing pixels. Native five-channel
+checks matched the first and fifth channel histograms to their decoded preview
+planes exactly. Light and dark screenshots verified the 350 px panel, centered
+SVG arrow, and curve-following selection/focus glow in the current wire color,
+including a custom cyan shade. Focused wires have no rectangular outline.
+
+The updated maximum-slider benchmark on the settled 9,878 × 7,410 RGB pyramid
+submitted frames at 2 / 3 ms and observed GPU completion at 5 / 6 ms, median / p95
+over 30 edits. It recorded only lookup uploads, with zero source uploads,
+fetches or 2D readbacks. Presentation timing retains the limitations above.
+Native evidence remains ignored under `test-data/connection-range-*`.
