@@ -3,7 +3,7 @@
   <head>
     <meta charset="utf-8" />
     <meta name="viewport" content="width=device-width, initial-scale=1" />
-    <title>Aperture · Color studies</title>
+    <title>Aperture · Color connections</title>
     <style>
       :root {
         color-scheme: light;
@@ -21,14 +21,14 @@
         margin: 0;
       }
       main {
-        padding: 24px;
         max-width: 940px;
         margin: auto;
+        padding: 24px;
       }
       .masthead {
         display: flex;
-        align-items: center;
         gap: 12px;
+        align-items: center;
         margin-bottom: 18px;
       }
       .masthead strong {
@@ -38,197 +38,110 @@
         color: #7b6c84;
         font-size: 12px;
       }
-      nav {
-        display: flex;
-        gap: 4px;
-        margin-bottom: 22px;
-        flex-wrap: wrap;
-      }
       button,
-      select,
       input {
         font: inherit;
         color: inherit;
       }
-      button,
-      select {
-        background: #fff;
-        border: 1px solid #d9cfdf;
-        border-radius: 5px;
-        min-height: 27px;
-        padding: 3px 7px;
-      }
       button {
         cursor: pointer;
       }
-      button:hover {
-        background: #f0e8f5;
-      }
-      button:disabled {
-        opacity: 0.4;
-        cursor: default;
-      }
-      button[aria-pressed="true"] {
-        color: #623c7a;
-        background: #eae0f0;
-        border-color: #b49ac3;
-      }
       :focus-visible {
         outline: 2px solid #b66d28;
-        outline-offset: 2px;
-      }
-      nav button {
-        background: transparent;
-        border-color: transparent;
-        padding: 6px 11px;
-      }
-      select {
-        min-width: 0;
-        max-width: 100%;
-      }
-      input[type="range"] {
-        min-width: 0;
-        width: 100%;
-        accent-color: #79538e;
-        height: 16px;
-        margin: 0;
-      }
-      input[type="color"] {
-        width: 27px;
-        height: 25px;
-        padding: 1px;
-        border: 1px solid #d9cfdf;
-        border-radius: 4px;
-        background: #fff;
+        outline-offset: 3px;
       }
       .panel {
+        width: 398px;
+        max-width: 100%;
         background: #fcfafc;
         border: 1px solid #d9cfdf;
         border-radius: 8px;
-        overflow: hidden;
+        position: relative;
       }
       .panel-bar {
         display: flex;
-        justify-content: space-between;
         align-items: center;
-        gap: 8px;
+        gap: 7px;
         min-height: 42px;
         padding: 7px 10px;
         border-bottom: 1px solid #e4dce8;
       }
       h1 {
         margin: 0;
-        font-size: 13px;
+        font-size: 14px;
         font-weight: 600;
-      }
-      .actions {
-        display: flex;
-        align-items: center;
-        gap: 5px;
-      }
-      .quiet {
-        background: transparent;
-        border-color: transparent;
-        color: #7b6c84;
+        color: #623c7a;
       }
       .icon {
-        font-size: 17px;
-        line-height: 1;
-        width: 27px;
-        padding: 2px;
-      }
-      .hint {
-        min-height: 29px;
-        margin: 0;
-        padding: 7px 10px;
-        color: #7b6c84;
-        font-size: 11px;
-        border-top: 1px solid #e4dce8;
-      }
-      .swatch {
-        width: 11px;
-        height: 11px;
-        border-radius: 50%;
-        border: 1px solid #98889f;
-        flex: 0 0 auto;
-        display: inline-block;
-      }
-      .sliders {
         display: grid;
-        gap: 7px;
-      }
-      .slider {
-        display: grid;
-        grid-template-columns: 68px minmax(40px, 1fr) 32px;
-        gap: 7px;
-        align-items: center;
-        font-size: 11px;
-      }
-      output {
-        text-align: right;
-        font-variant-numeric: tabular-nums;
-        color: #7b6c84;
-      }
-      .solo-strip {
-        background: #f0e8f5;
-        padding: 4px 10px;
-        display: flex;
-        align-items: center;
-        justify-content: space-between;
-        font-size: 11px;
-      }
-      #slots {
-        width: 316px;
-        max-width: 100%;
-      }
-      .slot {
-        padding: 4px 8px;
-        border-bottom: 1px solid #eee7f1;
-      }
-      .slot.selected {
-        background: #f3edf6;
-      }
-      .slot-row {
-        display: grid;
-        grid-template-columns: 83px minmax(0, 1fr) 36px;
-        align-items: center;
-        gap: 5px;
-      }
-      .slot-name {
-        display: flex;
-        align-items: center;
-        gap: 7px;
-        text-align: left;
-        border: 0;
+        place-items: center;
         background: transparent;
-        padding: 3px;
+        border: 0;
+        border-radius: 4px;
+        width: 26px;
+        height: 26px;
+        padding: 4px;
+        color: #7b6c84;
       }
-      .slot select {
-        width: 100%;
+      .icon:hover,
+      .icon[aria-expanded="true"] {
+        background: #eee5f4;
+        color: #623c7a;
+      }
+      .icon svg {
+        width: 17px;
+        height: 17px;
+        fill: none;
+        stroke: currentColor;
+        stroke-width: 1.6;
+        stroke-linecap: round;
+        stroke-linejoin: round;
+      }
+      #reset {
+        margin-left: auto;
+      }
+      .help-wrap {
+        position: relative;
+      }
+      .tooltip {
+        position: absolute;
+        z-index: 3;
+        left: -57px;
+        top: 32px;
+        width: 294px;
+        max-width: calc(100vw - 44px);
+        padding: 12px 14px;
+        background: #fcfafc;
+        color: #594a63;
+        border: 1px solid #d9cfdf;
+        border-radius: 6px;
+        box-shadow: 0 3px 12px #382d401c;
         font-size: 12px;
+        line-height: 1.5;
       }
-      .only {
-        font-size: 10px;
-        padding: 3px 4px;
+      .tooltip strong {
+        color: #623c7a;
       }
-      .slot .sliders {
-        padding: 8px 3px 7px;
+      .tooltip ul {
+        padding-left: 16px;
+        margin: 7px 0 0;
       }
-      #connections {
-        width: 398px;
-        max-width: 100%;
+      .tooltip li + li {
+        margin-top: 5px;
       }
       .patch {
         height: 286px;
         position: relative;
+        touch-action: none;
+        user-select: none;
       }
       .patch-labels {
         position: absolute;
         inset: 12px 14px auto;
         display: flex;
         justify-content: space-between;
-        font-size: 10px;
         color: #84728d;
+        font-size: 10px;
         pointer-events: none;
       }
       .inputs,
@@ -250,39 +163,29 @@
       }
       .terminal {
         display: flex;
-        align-items: center;
         justify-content: space-between;
+        align-items: center;
         gap: 6px;
         min-height: 27px;
-      }
-      .terminal .channel-label {
+        padding: 0;
         border: 0;
         background: transparent;
-        padding: 0;
+        border-radius: 3px;
         font-size: 12px;
-        text-align: left;
+        touch-action: none;
       }
-      .terminal.selected .channel-label {
+      .terminal.selected {
         color: #623c7a;
         font-weight: 600;
       }
-      .terminal.muted {
-        opacity: 0.42;
-      }
-      .port {
-        border: 0;
-        background: transparent;
-        padding: 0;
-        width: 22px;
-        height: 24px;
-        min-height: 24px;
+      .dot {
         display: grid;
         place-items: center;
-        position: relative;
+        width: 22px;
+        height: 24px;
         flex-shrink: 0;
-        touch-action: none;
       }
-      .port::after {
+      .dot::after {
         content: "";
         display: block;
         width: 10px;
@@ -291,19 +194,16 @@
         border-radius: 50%;
         background: #fcfafc;
       }
-      .port.connected::after {
+      .terminal.connected .dot::after {
         background: var(--port-color, #967ba7);
         border-color: var(--port-color, #967ba7);
       }
-      .port.pending::after {
-        background: #6c3e89;
-        border-color: #6c3e89;
+      .terminal.pending .dot::after,
+      .terminal.drop-target .dot::after {
         box-shadow: 0 0 0 4px #e6dced;
+        border-color: #79538e;
       }
-      .port:hover {
-        background: transparent;
-      }
-      .port:hover::after {
+      .terminal:hover .dot::after {
         box-shadow: 0 0 0 3px #e6dced;
       }
       .wires {
@@ -317,7 +217,7 @@
       .wire {
         fill: none;
         stroke-width: 2;
-        opacity: 0.8;
+        opacity: 0.65;
       }
       .wire.selected {
         stroke-width: 3;
@@ -326,113 +226,79 @@
       .wire-hit {
         fill: none;
         stroke: transparent;
-        stroke-width: 13;
+        stroke-width: 14;
         pointer-events: stroke;
-        cursor: pointer;
+        cursor: grab;
       }
       .wire-hit:focus {
-        stroke: #b49ac355;
+        stroke: #b49ac344;
         outline: none;
+      }
+      .wire-handle {
+        fill: #fcfafc;
+        stroke-width: 2;
+        cursor: grab;
+        pointer-events: all;
+      }
+      .ghost {
+        fill: none;
+        stroke-width: 2.5;
+        pointer-events: none;
       }
       .inspector {
         border-top: 1px solid #e4dce8;
-        padding: 9px 12px;
+        padding: 8px 12px 12px;
       }
       .inspector-heading {
         display: flex;
         align-items: center;
         gap: 6px;
-        margin-bottom: 8px;
-        min-height: 25px;
+        min-height: 26px;
+        margin-bottom: 7px;
         font-size: 12px;
       }
-      .inspector-heading .actions {
+      .inspector-heading .icon {
         margin-left: auto;
       }
-      #flow {
-        width: 724px;
-        max-width: 100%;
+      .swatch {
+        width: 10px;
+        height: 10px;
+        border: 1px solid #98889f;
+        border-radius: 50%;
       }
-      .graph-scroll {
-        overflow-x: auto;
+      .sliders {
+        display: grid;
+        gap: 7px;
       }
-      .graph {
-        position: relative;
-        width: 722px;
-        height: 338px;
-        background-image: radial-gradient(#dcd2e3 0.8px, transparent 0.8px);
-        background-size: 14px 14px;
-      }
-      .node {
-        position: absolute;
-        width: 124px;
-        background: #fff;
-        border: 1px solid #cfc1d8;
-        border-radius: 6px;
-      }
-      .node.selected {
-        border-color: #805792;
-        box-shadow: 0 0 0 1px #805792;
-      }
-      .node-head {
-        width: 100%;
-        border: 0;
-        border-bottom: 1px solid #ece5f0;
-        border-radius: 5px 5px 0 0;
-        background: #f3eef6;
-        font-size: 11px;
-        font-weight: 600;
-        min-height: 26px;
-        text-align: left;
-        cursor: grab;
-        touch-action: none;
-      }
-      .node-head:active {
-        cursor: grabbing;
-      }
-      .node-body {
-        padding: 7px;
-        display: flex;
-        gap: 4px;
+      .slider {
+        display: grid;
+        grid-template-columns: 68px minmax(40px, 1fr) 32px;
         align-items: center;
+        gap: 7px;
+        font-size: 11px;
       }
-      .node select {
+      input[type="range"] {
         width: 100%;
-        font-size: 11px;
-        min-height: 24px;
-        padding: 2px 3px;
+        min-width: 0;
+        accent-color: #79538e;
+        height: 16px;
+        margin: 0;
       }
-      .node.adjust {
-        width: 174px;
-      }
-      .node.adjust .node-body {
-        display: block;
-      }
-      .node.adjust .slider {
-        grid-template-columns: 54px minmax(25px, 1fr) 25px;
-        gap: 3px;
-        font-size: 10px;
-      }
-      .node.mix {
-        width: 72px;
-      }
-      .node.mix .node-body {
-        font-size: 11px;
+      output {
+        text-align: right;
         color: #7b6c84;
-        justify-content: center;
+        font-variant-numeric: tabular-nums;
       }
-      .node > .port {
+      .sr-only {
         position: absolute;
-        top: 32px;
-      }
-      .node > [data-in] {
-        left: -12px;
-      }
-      .node > [data-out] {
-        right: -12px;
-      }
-      .node.mix > .port {
-        top: 27px;
+        width: 1px;
+        height: 1px;
+        padding: 0;
+        margin: -1px;
+        overflow: hidden;
+        clip-path: inset(50%);
+        white-space: nowrap;
+        border: 0;
       }
       [hidden] {
         display: none !important;
@@ -441,22 +307,13 @@
         main {
           padding: 14px 10px;
         }
-        .masthead {
-          margin-bottom: 12px;
-        }
-        nav {
-          margin-bottom: 14px;
-        }
-        .panel-bar {
-          flex-wrap: wrap;
-        }
         .inputs {
-          width: 100px;
           left: 8px;
+          width: 100px;
         }
         .outputs {
-          width: 90px;
           right: 8px;
+          width: 90px;
         }
       }
     </style>
@@ -464,27 +321,67 @@
   <body>
     <main>
       <div class="masthead">
-        <strong>Aperture / Color</strong><span>UI studies</span>
+        <strong>Aperture / Color</strong><span>UI mock</span>
       </div>
-      <nav aria-label="Layout">
-        <button data-view="slots" aria-pressed="true">Output slots</button
-        ><button data-view="connections" aria-pressed="false">
-          Connections</button
-        ><button data-view="flow" aria-pressed="false">Build a flow</button>
-      </nav>
-      <section id="slots" class="panel" aria-label="Output slots"></section>
-      <section
-        id="connections"
-        class="panel"
-        aria-label="Channel connections"
-        hidden
-      ></section>
-      <section
-        id="flow"
-        class="panel"
-        aria-label="Build a flow"
-        hidden
-      ></section>
+      <section id="connections" class="panel" aria-label="Color connections">
+        <div class="panel-bar">
+          <h1>Color</h1>
+          <div class="help-wrap">
+            <button
+              id="help"
+              class="icon"
+              aria-label="About color connections"
+              aria-expanded="false"
+              aria-controls="help-text"
+              aria-describedby="help-text"
+            >
+              <svg viewBox="0 0 24 24" aria-hidden="true">
+                <circle cx="12" cy="12" r="9" />
+                <path d="M9.1 9a3 3 0 0 1 5.8 1c0 2-3 2-3 4m0 3h.01" />
+              </svg>
+            </button>
+            <div id="help-text" class="tooltip" role="tooltip" hidden>
+              <strong>Color connections</strong>
+              <ul>
+                <li>
+                  Drag a channel to a color, or click them in order. Channels
+                  and colors can have several connections.
+                </li>
+                <li>Click a wire to adjust its brightness and contrast.</li>
+                <li>
+                  Drag a wire to another color to move it. Drop in empty space
+                  to remove it. Escape cancels.
+                </li>
+                <li>The trash button removes the selected wire.</li>
+                <li>
+                  With a wire focused: Enter selects, R starts moving, Delete
+                  removes. Then choose a color with Tab and Enter.
+                </li>
+              </ul>
+            </div>
+          </div>
+          <button
+            id="reset"
+            class="icon"
+            aria-label="Reset connections"
+            title="Reset connections"
+          >
+            <svg viewBox="0 0 24 24" aria-hidden="true">
+              <path d="M3 10a9 9 0 1 1 2 8M3 4v6h6" />
+            </svg>
+          </button>
+        </div>
+        <div id="patch" class="patch">
+          <svg id="wires" class="wires" aria-label="Channel connections"></svg>
+          <div class="patch-labels">
+            <span>Channels</span><span>Colors</span>
+          </div>
+          <div id="inputs" class="inputs"></div>
+          <div id="outputs" class="outputs"></div>
+        </div>
+        <div id="inspector" class="inspector"></div>
+        <div id="status" class="sr-only" role="status" aria-live="polite"></div>
+      </section>
     </main>
     <script>
       const colors = {
@@ -496,598 +393,340 @@
         Magenta: "#c660af",
         Yellow: "#d1b340",
       };
-      const channelNames = ["DAPI", "GFP", "Alexa 647", "Transmitted"];
-      const colorNames = Object.keys(colors);
-      const defaults = { Blue: 0, Green: 1, Magenta: 2 };
-      let slots,
-        connections,
-        flow,
-        nextId = 10;
-      let pending = null,
-        dragging = null;
-      function mappingState() {
+      const channels = ["DAPI", "GFP", "Alexa 647", "Transmitted"];
+      const $ = (selector) => document.querySelector(selector);
+      let edges = [],
+        selected = null,
+        nextId = 1,
+        pending = null,
+        gesture = null,
+        helpPinned = false;
+      function reset() {
+        cancel();
+        edges = [
+          [0, "Blue"],
+          [1, "Green"],
+          [2, "Magenta"],
+        ].map(([source, color]) => ({
+          id: nextId++,
+          source,
+          color,
+          brightness: 0,
+          contrast: 100,
+        }));
+        selected = edges[1].id;
+        render();
+      }
+      function edgeById(id) {
+        return edges.find((edge) => edge.id === Number(id));
+      }
+      function announce(text) {
+        $("#status").textContent = text;
+      }
+      function edgeLabel(edge) {
+        return `${channels[edge.source]} → ${edge.color}`;
+      }
+      function render() {
+        const current = edgeById(selected);
+        $("#inputs").innerHTML = channels
+          .map(
+            (name, source) =>
+              `<button class="terminal ${edges.some((edge) => edge.source === source) ? "connected" : ""} ${current?.source === source ? "selected" : ""}" data-source="${source}" aria-label="Connect ${name}"><span>${name}</span><span class="dot" aria-hidden="true"></span></button>`,
+          )
+          .join("");
+        $("#outputs").innerHTML = Object.entries(colors)
+          .map(
+            ([color, hex]) =>
+              `<button class="terminal ${edges.some((edge) => edge.color === color) ? "connected" : ""} ${current?.color === color ? "selected" : ""}" data-color="${color}" style="--port-color:${hex}" aria-label="Connect to ${color}"><span class="dot" aria-hidden="true"></span><span>${color}</span></button>`,
+          )
+          .join("");
+        renderInspector();
+        draw();
+      }
+      function renderInspector() {
+        const edge = edgeById(selected),
+          inspector = $("#inspector");
+        inspector.hidden = !edge;
+        if (!edge) {
+          inspector.innerHTML = "";
+          return;
+        }
+        inspector.innerHTML = `<div class="inspector-heading"><span class="swatch" style="background:${colors[edge.color]}"></span><span>${edgeLabel(edge)}</span><button id="delete" class="icon" aria-label="Delete connection ${edgeLabel(edge)}" title="Delete connection"><svg viewBox="0 0 24 24" aria-hidden="true"><path d="M3 6h18M9 6V3h6v3M5 6l1 15h12l1-15M10 10v7m4-7v7"/></svg></button></div><div class="sliders">${["brightness", "contrast"].map((field) => `<label class="slider"><span>${field === "brightness" ? "Brightness" : "Contrast"}</span><input type="range" data-field="${field}" min="${field === "brightness" ? -100 : 0}" max="${field === "brightness" ? 100 : 200}" value="${edge[field]}" aria-label="${edgeLabel(edge)} ${field}"/><output>${edge[field]}${field === "contrast" ? "%" : ""}</output></label>`).join("")}</div>`;
+      }
+      function point(element) {
+        const rect = element.getBoundingClientRect(),
+          board = $("#patch").getBoundingClientRect();
         return {
-          selected: "Green",
-          solo: null,
-          items: Object.fromEntries(
-            colorNames.map((color) => [
-              color,
-              { source: defaults[color] ?? -1, brightness: 0, contrast: 100 },
-            ]),
-          ),
+          x: rect.x - board.x + rect.width / 2,
+          y: rect.y - board.y + rect.height / 2,
         };
       }
-      function initialFlow() {
-        return {
-          selected: null,
-          edge: null,
-          nodes: [
-            { id: "c1", type: "channel", x: 22, y: 49, source: 0 },
-            {
-              id: "a1",
-              type: "adjust",
-              x: 189,
-              y: 38,
-              brightness: 0,
-              contrast: 100,
-            },
-            {
-              id: "p1",
-              type: "color",
-              x: 410,
-              y: 49,
-              color: "Blue",
-              custom: "#8056bc",
-            },
-            { id: "c2", type: "channel", x: 22, y: 220, source: 1 },
-            {
-              id: "p2",
-              type: "color",
-              x: 410,
-              y: 220,
-              color: "Green",
-              custom: "#8056bc",
-            },
-            { id: "rgb", type: "mix", x: 615, y: 139 },
-          ],
-          edges: [
-            ["c1", "a1"],
-            ["a1", "p1"],
-            ["p1", "rgb"],
-            ["c2", "p2"],
-            ["p2", "rgb"],
-          ],
-        };
+      function endpoints(edge) {
+        return [
+          point($(`[data-source="${edge.source}"] .dot`)),
+          point($(`[data-color="${edge.color}"] .dot`)),
+        ];
       }
-      slots = mappingState();
-      connections = mappingState();
-      flow = initialFlow();
-      const $ = (s) => document.querySelector(s);
-      function sourceOptions(value) {
-        return (
-          '<option value="-1">None</option>' +
-          channelNames
-            .map(
-              (name, i) =>
-                `<option value="${i}" ${value === i ? "selected" : ""}>${name}</option>`,
-            )
-            .join("")
+      function curve(a, b) {
+        const bend = Math.max(35, Math.abs(b.x - a.x) * 0.5);
+        return `M${a.x},${a.y} C${a.x + bend},${a.y} ${b.x - bend},${b.y} ${b.x},${b.y}`;
+      }
+      function draw() {
+        const ordered = [...edges].sort(
+          (a, b) => Number(a.id === selected) - Number(b.id === selected),
         );
-      }
-      function sliderControls(item, key) {
-        return `<div class="sliders">${["brightness", "contrast"].map((field) => `<label class="slider"><span>${field === "brightness" ? "Brightness" : "Contrast"}</span><input type="range" data-key="${key}" data-field="${field}" min="${field === "brightness" ? -100 : 0}" max="${field === "brightness" ? 100 : 200}" value="${item[field]}" aria-label="${key} ${field}"/><output>${item[field]}${field === "contrast" ? "%" : ""}</output></label>`).join("")}</div>`;
-      }
-      function resetButton() {
-        return '<button class="quiet icon" data-action="reset" aria-label="Reset panel" title="Reset">↺</button>';
-      }
-      function renderSlots() {
-        const s = slots;
-        $("#slots").innerHTML =
-          `<div class="panel-bar"><h1>Color</h1>${resetButton()}</div>${s.solo ? `<div class="solo-strip">${s.solo} only<button class="quiet" data-action="restore">Show all</button></div>` : ""}${colorNames
-            .map((color) => {
-              const item = s.items[color];
-              return `<div class="slot ${s.selected === color ? "selected" : ""}"><div class="slot-row"><button class="slot-name" data-action="select" data-key="${color}" aria-expanded="${s.selected === color}" aria-label="Adjust ${color}"><span class="swatch" style="background:${colors[color]}"></span>${color}</button><select data-key="${color}" data-field="source" aria-label="${color} source">${sourceOptions(item.source)}</select><button class="only" data-action="solo" data-key="${color}" aria-pressed="${s.solo === color}" aria-label="Only ${color}" ${item.source < 0 ? "disabled" : ""}>Only</button></div>${s.selected === color && item.source >= 0 ? sliderControls(item, color) : ""}</div>`;
-            })
-            .join("")}`;
-      }
-      function port(id, direction, label, connected = false, color = "") {
-        return `<button class="port ${connected ? "connected" : ""}" data-${direction}="${id}" aria-label="${label}" title="${label}" ${color ? `style="--port-color:${color}"` : ""}></button>`;
-      }
-      function renderConnections() {
-        const s = connections;
-        const item = s.items[s.selected];
-        $("#connections").innerHTML =
-          `<div class="panel-bar"><h1>Color</h1>${resetButton()}</div>
- <div class="patch" data-board="connections"><svg class="wires" aria-label="Channel connections"></svg><div class="patch-labels"><span>Channels</span><span>Colors</span></div>
- <div class="inputs">${channelNames
-   .map(
-     (name, i) =>
-       `<div class="terminal"><span>${name}</span>${port(
-         String(i),
-         "out",
-         `Connect ${name}`,
-         Object.values(s.items).some((item) => item.source === i),
-       )}</div>`,
-   )
-   .join("")}</div>
- <div class="outputs">${colorNames.map((color) => `<div class="terminal ${s.selected === color ? "selected" : ""} ${s.solo && s.solo !== color ? "muted" : ""}">${port(color, "in", `Connect to ${color}`, s.items[color].source >= 0, colors[color])}<button class="channel-label" data-action="select" data-key="${color}" aria-pressed="${s.selected === color}">${color}</button></div>`).join("")}</div></div>
- <div class="inspector"><div class="inspector-heading"><span class="swatch" style="background:${colors[s.selected]}"></span><span>${item.source >= 0 ? channelNames[item.source] + " → " : ""}${s.selected}</span><div class="actions"><button class="only" data-action="solo" aria-label="${s.solo ? "Show all" : "Only " + s.selected}" aria-pressed="${Boolean(s.solo)}" ${item.source < 0 && !s.solo ? "disabled" : ""}>${s.solo ? "Show all" : "Only"}</button><button class="quiet icon" data-action="disconnect" aria-label="Disconnect ${s.selected}" title="Disconnect" ${item.source < 0 ? "disabled" : ""}>×</button></div></div>${item.source >= 0 ? sliderControls(item, s.selected) : '<span style="font-size:11px;color:#7b6c84">Connect a channel.</span>'}</div>
- <p class="hint" role="status">Drag a dot, or click a channel dot then a color dot.</p>`;
-        draw("connections");
-      }
-      function nodeById(id) {
-        return flow.nodes.find((node) => node.id === id);
-      }
-      function flowColor(node) {
-        return node?.type === "color"
-          ? node.color === "Custom"
-            ? node.custom
-            : colors[node.color]
-          : "#aa98b6";
-      }
-      function renderFlow() {
-        $("#flow").innerHTML =
-          `<div class="panel-bar"><h1>Color</h1><div class="actions"><select id="add-node" aria-label="Add node"><option value="">+ Add</option><option value="channel">Channel</option><option value="adjust">Adjust</option><option value="color">Color</option></select><button data-action="delete" class="quiet" ${(!flow.selected && !flow.edge) || flow.selected === "rgb" ? "disabled" : ""}>Remove</button>${resetButton()}</div></div><div class="graph-scroll"><div class="graph" data-board="flow"><svg class="wires" aria-label="Processing connections"></svg>${flow.nodes
-            .map((node) => {
-              let body = "";
-              if (node.type === "channel")
-                body = `<select data-node="${node.id}" data-field="source" aria-label="${node.id} source">${channelNames.map((name, i) => `<option value="${i}" ${node.source === i ? "selected" : ""}>${name}</option>`).join("")}</select>`;
-              if (node.type === "adjust") body = sliderControls(node, node.id);
-              if (node.type === "color")
-                body = `<span class="swatch" style="background:${flowColor(node)}"></span><select data-node="${node.id}" data-field="color" aria-label="${node.id} color">${[...colorNames, "Custom"].map((color) => `<option ${node.color === color ? "selected" : ""}>${color}</option>`).join("")}</select>${node.color === "Custom" ? `<input type="color" data-node="${node.id}" data-field="custom" value="${node.custom}" aria-label="${node.id} custom color"/>` : ""}`;
-              if (node.type === "mix")
-                body = `${flow.edges.filter((edge) => edge[1] === node.id).length} colors`;
-              return `<div class="node ${node.type} ${flow.selected === node.id ? "selected" : ""}" data-node-id="${node.id}" style="left:${node.x}px;top:${node.y}px"><button class="node-head" data-drag="${node.id}" aria-label="Select or move ${node.type} ${node.id}">${{ channel: "Channel", adjust: "Adjust", color: "Color", mix: "RGB" }[node.type]}</button><div class="node-body">${body}</div>${
-                node.type !== "channel"
-                  ? port(
-                      node.id,
-                      "in",
-                      `Input ${node.type} ${node.id}`,
-                      flow.edges.some((edge) => edge[1] === node.id),
-                      flowColor(node),
-                    )
-                  : ""
-              }${
-                node.type !== "mix"
-                  ? port(
-                      node.id,
-                      "out",
-                      `Output ${node.type} ${node.id}`,
-                      flow.edges.some((edge) => edge[0] === node.id),
-                      flowColor(node),
-                    )
-                  : ""
-              }</div>`;
-            })
-            .join(
-              "",
-            )}</div></div><p class="hint" role="status">Connect dots. Drag headers. Channel → Adjust → Color → RGB.</p>`;
-        draw("flow");
-      }
-      function edgesFor(kind) {
-        return kind === "flow"
-          ? flow.edges
-          : Object.entries(connections.items)
-              .filter(([, item]) => item.source >= 0)
-              .map(([color, item]) => [String(item.source), color]);
-      }
-      function curve(x1, y1, x2, y2) {
-        const bend = Math.max(35, Math.abs(x2 - x1) * 0.5);
-        return `M${x1},${y1} C${x1 + bend},${y1} ${x2 - bend},${y2} ${x2},${y2}`;
-      }
-      function point(port, board) {
-        const a = port.getBoundingClientRect(),
-          b = board.getBoundingClientRect();
-        return [a.x - b.x + a.width / 2, a.y - b.y + a.height / 2];
-      }
-      function draw(kind) {
-        const board = $(`[data-board="${kind}"]`);
-        if (!board || board.closest("[hidden]")) return;
-        const svg = board.querySelector("svg");
-        svg.innerHTML = edgesFor(kind)
-          .map(([from, to]) => {
-            const start = board.querySelector(`[data-out="${from}"]`),
-              end = board.querySelector(`[data-in="${to}"]`);
-            if (!start || !end) return "";
-            const [x1, y1] = point(start, board),
-              [x2, y2] = point(end, board);
-            const color =
-              kind === "connections"
-                ? colors[to]
-                : flowColor(
-                    nodeById(from).type === "color"
-                      ? nodeById(from)
-                      : nodeById(to),
-                  );
-            const selected =
-              kind === "connections"
-                ? connections.selected === to
-                : flow.edge?.[0] === from && flow.edge?.[1] === to;
-            const opacity =
-              kind === "connections" &&
-              connections.solo &&
-              connections.solo !== to
-                ? ".15"
-                : ".8";
-            return `<path class="wire ${selected ? "selected" : ""}" style="stroke:${color};opacity:${opacity}" d="${curve(x1, y1, x2, y2)}"/><path class="wire-hit" d="${curve(x1, y1, x2, y2)}" tabindex="0" role="button" aria-label="Select connection ${kind === "connections" ? channelNames[Number(from)] : from} to ${to}" data-edge-from="${from}" data-edge-to="${to}"/>`;
+        $("#wires").innerHTML = ordered
+          .filter((edge) => !(gesture?.moved && gesture.edgeId === edge.id))
+          .map((edge) => {
+            const [a, b] = endpoints(edge),
+              d = curve(a, b);
+            return `<path class="wire ${edge.id === selected ? "selected" : ""}" d="${d}" stroke="${colors[edge.color]}"/><path class="wire-hit" data-edge="${edge.id}" d="${d}" tabindex="0" role="button" aria-pressed="${edge.id === selected}" aria-label="${edgeLabel(edge)} connection"/>${edge.id === selected ? `<circle class="wire-handle" data-edge="${edge.id}" cx="${b.x - 15}" cy="${b.y}" r="4" stroke="${colors[edge.color]}" aria-hidden="true"/>` : ""}`;
           })
           .join("");
+        if (pending)
+          $(`[data-source="${pending.source}"]`)?.classList.add("pending");
       }
-      function announce(kind, text) {
-        $("#" + kind + " .hint").textContent = text;
+      function focusEdge(id) {
+        $(`.wire-hit[data-edge="${id}"]`)?.focus({ preventScroll: true });
       }
-      function clearPending() {
+      function selectEdge(id) {
+        selected = Number(id);
+        render();
+        focusEdge(id);
+      }
+      function removeEdge(id) {
+        const edge = edgeById(id);
+        if (!edge) return;
+        edges = edges.filter((item) => item.id !== edge.id);
+        selected = edges[0]?.id ?? null;
+        cancel();
+        render();
+        if (selected !== null) focusEdge(selected);
+        else $(`[data-source="${edge.source}"]`).focus();
+        announce(`Removed ${edgeLabel(edge)}.`);
+      }
+      function cancel() {
+        const focusedEdge = document.activeElement?.dataset.edge;
         pending = null;
+        gesture = null;
         document
-          .querySelectorAll(".pending")
-          .forEach((e) => e.classList.remove("pending"));
-        document.querySelectorAll(".ghost").forEach((e) => e.remove());
+          .querySelectorAll(".pending,.drop-target")
+          .forEach((el) => el.classList.remove("pending", "drop-target"));
+        $("#wires .ghost")?.remove();
+        draw();
+        if (focusedEdge) focusEdge(focusedEdge);
       }
-      function startConnection(kind, from) {
-        clearPending();
-        pending = { kind, from };
-        $(`#${kind} [data-out="${from}"]`).classList.add("pending");
-        announce(kind, "Choose an input dot. Esc cancels.");
+      function beginConnection(source, edgeId = null) {
+        cancel();
+        pending = { source: Number(source), edgeId };
+        $(`[data-source="${source}"]`).classList.add("pending");
+        if (edgeId !== null) focusEdge(edgeId);
+        announce(
+          edgeId
+            ? "Choose a new color. Escape cancels."
+            : "Choose a color. Escape cancels.",
+        );
       }
-      function connect(kind, to) {
-        if (!pending || pending.kind !== kind) return;
-        const from = pending.from;
-        if (kind === "connections") {
-          connections.items[to].source = Number(from);
-          connections.selected = to;
-          clearPending();
-          rerender("connections");
-          return;
-        }
-        const a = nodeById(from),
-          b = nodeById(to);
-        const valid = {
-          channel: ["adjust", "color"],
-          adjust: ["color"],
-          color: ["mix"],
-        };
-        if (!valid[a.type]?.includes(b.type)) {
+      function commit(source, color, edgeId = null) {
+        const existing = edges.find(
+          (edge) =>
+            edge.source === source &&
+            edge.color === color &&
+            edge.id !== edgeId,
+        );
+        if (existing) {
+          selected = edgeId ?? existing.id;
+          cancel();
+          render();
+          focusEdge(edgeId ?? existing.id);
           announce(
-            kind,
-            "Use Channel → Adjust → Color → RGB. Adjust is optional.",
+            "That channel is already connected to this color. Existing connections kept.",
           );
-          clearPending();
           return;
         }
-        if (b.type !== "mix")
-          flow.edges = flow.edges.filter((edge) => edge[1] !== to);
-        if (!flow.edges.some((edge) => edge[0] === from && edge[1] === to))
-          flow.edges.push([from, to]);
-        clearPending();
-        flow.selected = to;
-        flow.edge = null;
-        rerender("flow");
-      }
-      function render(kind) {
-        if (kind === "slots") renderSlots();
-        if (kind === "connections") renderConnections();
-        if (kind === "flow") renderFlow();
-      }
-      function rerender(kind) {
-        const active = document.activeElement;
-        const attrs = [
-          "data-action",
-          "data-key",
-          "data-field",
-          "data-node",
-          "data-drag",
-          "data-in",
-          "data-out",
-          "data-edge-from",
-          "data-edge-to",
-        ];
-        const selector = attrs
-          .filter((a) => active.hasAttribute(a))
-          .map((a) => `[${a}="${active.getAttribute(a)}"]`)
-          .join("");
-        render(kind);
-        if (selector)
-          $("#" + kind)
-            .querySelector(selector)
-            ?.focus({ preventScroll: true });
-      }
-      function selectEdge(kind, from, to) {
-        if (kind === "connections") connections.selected = to;
+        let edge = edgeById(edgeId);
+        if (edge) edge.color = color;
         else {
-          flow.selected = null;
-          flow.edge = [from, to];
+          edge = { id: nextId++, source, color, brightness: 0, contrast: 100 };
+          edges.push(edge);
         }
-        rerender(kind);
+        selected = edge.id;
+        cancel();
+        render();
+        focusEdge(edge.id);
+        announce(`Connected ${edgeLabel(edge)}.`);
       }
-      for (const kind of ["slots", "connections", "flow"]) {
-        const root = $("#" + kind);
-        root.addEventListener("click", (event) => {
-          const out = event.target.closest("[data-out]"),
-            input = event.target.closest("[data-in]"),
-            edge = event.target.closest("[data-edge-from]");
-          if (out) {
-            startConnection(kind, out.dataset.out);
-            return;
-          }
-          if (input) {
-            if (pending) connect(kind, input.dataset.in);
-            else if (kind === "connections") {
-              connections.selected = input.dataset.in;
-              rerender("connections");
-            }
-            return;
-          }
-          if (edge) {
-            selectEdge(kind, edge.dataset.edgeFrom, edge.dataset.edgeTo);
-            return;
-          }
-          const button = event.target.closest("[data-action]");
-          if (!button) return;
-          const action = button.dataset.action;
-          const s = kind === "slots" ? slots : connections;
-          if (action === "reset") {
-            clearPending();
-            if (kind === "slots") slots = mappingState();
-            else if (kind === "connections") connections = mappingState();
-            else {
-              flow = initialFlow();
-              nextId = 10;
-            }
-            rerender(kind);
-            return;
-          }
-          if (kind === "flow") {
-            if (action === "delete") {
-              if (flow.edge)
-                flow.edges = flow.edges.filter(
-                  (e) => e[0] !== flow.edge[0] || e[1] !== flow.edge[1],
-                );
-              else if (flow.selected !== "rgb") {
-                flow.nodes = flow.nodes.filter((n) => n.id !== flow.selected);
-                flow.edges = flow.edges.filter(
-                  (e) => !e.includes(flow.selected),
-                );
-              }
-              flow.selected = null;
-              flow.edge = null;
-              clearPending();
-              renderFlow();
-              $("#add-node").focus();
-            }
-            return;
-          }
-          const key = button.dataset.key || s.selected;
-          if (action === "select")
-            s.selected = kind === "slots" && s.selected === key ? null : key;
-          if (action === "solo")
-            s.solo =
-              s.solo === key || (kind === "connections" && s.solo) ? null : key;
-          if (action === "restore") s.solo = null;
-          if (action === "disconnect") {
-            s.items[key].source = -1;
-            if (s.solo === key) s.solo = null;
-          }
-          rerender(kind);
-          if (action === "restore") $('#slots [data-action="reset"]').focus();
-          if (action === "disconnect")
-            $(`#connections [data-in="${key}"]`).focus();
-        });
-        root.addEventListener("change", (event) => {
-          const input = event.target;
-          if (input.id === "add-node") {
-            if (!input.value) return;
-            const type = input.value,
-              id = "n" + nextId++;
-            flow.nodes.push({
-              id,
-              type,
-              x: 40 + ((nextId * 47) % 350),
-              y: 90 + ((nextId * 29) % 140),
-              source: 0,
-              color: "Red",
-              custom: "#8056bc",
-              brightness: 0,
-              contrast: 100,
-            });
-            flow.selected = id;
-            flow.edge = null;
-            renderFlow();
-            $(`[data-drag="${id}"]`).focus();
-            return;
-          }
-          if (
-            !input.dataset.field ||
-            input.type === "range" ||
-            input.type === "color"
-          )
-            return;
-          const field = input.dataset.field;
-          if (kind === "flow") {
-            const node = nodeById(input.dataset.node);
-            node[field] =
-              field === "source" ? Number(input.value) : input.value;
-          } else {
-            const s = kind === "slots" ? slots : connections;
-            s.items[input.dataset.key][field] = Number(input.value);
-            if (
-              s.items[input.dataset.key].source < 0 &&
-              s.solo === input.dataset.key
-            )
-              s.solo = null;
-          }
-          rerender(kind);
-        });
-        root.addEventListener("input", (event) => {
-          const input = event.target;
-          if (input.type !== "range" && input.type !== "color") return;
-          const item =
-            kind === "flow"
-              ? nodeById(input.dataset.key || input.dataset.node)
-              : (kind === "slots" ? slots : connections).items[
-                  input.dataset.key
-                ];
-          item[input.dataset.field] =
-            input.type === "range" ? Number(input.value) : input.value;
-          if (input.type === "range")
-            input.closest("label").querySelector("output").textContent =
-              input.value + (input.dataset.field === "contrast" ? "%" : "");
-          else {
-            input
-              .closest(".node-body")
-              .querySelector(".swatch").style.background = input.value;
-            draw("flow");
-          }
-        });
-        root.addEventListener("pointerdown", (event) => {
-          if (event.button !== 0) return;
-          const out = event.target.closest("[data-out]");
-          if (out) {
-            startConnection(kind, out.dataset.out);
-            return;
-          }
-          const head = event.target.closest("[data-drag]");
-          if (!head) return;
-          const node = nodeById(head.dataset.drag);
-          flow.selected = node.id;
-          flow.edge = null;
-          root
-            .querySelectorAll(".node")
-            .forEach((el) =>
-              el.classList.toggle("selected", el.dataset.nodeId === node.id),
-            );
-          root.querySelector('[data-action="delete"]').disabled =
-            node.id === "rgb";
-          dragging = {
-            id: node.id,
-            x: event.clientX,
-            y: event.clientY,
-            startX: node.x,
-            startY: node.y,
-          };
-          head.setPointerCapture(event.pointerId);
-        });
-        root.addEventListener("keydown", (event) => {
-          const head = event.target.closest("[data-drag]");
-          if (
-            head &&
-            ["ArrowLeft", "ArrowRight", "ArrowUp", "ArrowDown"].includes(
-              event.key,
-            )
-          ) {
-            event.preventDefault();
-            const node = nodeById(head.dataset.drag);
-            moveNode(
-              node,
-              node.x +
-                (event.key === "ArrowRight"
-                  ? 10
-                  : event.key === "ArrowLeft"
-                    ? -10
-                    : 0),
-              node.y +
-                (event.key === "ArrowDown"
-                  ? 10
-                  : event.key === "ArrowUp"
-                    ? -10
-                    : 0),
-            );
-          }
-          if (head && (event.key === "Enter" || event.key === " ")) {
-            event.preventDefault();
-            flow.selected = head.dataset.drag;
-            flow.edge = null;
-            rerender("flow");
-          }
-          const edge = event.target.closest("[data-edge-from]");
-          if (edge && (event.key === "Enter" || event.key === " ")) {
-            event.preventDefault();
-            selectEdge(kind, edge.dataset.edgeFrom, edge.dataset.edgeTo);
-          }
-        });
+      function targetColor(x, y) {
+        return document.elementFromPoint(x, y)?.closest("[data-color]")?.dataset
+          .color;
       }
-      function moveNode(node, x, y) {
-        const el = $(`[data-node-id="${node.id}"]`);
-        node.x = Math.max(13, Math.min(709 - el.offsetWidth, x));
-        node.y = Math.max(10, Math.min(328 - el.offsetHeight, y));
-        el.style.left = node.x + "px";
-        el.style.top = node.y + "px";
-        draw("flow");
-      }
+      const patch = $("#patch");
+      patch.addEventListener("pointerdown", (event) => {
+        if (event.button !== 0) return;
+        const source = event.target.closest("[data-source]"),
+          wire = event.target.closest("[data-edge]");
+        if (!source && !wire) return;
+        const edge = wire ? edgeById(wire.dataset.edge) : null;
+        cancel();
+        gesture = {
+          source: edge ? edge.source : Number(source.dataset.source),
+          edgeId: edge?.id ?? null,
+          startX: event.clientX,
+          startY: event.clientY,
+          moved: false,
+          pointerId: event.pointerId,
+        };
+        patch.setPointerCapture(event.pointerId);
+        if (wire) event.preventDefault();
+      });
       document.addEventListener("pointermove", (event) => {
-        if (dragging) {
-          moveNode(
-            nodeById(dragging.id),
-            dragging.startX + event.clientX - dragging.x,
-            dragging.startY + event.clientY - dragging.y,
-          );
+        if (!gesture || event.pointerId !== gesture.pointerId) return;
+        if (
+          !gesture.moved &&
+          Math.hypot(
+            event.clientX - gesture.startX,
+            event.clientY - gesture.startY,
+          ) < 5
+        )
           return;
+        if (!gesture.moved) {
+          gesture.moved = true;
+          if (gesture.edgeId !== null) {
+            selected = gesture.edgeId;
+            renderInspector();
+          }
         }
-        if (!pending) return;
-        const board = $(`[data-board="${pending.kind}"]`),
-          start = board.querySelector(`[data-out="${pending.from}"]`);
-        if (!start) return;
-        const [x, y] = point(start, board),
-          rect = board.getBoundingClientRect();
-        let ghost = board.querySelector(".ghost");
-        if (!ghost) {
-          ghost = document.createElementNS(
-            "http://www.w3.org/2000/svg",
-            "path",
-          );
-          ghost.setAttribute("class", "wire ghost");
-          ghost.style.stroke = "#8c70a0";
-          ghost.style.strokeDasharray = "4 3";
-          board.querySelector("svg").append(ghost);
-        }
+        draw();
+        const rect = patch.getBoundingClientRect(),
+          a = point($(`[data-source="${gesture.source}"] .dot`)),
+          color = targetColor(event.clientX, event.clientY);
+        document
+          .querySelectorAll(".drop-target")
+          .forEach((el) => el.classList.remove("drop-target"));
+        if (color) $(`[data-color="${color}"]`).classList.add("drop-target");
+        const ghost = document.createElementNS(
+          "http://www.w3.org/2000/svg",
+          "path",
+        );
+        ghost.setAttribute("class", "ghost");
         ghost.setAttribute(
           "d",
-          curve(x, y, event.clientX - rect.x, event.clientY - rect.y),
+          curve(a, { x: event.clientX - rect.x, y: event.clientY - rect.y }),
         );
+        ghost.setAttribute("stroke", colors[color] || "#987da9");
+        if (!color) ghost.setAttribute("stroke-dasharray", "4 3");
+        $("#wires").append(ghost);
       });
       document.addEventListener("pointerup", (event) => {
-        dragging = null;
-        if (!pending) return;
-        const target = document
-          .elementFromPoint(event.clientX, event.clientY)
-          ?.closest("[data-in]");
-        if (target && target.closest("#" + pending.kind))
-          connect(pending.kind, target.dataset.in);
+        if (!gesture || event.pointerId !== gesture.pointerId) return;
+        const drag = gesture,
+          color = targetColor(event.clientX, event.clientY);
+        gesture = null;
+        if (patch.hasPointerCapture(event.pointerId))
+          patch.releasePointerCapture(event.pointerId);
+        if (!drag.moved) {
+          if (drag.edgeId !== null) selectEdge(drag.edgeId);
+          else beginConnection(drag.source);
+          return;
+        }
+        if (color) commit(drag.source, color, drag.edgeId);
+        else if (drag.edgeId !== null) removeEdge(drag.edgeId);
+        else {
+          cancel();
+          announce("Connection cancelled.");
+        }
       });
-      document.addEventListener("pointercancel", () => {
-        dragging = null;
-        clearPending();
+      patch.addEventListener("click", (event) => {
+        const source = event.target.closest("[data-source]"),
+          wire = event.target.closest("[data-edge]"),
+          output = event.target.closest("[data-color]");
+        if (event.detail === 0 && source) {
+          beginConnection(source.dataset.source);
+          return;
+        }
+        if (event.detail === 0 && wire) {
+          selectEdge(wire.dataset.edge);
+          return;
+        }
+        if (output && pending) {
+          const { source, edgeId } = pending;
+          commit(source, output.dataset.color, edgeId);
+        }
+      });
+      patch.addEventListener("keydown", (event) => {
+        const wire = event.target.closest("[data-edge]");
+        if (!wire) return;
+        if (event.key === "Enter" || event.key === " ") {
+          event.preventDefault();
+          selectEdge(wire.dataset.edge);
+        }
+        if (event.key.toLowerCase() === "r") {
+          event.preventDefault();
+          const edge = edgeById(wire.dataset.edge);
+          beginConnection(edge.source, edge.id);
+        }
+        if (event.key === "Delete" || event.key === "Backspace") {
+          event.preventDefault();
+          removeEdge(wire.dataset.edge);
+        }
+      });
+      $("#inspector").addEventListener("click", (event) => {
+        if (event.target.closest("#delete")) removeEdge(selected);
+      });
+      $("#inspector").addEventListener("input", (event) => {
+        const input = event.target;
+        if (input.type !== "range") return;
+        const edge = edgeById(selected);
+        edge[input.dataset.field] = Number(input.value);
+        input.closest("label").querySelector("output").textContent =
+          input.value + (input.dataset.field === "contrast" ? "%" : "");
+      });
+      $("#reset").addEventListener("click", () => {
+        reset();
+        announce("Connections reset.");
+      });
+      const help = $("#help"),
+        helpText = $("#help-text"),
+        helpWrap = help.parentElement;
+      function showHelp(show) {
+        helpText.hidden = !show;
+        help.setAttribute("aria-expanded", String(show));
+      }
+      help.addEventListener("click", () => {
+        helpPinned = !helpPinned;
+        showHelp(helpPinned);
+      });
+      helpWrap.addEventListener("pointerenter", () => showHelp(true));
+      helpWrap.addEventListener("pointerleave", () => {
+        if (!helpPinned && !helpWrap.contains(document.activeElement))
+          showHelp(false);
+      });
+      helpWrap.addEventListener("focusin", () => showHelp(true));
+      helpWrap.addEventListener("focusout", (event) => {
+        if (!helpPinned && !helpWrap.contains(event.relatedTarget))
+          showHelp(false);
+      });
+      document.addEventListener("pointerdown", (event) => {
+        if (!helpWrap.contains(event.target)) {
+          helpPinned = false;
+          showHelp(false);
+        }
       });
       document.addEventListener("keydown", (event) => {
         if (event.key === "Escape") {
-          const kind = pending?.kind;
-          clearPending();
-          if (kind) announce(kind, "Connection cancelled.");
+          cancel();
+          helpPinned = false;
+          showHelp(false);
+          announce("Cancelled.");
         }
       });
-      window.addEventListener("blur", () => {
-        dragging = null;
-        clearPending();
-      });
-      document.querySelectorAll("[data-view]").forEach((button) =>
-        button.addEventListener("click", () => {
-          clearPending();
-          document
-            .querySelectorAll("[data-view]")
-            .forEach((b) =>
-              b.setAttribute("aria-pressed", String(b === button)),
-            );
-          for (const id of ["slots", "connections", "flow"])
-            $("#" + id).hidden = id !== button.dataset.view;
-          draw(button.dataset.view);
-        }),
-      );
+      document.addEventListener("pointercancel", cancel);
+      window.addEventListener("blur", cancel);
       window.addEventListener("resize", () => {
-        draw("connections");
-        draw("flow");
+        cancel();
+        draw();
       });
-      renderSlots();
-      renderConnections();
-      renderFlow();
+      reset();
     </script>
   </body>
 </html>
