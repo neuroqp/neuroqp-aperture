@@ -1,0 +1,576 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <title>Aperture · Color panel layouts</title>
+    <style>
+      :root {
+        color-scheme: light;
+        font:
+          14px "Cantarell",
+          "Segoe UI",
+          sans-serif;
+        color: #312938;
+        background: #f5f2f6;
+      }
+      * {
+        box-sizing: border-box;
+      }
+      body {
+        margin: 0;
+      }
+      main {
+        max-width: 1540px;
+        margin: auto;
+        padding: 30px;
+      }
+      header {
+        border-bottom: 1px solid #d9d1de;
+        padding-bottom: 18px;
+      }
+      header span {
+        color: #6c3e89;
+        font-weight: 600;
+      }
+      h1 {
+        font-size: 27px;
+        font-weight: 550;
+        margin: 22px 0 8px;
+        letter-spacing: -0.6px;
+      }
+      p {
+        line-height: 1.55;
+      }
+      .intro {
+        margin: 0 0 28px;
+        color: #716579;
+        max-width: 780px;
+      }
+      .layouts {
+        display: grid;
+        grid-template-columns: repeat(3, minmax(0, 1fr));
+        gap: 24px;
+        align-items: start;
+      }
+      .description {
+        min-height: 84px;
+      }
+      h2 {
+        font-size: 17px;
+        font-weight: 600;
+        margin: 0 0 6px;
+      }
+      .description p {
+        margin: 0;
+        color: #716579;
+        font-size: 13px;
+      }
+      .panel {
+        background: #fcfafc;
+        border: 1px solid #d9d1de;
+        border-radius: 9px;
+        overflow: hidden;
+      }
+      .panel-heading {
+        padding: 15px 16px;
+        border-bottom: 1px solid #e4dde8;
+      }
+      .line {
+        display: flex;
+        align-items: center;
+        justify-content: space-between;
+        gap: 8px;
+      }
+      h3 {
+        font-size: 15px;
+        margin: 0;
+        font-weight: 600;
+      }
+      .note {
+        color: #716579;
+        font-size: 12px;
+        margin: 8px 0 0;
+      }
+      button,
+      select,
+      input {
+        font: inherit;
+        color: inherit;
+      }
+      button,
+      select {
+        min-height: 31px;
+        border: 1px solid #d6cadd;
+        border-radius: 5px;
+        background: #f7f1fa;
+        padding: 4px 8px;
+      }
+      button {
+        cursor: pointer;
+      }
+      button:hover {
+        background: #ede3f3;
+      }
+      button[aria-pressed="true"] {
+        background: #6c3e89;
+        border-color: #6c3e89;
+        color: #fff;
+      }
+      button:disabled,
+      select:disabled {
+        opacity: 0.5;
+        cursor: default;
+      }
+      :focus-visible {
+        outline: 2px solid #ac540d;
+        outline-offset: 3px;
+      }
+      input[type="checkbox"] {
+        width: 16px;
+        height: 16px;
+        accent-color: #6c3e89;
+        margin: 0;
+      }
+      .solo-bar {
+        background: #efe6f4;
+        padding: 10px 16px;
+        display: flex;
+        gap: 8px;
+        flex-wrap: wrap;
+        align-items: center;
+        justify-content: space-between;
+        font-size: 12px;
+      }
+      .channel {
+        padding: 12px 14px;
+        border-bottom: 1px solid #e4dde8;
+      }
+      .channel.selected {
+        background: #f0eaf4;
+      }
+      .row {
+        display: grid;
+        grid-template-columns: 18px minmax(0, 1fr) auto;
+        gap: 10px;
+        align-items: center;
+      }
+      .name {
+        display: flex;
+        align-items: baseline;
+        gap: 8px;
+        min-width: 0;
+      }
+      .name small {
+        color: #716579;
+        font-size: 11px;
+      }
+      .select-channel {
+        padding: 5px 0;
+        border: 0;
+        background: transparent;
+        text-align: left;
+        font-weight: 600;
+        min-width: 0;
+      }
+      .select-channel:hover {
+        background: transparent;
+        text-decoration: underline;
+      }
+      .select-channel[aria-pressed="true"] {
+        background: transparent;
+        color: #6c3e89;
+      }
+      .color-line {
+        margin: 9px 0 0 28px;
+        display: flex;
+        gap: 8px;
+        align-items: center;
+        flex-wrap: wrap;
+      }
+      .swatch {
+        width: 14px;
+        height: 14px;
+        border: 1px solid #85798c;
+        border-radius: 50%;
+        flex-shrink: 0;
+      }
+      select {
+        background: #fff;
+        max-width: 100%;
+      }
+      .color-line select {
+        flex: 1;
+        min-width: 90px;
+      }
+      input[type="color"] {
+        width: 32px;
+        height: 29px;
+        padding: 2px;
+        background: #fff;
+        border: 1px solid #d6cadd;
+        border-radius: 4px;
+      }
+      .hex {
+        font-size: 12px;
+        font-variant-numeric: tabular-nums;
+      }
+      .adjust {
+        padding: 16px;
+      }
+      .adjust h4 {
+        margin: 0 0 15px;
+        font-size: 13px;
+        font-weight: 600;
+      }
+      .slider {
+        display: block;
+        margin: 0 0 13px;
+      }
+      .slider .line {
+        margin-bottom: 5px;
+        font-size: 12px;
+      }
+      output {
+        font-variant-numeric: tabular-nums;
+        color: #6c3e89;
+      }
+      input[type="range"] {
+        display: block;
+        width: 100%;
+        accent-color: #6c3e89;
+        margin: 0;
+        height: 18px;
+      }
+      .endpoints {
+        display: flex;
+        justify-content: space-between;
+        font-size: 11px;
+        color: #716579;
+        margin-top: 3px;
+      }
+      .card-channel .adjust {
+        padding: 16px 0 0 28px;
+      }
+      .card-channel .adjust button {
+        font-size: 12px;
+      }
+      .footer {
+        padding: 13px 16px;
+        background: #f7f3f9;
+        font-size: 12px;
+        line-height: 1.6;
+        min-height: 72px;
+      }
+      .footer strong {
+        font-weight: 600;
+      }
+      .footer p {
+        margin: 3px 0 0;
+      }
+      .slot {
+        padding: 11px 16px;
+        border-bottom: 1px solid #e4dde8;
+      }
+      .slot-top {
+        display: grid;
+        grid-template-columns: 86px minmax(0, 1fr) auto;
+        gap: 8px;
+        align-items: center;
+      }
+      .slot-label {
+        display: flex;
+        align-items: center;
+        gap: 7px;
+        font-size: 13px;
+      }
+      .slot details {
+        margin-top: 9px;
+      }
+      summary {
+        color: #6c3e89;
+        cursor: pointer;
+        font-size: 12px;
+        padding: 3px 0;
+      }
+      .slot .adjust {
+        padding: 12px 0 0;
+      }
+      .slot-help {
+        padding: 12px 16px;
+        margin: 0;
+        font-size: 12px;
+        color: #716579;
+      }
+      @media (max-width: 1150px) {
+        .layouts {
+          grid-template-columns: repeat(2, minmax(0, 1fr));
+        }
+      }
+      @media (max-width: 760px) {
+        main {
+          padding: 20px 12px;
+        }
+        .layouts {
+          grid-template-columns: minmax(0, 1fr);
+          gap: 28px;
+        }
+        .description {
+          min-height: 0;
+          margin-bottom: 14px;
+        }
+      }
+    </style>
+  </head>
+  <body>
+    <main>
+      <header><span>NeuroQP Aperture</span> / Color studies</header>
+      <h1>Three ways to arrange Color</h1>
+      <p class="intro">
+        Try the controls in each panel. Each layout keeps its own settings. This
+        is a UI mock with four example channels, no image or image processing.
+      </p>
+      <div class="layouts">
+        <section aria-labelledby="list-title">
+          <div class="description">
+            <h2 id="list-title">Channel list</h2>
+            <p>
+              Select a channel, then adjust it below. All colors stay in view.
+            </p>
+          </div>
+          <div class="panel" id="list"></div>
+        </section>
+        <section aria-labelledby="cards-title">
+          <div class="description">
+            <h2 id="cards-title">Channel cards</h2>
+            <p>Keep every channel's adjustments beside its name and color.</p>
+          </div>
+          <div class="panel" id="cards"></div>
+        </section>
+        <section aria-labelledby="slots-title">
+          <div class="description">
+            <h2 id="slots-title">Output-color slots</h2>
+            <p>Start with a display color, then choose its source channel.</p>
+          </div>
+          <div class="panel" id="slots"></div>
+        </section>
+      </div>
+    </main>
+    <script>
+      const palette = {
+        Red: "#ee3838",
+        Green: "#39b54a",
+        Blue: "#4464ee",
+        Cyan: "#22bbca",
+        Magenta: "#d641b5",
+        Yellow: "#e9c82b",
+        Gray: "#a5a5a5",
+      };
+      const names = ["DAPI", "GFP", "Alexa 647", "Transmitted"];
+      const defaults = ["Blue", "Green", "Magenta", "Gray"];
+      const panels = {};
+      function initialize(kind) {
+        panels[kind] = {
+          selected: 1,
+          solo: null,
+          items:
+            kind === "slots"
+              ? Object.keys(palette).map((color) => ({
+                  color,
+                  source: defaults.slice(0, 3).indexOf(color),
+                  brightness: 0,
+                  contrast: 100,
+                  expanded: false,
+                }))
+              : names.map((name, i) => ({
+                  name,
+                  color: defaults[i],
+                  custom: "#a867c8",
+                  visible: i < 3,
+                  brightness: 0,
+                  contrast: 100,
+                })),
+        };
+      }
+      const sourceName = (i) => `C${i + 1} · ${names[i]}`;
+      function colorName(item) {
+        return item.color === "Custom" ? item.custom.toUpperCase() : item.color;
+      }
+      function controls(kind, item, i) {
+        return `<div class="adjust">
+          ${kind === "list" ? `<h4>Adjusting ${sourceName(i)}</h4>` : ""}
+          <label class="slider"><span class="line"><span>Brightness</span><output>${item.brightness > 0 ? "+" : ""}${item.brightness}</output></span>
+            <input type="range" min="-100" max="100" value="${item.brightness}" data-index="${i}" data-field="brightness" aria-label="${kind === "slots" ? item.color : names[i]} brightness" />
+            <span class="endpoints"><span>Darker</span><span>Brighter</span></span>
+          </label>
+          <label class="slider"><span class="line"><span>Contrast</span><output>${item.contrast}%</output></span>
+            <input type="range" min="0" max="200" value="${item.contrast}" data-index="${i}" data-field="contrast" aria-label="${kind === "slots" ? item.color : names[i]} contrast" />
+            <span class="endpoints"><span>Lower</span><span>Higher</span></span>
+          </label>
+          <button data-action="reset-item" data-index="${i}" aria-label="Reset ${kind === "slots" ? item.color : names[i]} adjustments">Reset adjustments</button>
+        </div>`;
+      }
+      function colorControl(item, i) {
+        return `<div class="color-line">
+          <span class="swatch" style="background:${item.color === "Custom" ? item.custom : palette[item.color]}" aria-hidden="true"></span>
+          <select data-index="${i}" data-field="color" aria-label="${names[i]} display color">
+            ${[...Object.keys(palette), "Custom"].map((color) => `<option ${item.color === color ? "selected" : ""}>${color}</option>`).join("")}
+          </select>
+          ${item.color === "Custom" ? `<input type="color" value="${item.custom}" data-index="${i}" data-field="custom" aria-label="${names[i]} custom color" /><span class="hex">${item.custom.toUpperCase()}</span>` : ""}
+        </div>`;
+      }
+      function onlyButton(state, i, disabled = false) {
+        return `<button data-action="solo" data-index="${i}" aria-label="Only ${state.items[i].name || state.items[i].color}" aria-pressed="${state.solo === i}" ${disabled ? "disabled" : ""}>Only</button>`;
+      }
+      function summary(kind) {
+        const state = panels[kind];
+        const visible = state.items.filter((item, i) =>
+          state.solo !== null
+            ? state.solo === i
+            : kind === "slots"
+              ? item.source >= 0
+              : item.visible,
+        );
+        return visible.length
+          ? visible
+              .map(
+                (item) =>
+                  `${kind === "slots" ? names[item.source] : item.name} → ${colorName(item)}`,
+              )
+              .join("; ")
+          : "None. Enable a channel to show it.";
+      }
+      function render(kind) {
+        const root = document.getElementById(kind);
+        const state = panels[kind];
+        const focus = root.contains(document.activeElement)
+          ? document.activeElement
+          : null;
+        const focusKey = focus
+          ? ["action", "field", "index"]
+              .filter((key) => focus.dataset[key] !== undefined)
+              .map((key) => `[data-${key}="${focus.dataset[key]}"]`)
+              .join("")
+          : "";
+        root.innerHTML = `<div class="panel-heading"><div class="line"><h3>Color</h3><button data-action="reset-all">Reset all</button></div><p class="note">Display only · Original pixels unchanged</p></div>
+          ${state.solo !== null ? `<div class="solo-bar"><span>Only ${kind === "slots" ? state.items[state.solo].color : names[state.solo]}</span><button data-action="restore">Back to composite</button></div>` : ""}
+          ${
+            kind === "slots"
+              ? state.items
+                  .map(
+                    (item, i) => `<div class="slot">
+            <div class="slot-top"><label class="slot-label" for="source-${i}"><span class="swatch" style="background:${palette[item.color]}" aria-hidden="true"></span>${item.color}</label>
+            <select id="source-${i}" data-index="${i}" data-field="source" aria-label="${item.color} source channel"><option value="-1">None</option>${names.map((name, n) => `<option value="${n}" ${item.source === n ? "selected" : ""}>${sourceName(n)}</option>`).join("")}</select>
+            ${onlyButton(state, i, item.source < 0)}</div>
+            ${item.source >= 0 ? `<details data-index="${i}" ${item.expanded ? "open" : ""}><summary>Brightness & contrast</summary>${controls(kind, item, i)}</details>` : ""}
+          </div>`,
+                  )
+                  .join("") +
+                '<p class="slot-help">Choose None to hide a slot. The same source can feed several colors; each slot has its own adjustments.</p>'
+              : state.items
+                  .map(
+                    (
+                      item,
+                      i,
+                    ) => `<div class="channel ${kind === "cards" ? "card-channel" : ""} ${kind === "list" && state.selected === i ? "selected" : ""}">
+            <div class="row"><input type="checkbox" data-index="${i}" data-field="visible" aria-label="Show ${item.name}" ${state.solo === null ? (item.visible ? "checked" : "") : state.solo === i ? "checked" : ""} ${state.solo !== null ? "disabled" : ""} />
+            <div class="name">${kind === "list" ? `<button class="select-channel" data-action="select" data-index="${i}" aria-pressed="${state.selected === i}">${item.name}</button>` : `<strong>${item.name}</strong>`}<small>C${i + 1}</small></div>${onlyButton(state, i)}</div>
+            ${colorControl(item, i)}${kind === "cards" ? controls(kind, item, i) : ""}
+          </div>`,
+                  )
+                  .join("") +
+                (kind === "list"
+                  ? controls(kind, state.items[state.selected], state.selected)
+                  : "")
+          }
+          <div class="footer" role="status" aria-live="polite"><strong>Visible channels</strong><p>${summary(kind)}</p></div>`;
+        if (focusKey)
+          root.querySelector(focusKey)?.focus({ preventScroll: true });
+        root.querySelectorAll("details").forEach((details) =>
+          details.addEventListener("toggle", () => {
+            state.items[Number(details.dataset.index)].expanded = details.open;
+          }),
+        );
+      }
+      for (const kind of ["list", "cards", "slots"]) {
+        initialize(kind);
+        const root = document.getElementById(kind);
+        root.addEventListener("click", (event) => {
+          const button = event.target.closest("button[data-action]");
+          if (!button) return;
+          const state = panels[kind];
+          const i = Number(button.dataset.index);
+          const previousSolo = state.solo;
+          switch (button.dataset.action) {
+            case "select":
+              state.selected = i;
+              break;
+            case "solo":
+              state.solo = state.solo === i ? null : i;
+              break;
+            case "restore":
+              state.solo = null;
+              break;
+            case "reset-item":
+              state.items[i].brightness = 0;
+              state.items[i].contrast = 100;
+              break;
+            case "reset-all":
+              initialize(kind);
+              break;
+          }
+          render(kind);
+          if (button.dataset.action === "restore") {
+            root
+              .querySelector(
+                `[data-action="solo"][data-index="${previousSolo}"]`,
+              )
+              .focus({ preventScroll: true });
+          }
+        });
+        root.addEventListener("input", (event) => {
+          const input = event.target;
+          if (input.type !== "range" && input.type !== "color") return;
+          const item = panels[kind].items[Number(input.dataset.index)];
+          if (input.type === "range") {
+            item[input.dataset.field] = Number(input.value);
+            input.closest(".slider").querySelector("output").textContent =
+              input.dataset.field === "contrast"
+                ? `${input.value}%`
+                : `${Number(input.value) > 0 ? "+" : ""}${input.value}`;
+          } else {
+            item.custom = input.value;
+            input
+              .closest(".color-line")
+              .querySelector(".swatch").style.background = input.value;
+            input.closest(".color-line").querySelector(".hex").textContent =
+              input.value.toUpperCase();
+            root.querySelector(".footer p").textContent = summary(kind);
+          }
+        });
+        root.addEventListener("change", (event) => {
+          const input = event.target;
+          const field = input.dataset.field;
+          if (!field || input.type === "range" || input.type === "color")
+            return;
+          const state = panels[kind];
+          const item = state.items[Number(input.dataset.index)];
+          item[field] =
+            field === "visible"
+              ? input.checked
+              : field === "source"
+                ? Number(input.value)
+                : input.value;
+          if (
+            field === "source" &&
+            item.source < 0 &&
+            state.solo === Number(input.dataset.index)
+          )
+            state.solo = null;
+          render(kind);
+        });
+        render(kind);
+      }
+    </script>
+  </body>
+</html>
