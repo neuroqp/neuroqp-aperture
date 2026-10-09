@@ -1,16 +1,16 @@
 //! Explicit TIFF channel layouts. Ordinary pages never imply channels.
 use crate::backend::field;
-use serde::Serialize;
+use serde::{Deserialize, Serialize};
 
 pub const MAX_CHANNELS: u32 = 32;
 
-#[derive(Clone, Debug, Serialize)]
+#[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct Channel {
     pub name: String,
     pub color: String,
 }
 
-#[derive(Clone, Debug)]
+#[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct Plane {
     pub page: u32,
     pub band: u32,

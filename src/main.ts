@@ -1,5 +1,6 @@
 import OpenSeadragon from "openseadragon";
 import { convertFileSrc, invoke, isTauri } from "@tauri-apps/api/core";
+import { listen } from "@tauri-apps/api/event";
 import { getCurrentWindow } from "@tauri-apps/api/window";
 import { open, save, confirm } from "@tauri-apps/plugin-dialog";
 import { AnnotationViewer } from "./annotation-viewer";
@@ -535,6 +536,10 @@ const loader = new ImageLoader(
     open: (path) => invoke<ImageState>("open_image", { path }),
     state: () => invoke<ImageState | null>("image_state"),
     cancel: () => invoke("cancel_load"),
+    listen: native
+      ? (changed) =>
+          listen<ImageState>("image-state", (event) => changed(event.payload))
+      : undefined,
   },
   showImage,
   showError,

@@ -519,3 +519,93 @@ submitted frames at 2 / 3 ms and observed GPU completion at 5 / 6 ms, median / p
 over 30 edits. It recorded only lookup uploads, with zero source uploads,
 fetches or 2D readbacks. Presentation timing retains the limitations above.
 Native evidence remains ignored under `test-data/connection-range-*`.
+
+## First preview loading (October 9, 2026)
+
+The cache manifest restores dimensions, orientation, channels and native levels
+before launching readers. Manifest-less caches migrate through metadata discovery
+without rebuilding display pixels. Native `image-state` events deliver revisions
+immediately, with the 250 ms poll retained for recovery. Ordinary pyramid loading
+probes a suitable preview level first, then discovers remaining levels and prunes
+the cache after publishing the preview. Scientific channel identification remains
+before decoding to preserve channel/page semantics. Native detail requests wait
+until discovery is complete.
+
+The final Linux embedded debug binary passes 62 frontend tests, 35 Rust tests,
+TypeScript/Vite, Prettier, rustfmt and strict Clippy. Native WebKitWebDriver checks
+cover preview draws, cache reopen, five-channel metadata/rendering, cached pyramid
+Zoom/Fit, cancellation before preview and during detail, replacement during
+decoding, and corrupt-file recovery. The real SubIFD preview remains 617 by 463
+in both versions. SHA-256, size and modification time checks pass for all five
+real benchmark sources.
+
+### Native latency comparison
+
+Both versions use embedded assets and the real frontend, Rust commands, asset
+protocol and GPU drawer. Baseline is main at `e7e3b1c`, including channel/GPU
+rendering. Time starts when the harness supplies the accepted filename response
+to Open and ends after the drawer submits a decoded whole-image preview. Only
+the picker response is supplied; filename entry and picker interaction are
+excluded. This measures native rendering submission, not physical compositor
+presentation. A following animation frame and framebuffer sample are recorded.
+The 10 ms diagnostic state poll is only an approximate backend timestamp.
+
+Medians use five fresh and five completed-cache reopens per ordinary input.
+Fresh means the completed app cache was cleared; OS caches were uncontrolled.
+The app was already launched, the native window was unfocused, and no competing
+builds or decoding ran during timed comparisons.
+
+| Input                                           | Fresh baseline / updated | Cached baseline / updated |
+| ----------------------------------------------- | -----------------------: | ------------------------: |
+| 65 by 49 PNG fixture                            |             295 / 225 ms |               294 / 53 ms |
+| 0.92 MB PNG, 1024 by 1024                       |             312 / 266 ms |               315 / 83 ms |
+| 219.6 MB stripped RGB TIFF, 9878 by 7410        |             809 / 523 ms |               307 / 64 ms |
+| 64.9 MB Deflate uint16 TIFF, 8610 by 5879       |            1072 / 765 ms |               337 / 74 ms |
+| 3.1 MB RGB SubIFD pyramid, 9878 by 7410         |            1325 / 292 ms |              1091 / 69 ms |
+| 2.53 GB stripped uint16 BigTIFF, 43054 by 29398 |           3370 / 2971 ms |      not compared / 56 ms |
+
+The GB baseline has three preview-only trials, the update five. One further full
+conversion verified completed-cache reuse, followed by five warm-only reopens.
+The first baseline GB trial took 5718 ms, versus 3110 and 3370 ms afterward;
+uncontrolled OS caching prevents attributing all of that difference to this PR.
+An uncached flat GB overview still takes about three seconds. Cached GB samples
+were 227 ms on the first open in a new app session, then 94, 56, 53 and 48 ms.
+
+Small five-band and five-page ImageJ fixtures take 1869 and 2127 ms fresh and
+100 and 99 ms cached over three trials each. Baseline single trials were
+2684/607 and 2855/849 ms, fresh/cached. These establish correctness and direction,
+but are not equivalent five-trial comparisons.
+
+### Iteration and remaining limits
+
+Standalone backend notification measurements over ten warm trials reached
+0.57 ms for PNG, 0.81 ms for the native pyramid, and approximately 1.01 ms for
+five-channel files. Preview asset reads were approximately 0.03 ms. Native warm
+latency now mostly comes from IPC, small display-asset decoding/upload and frame
+scheduling. Further cache lookup/notification tuning has little headroom.
+Shortening subprocess checks from 10 to 2 ms helped command-heavy channel loads;
+the native results above use the final interval. An early iteration chose an
+overly small pyramid level; it was corrected before the final comparison.
+
+Fresh ordinary images still incur executable startup and decoding. Scientific
+previews run several sequential commands per channel. Flat TIFFs without an
+overview require substantial source scanning/downsampling. Potential follow-ups
+are independent persistence of a preview when detail is cancelled, combining
+channel decoding operations, and a deliberately partial first view for flat GB
+files. These are not implemented. Preview caches currently become reusable only
+after complete display-cache promotion succeeds.
+
+The preview workspace has a 1 GiB watchdog; the root resumes its 2 GiB watchdog
+after pruning. Existing cache plus workspace may transiently approach 3 GiB,
+plus writes between 500 ms checks. Neither bound is instantaneous. This changes
+the previous pre-preview root-budget behavior and avoids recursively walking
+every cached tile before first pixels. Active caches are pinned against eviction.
+
+Run `python3 scripts/benchmark-loading.py --help` for the reusable native benchmark.
+Start `tauri-driver` with a dedicated `XDG_CACHE_HOME` under the output directory,
+for example ports 4445 and 4446. Ignored evidence under `artifacts/` includes
+`baseline-final-native.json`, `final-native.json`, `baseline-big-native.json`,
+`final-big-native.json`, `final-big-complete-native.json`, `final-big-warm-native.json`,
+`final-channels-native.json`, screenshots and `final-loading-regressions.json`.
+Windows/macOS, release-build timings, cold OS caches, peak RSS and physical
+presentation latency were not measured in this follow-up.

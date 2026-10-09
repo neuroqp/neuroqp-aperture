@@ -8,7 +8,7 @@ mod tiff_annotations;
 
 use backend::{Backend, ImageState};
 use std::sync::atomic::Ordering;
-use tauri::{Manager, State};
+use tauri::{Emitter, Manager, State};
 
 #[tauri::command]
 fn open_image(path: String, backend: State<'_, Backend>) -> Result<ImageState, String> {
@@ -126,7 +126,12 @@ fn main() {
         .plugin(tauri_plugin_dialog::init())
         .setup(|app| {
             let root = app.path().app_cache_dir()?.join("display-v2");
-            app.manage(Backend::new(root).map_err(std::io::Error::other)?);
+            let mut backend = Backend::new(root).map_err(std::io::Error::other)?;
+            let handle = app.handle().clone();
+            backend.set_notifier(move |state| {
+                let _ = handle.emit("image-state", state);
+            });
+            app.manage(backend);
             Ok(())
         })
         .invoke_handler(tauri::generate_handler![
