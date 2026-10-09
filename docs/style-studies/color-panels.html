@@ -130,24 +130,15 @@
         margin-top: 5px;
       }
       .patch {
-        height: 286px;
+        height: 262px;
         position: relative;
         touch-action: none;
         user-select: none;
       }
-      .patch-labels {
-        position: absolute;
-        inset: 12px 14px auto;
-        display: flex;
-        justify-content: space-between;
-        color: #84728d;
-        font-size: 10px;
-        pointer-events: none;
-      }
       .inputs,
       .outputs {
         position: absolute;
-        top: 36px;
+        top: 12px;
         bottom: 12px;
         display: flex;
         flex-direction: column;
@@ -294,8 +285,7 @@
         border-radius: 50%;
         background: #fcfafc;
       }
-      .terminal.connected .dot::after,
-      .terminal[data-color] .dot::after {
+      .terminal.connected .dot::after {
         background: var(--port-color, #967ba7);
         border-color: var(--port-color, #967ba7);
       }
@@ -308,7 +298,7 @@
         box-shadow: 0 0 0 3px #e6dced;
       }
       .terminal[data-color] .dot::after {
-        border-color: #a294aa;
+        border-color: var(--port-color);
       }
       .wires {
         position: absolute;
@@ -472,9 +462,6 @@
         </div>
         <div id="patch" class="patch">
           <svg id="wires" class="wires" aria-label="Channel connections"></svg>
-          <div class="patch-labels">
-            <span>Channels</span><span>Colors</span>
-          </div>
           <div id="inputs" class="inputs"></div>
           <div id="outputs" class="outputs"></div>
         </div>
@@ -634,7 +621,7 @@
           .map(([color, hex]) => {
             const name = colorName(hex),
               custom = name.endsWith("-ish");
-            return `<button class="terminal ${current?.color === color ? "selected" : ""}" data-color="${color}" style="--port-color:${hex}" aria-label="${name}, ${hex}. Connect or edit color" aria-haspopup="dialog"><span class="dot" aria-hidden="true"></span><span class="color-label"><span>${name}</span>${custom ? `<small>${hex.toUpperCase()}</small>` : ""}</span></button>`;
+            return `<button class="terminal ${edges.some((edge) => edge.color === color) ? "connected" : ""} ${current?.color === color ? "selected" : ""}" data-color="${color}" style="--port-color:${hex}" aria-label="${name}, ${hex}. Connect or edit color" aria-haspopup="dialog"><span class="dot" aria-hidden="true"></span><span class="color-label"><span>${name}</span>${custom ? `<small>${hex.toUpperCase()}</small>` : ""}</span></button>`;
           })
           .join("");
       }
