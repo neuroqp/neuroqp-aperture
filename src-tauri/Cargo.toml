@@ -12,13 +12,20 @@ tauri = { version = "2", features = [] }
 tauri-plugin-dialog = "2"
 tauri-plugin-single-instance = "2"
 serde = { version = "1", features = ["derive"] }
+serde_json = "1"
 tokio = { version = "1", features = ["sync", "time"] }
+libvips = "2.3.0"
 
 [features]
 custom-protocol = ["tauri/custom-protocol"]
 
 [profile.dev]
 debug = 0
+
+# Native preview loops need optimization in the desktop development build too.
+# Keep dependencies at their usual dev settings to avoid rebuilding the stack.
+[profile.dev.package.aperture]
+opt-level = 2
 
 [profile.release]
 strip = true

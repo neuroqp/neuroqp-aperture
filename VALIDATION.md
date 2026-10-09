@@ -519,3 +519,224 @@ submitted frames at 2 / 3 ms and observed GPU completion at 5 / 6 ms, median / p
 over 30 edits. It recorded only lookup uploads, with zero source uploads,
 fetches or 2D readbacks. Presentation timing retains the limitations above.
 Native evidence remains ignored under `test-data/connection-range-*`.
+
+## First preview loading (October 9, 2026)
+
+The cache manifest restores dimensions, orientation, channels and native levels
+before launching readers. Manifest-less caches migrate through metadata discovery
+without rebuilding display pixels. Native `image-state` events deliver revisions
+immediately, with the 250 ms poll retained for recovery. Ordinary pyramid loading
+probes a suitable preview level first, then discovers remaining levels and prunes
+the cache after publishing the preview. Scientific channel identification remains
+before decoding to preserve channel/page semantics. Native detail requests wait
+until discovery is complete.
+
+The final Linux embedded debug binary passes 62 frontend tests, 35 Rust tests,
+TypeScript/Vite, Prettier, rustfmt and strict Clippy. Native WebKitWebDriver checks
+cover preview draws, cache reopen, five-channel metadata/rendering, cached pyramid
+Zoom/Fit, cancellation before preview and during detail, replacement during
+decoding, and corrupt-file recovery. The real SubIFD preview remains 617 by 463
+in both versions. SHA-256, size and modification time checks pass for all five
+real benchmark sources.
+
+### Native latency comparison
+
+Both versions use embedded assets and the real frontend, Rust commands, asset
+protocol and GPU drawer. Baseline is main at `e7e3b1c`, including channel/GPU
+rendering. Time starts when the harness supplies the accepted filename response
+to Open and ends after the drawer submits a decoded whole-image preview. Only
+the picker response is supplied; filename entry and picker interaction are
+excluded. This measures native rendering submission, not physical compositor
+presentation. A following animation frame and framebuffer sample are recorded.
+The 10 ms diagnostic state poll is only an approximate backend timestamp.
+
+Medians use five fresh and five completed-cache reopens per ordinary input.
+Fresh means the completed app cache was cleared; OS caches were uncontrolled.
+The app was already launched, the native window was unfocused, and no competing
+builds or decoding ran during timed comparisons.
+
+| Input                                           | Fresh baseline / updated | Cached baseline / updated |
+| ----------------------------------------------- | -----------------------: | ------------------------: |
+| 65 by 49 PNG fixture                            |             295 / 225 ms |               294 / 53 ms |
+| 0.92 MB PNG, 1024 by 1024                       |             312 / 266 ms |               315 / 83 ms |
+| 219.6 MB stripped RGB TIFF, 9878 by 7410        |             809 / 523 ms |               307 / 64 ms |
+| 64.9 MB Deflate uint16 TIFF, 8610 by 5879       |            1072 / 765 ms |               337 / 74 ms |
+| 3.1 MB RGB SubIFD pyramid, 9878 by 7410         |            1325 / 292 ms |              1091 / 69 ms |
+| 2.53 GB stripped uint16 BigTIFF, 43054 by 29398 |           3370 / 2971 ms |      not compared / 56 ms |
+
+The GB baseline has three preview-only trials, the update five. One further full
+conversion verified completed-cache reuse, followed by five warm-only reopens.
+The first baseline GB trial took 5718 ms, versus 3110 and 3370 ms afterward;
+uncontrolled OS caching prevents attributing all of that difference to this PR.
+An uncached flat GB overview still takes about three seconds. Cached GB samples
+were 227 ms on the first open in a new app session, then 94, 56, 53 and 48 ms.
+
+Small five-band and five-page ImageJ fixtures take 1869 and 2127 ms fresh and
+100 and 99 ms cached over three trials each. Baseline single trials were
+2684/607 and 2855/849 ms, fresh/cached. These establish correctness and direction,
+but are not equivalent five-trial comparisons.
+
+### Iteration and remaining limits
+
+Standalone backend notification measurements over ten warm trials reached
+0.57 ms for PNG, 0.81 ms for the native pyramid, and approximately 1.01 ms for
+five-channel files. Preview asset reads were approximately 0.03 ms. Native warm
+latency now mostly comes from IPC, small display-asset decoding/upload and frame
+scheduling. Further cache lookup/notification tuning has little headroom.
+Shortening subprocess checks from 10 to 2 ms helped command-heavy channel loads;
+the native results above use the final interval. An early iteration chose an
+overly small pyramid level; it was corrected before the final comparison.
+
+Fresh ordinary images still incur executable startup and decoding. Scientific
+previews run several sequential commands per channel. Flat TIFFs without an
+overview require substantial source scanning/downsampling. Potential follow-ups
+are independent persistence of a preview when detail is cancelled, combining
+channel decoding operations, and a deliberately partial first view for flat GB
+files. These are not implemented. Preview caches currently become reusable only
+after complete display-cache promotion succeeds.
+
+The preview workspace has a 1 GiB watchdog; the root resumes its 2 GiB watchdog
+after pruning. Existing cache plus workspace may transiently approach 3 GiB,
+plus writes between 500 ms checks. Neither bound is instantaneous. This changes
+the previous pre-preview root-budget behavior and avoids recursively walking
+every cached tile before first pixels. Active caches are pinned against eviction.
+
+Run `python3 scripts/benchmark-loading.py --help` for the reusable native benchmark.
+Start `tauri-driver` with a dedicated `XDG_CACHE_HOME` under the output directory,
+for example ports 4445 and 4446. Ignored evidence under `artifacts/` includes
+`baseline-final-native.json`, `final-native.json`, `baseline-big-native.json`,
+`final-big-native.json`, `final-big-complete-native.json`, `final-big-warm-native.json`,
+`final-channels-native.json`, screenshots and `final-loading-regressions.json`.
+Windows/macOS, release-build timings, cold OS caches, peak RSS and physical
+presentation latency were not measured in this follow-up.
+
+## TIFF worker and targeted Rust previews, October 9, 2026
+
+This follow-up supersedes the previous section's pending shared-channel decoder
+and missing RSS measurements. TIFF operations now use Rust libvips 2.3 bindings
+in one image-scoped child, with native handles confined to its main thread.
+Metadata and subsequent native tile operations reuse compatible source handles;
+sequential loaders reopen after a consumed sink. Channel previews materialize
+each resized source page once before extracting its bands. `tiffinfo` remains
+a separate metadata-only process. Non-TIFF images retain the CLI path.
+
+Large ordinary uncompressed gray16 and RGB8 sRGB TIFFs use a positional-read Rust
+area reducer for their overview, with at most eight available CPU threads. The
+64-megapixel threshold limits the changed filter to images with measured benefit.
+Every source pixel contributes; input precision is retained until the existing
+display conversion. Classic/BigTIFF and both byte orders are supported. The
+parser falls back for compression, tiles/SubIFDs, multipage/channel layouts,
+alpha, nondefault orientation/FillOrder/predictor and incompatible sample types.
+Malformed reads fail. This overview deliberately differs from Lanczos; native
+detail and generated full-resolution pyramids still use libvips. The display
+cache key changes once to avoid reusing earlier overviews. Sources are untouched.
+
+### Strategy selection
+
+Standalone optimized Rust process medians for the 2.53 GB gray16 TIFF, three
+trials each, were 2329 / 1142 / 633 / 542 ms with 1 / 2 / 4 / 8 threads. Peak
+RSS was approximately 14 / 16 / 24 / 40 MiB. Thread outputs were identical.
+The initial unspecialized Rust loop took about 5350 ms and was rejected.
+The selected loop specializes unsigned16 accumulation and batches positional
+reads while partitioning the global output grid into independent row ranges.
+
+Native gray16 first-draw medians were 956 ms with four threads and 752 ms with
+eight, five trials each. Eight was selected from the tested budgets. The
+existing libvips thread experiment at 2 / 4 / 8 showed no substantial flat-GB
+gain; adding libvips threads alone does not remove its scanline/filter cost.
+
+For the 219.6 MB RGB TIFF, decode-plus-JPEG time in an initialized worker was
+261 ms through libvips, versus 771 / 404 / 239 / 168 ms through Rust with
+1 / 2 / 4 / 8 threads, three trials each. Four offered little benefit; eight
+was checked in the native app before selecting its route. Sparse nearest
+sampling was rejected: although about 38 ms process time on the GB file,
+its high-byte error against full-area reduction reached 174/255, p99 39.
+There is no sampled production branch.
+
+### Native measurements
+
+Hardware remains Core Ultra 9 185H, 31 GiB RAM, Arch, libvips 8.18.6. Embedded
+frontend debug binaries use optimized Aperture Rust code and unchanged dependency
+profiles. The baseline is the preceding `ab6cac4` build. The native WebDriver
+harness supplies the chooser's accepted result; IPC, decoding, asset fetches and
+the GPU drawer remain real. Time begins at accepted selection and ends at a
+draw submitting a complete image level. It is not physical display presentation.
+The harness also accepts a complete detail level if it arrives before the
+preview; reported runs drew previews. No completed app cache was reused for
+fresh trials. OS page caches were uncontrolled, so these are local, app-cache
+fresh measurements, not cold-disk or network-storage guarantees.
+
+| TIFF input                              | Previous first draw | Selected first draw | Fresh trials, previous / selected |
+| --------------------------------------- | ------------------: | ------------------: | --------------------------------: |
+| RGB8 stripped, 219.6 MB                 |              488 ms |              362 ms |                             3 / 5 |
+| Gray16 Deflate, 64.9 MB                 |             1060 ms |              684 ms |                             3 / 3 |
+| RGB SubIFD pyramid, 3.1 MB, 9878 × 7410 |              358 ms |              184 ms |                             3 / 3 |
+| Five-band interleaved, 0.80 MB          |             2832 ms |              237 ms |                             3 / 3 |
+| Five-page ImageJ channels, 0.80 MB      |             2067 ms |              246 ms |                             3 / 3 |
+| Gray16 stripped BigTIFF, 2.53 GB        |             2957 ms |              752 ms |                             3 / 5 |
+
+The GB trials cancel after the overview, excluding full-pyramid completion from
+first-preview timing. Other trials finish and then test cache reopen. Four-thread
+and selected eight-thread GB overviews were both 1024 × 699. RGB remains
+1024 × 768, and native-pyramid preview remains 617 × 463. Earlier measurements
+vary with the desktop workload; these small repeated series show the gain on
+this machine and should not be read as universal codec/storage guarantees.
+
+RSS is sampled every 50 ms through first draw, summing the validation driver's
+native app, WebKit and decoder descendants. Shared pages can be counted more
+than once, and brief peaks can be missed; this is not unique physical memory or
+a hard ceiling. GB baseline process-tree peaks were 703–706 MiB; selected eight
+thread peaks were 566–618 MiB, decoder 94–154 MiB. RGB selected process-tree peaks
+were 572–601 MiB, decoder 100–104 MiB. The persistent worker slightly increases
+some small-image peaks compared with the CLI baseline, while avoiding GB-scale
+allocation. Standalone Rust's ~40 MiB is not the complete application's memory.
+
+### Correctness and lifecycle
+
+44 Rust tests against the production worker executable and 62 frontend tests
+pass, along with frontend build, Prettier, rustfmt and strict Clippy. Coverage
+includes channel-plane intensity/high-byte checks, explicit ImageJ first-Z/T page order,
+ordinary multipage behavior, native pyramid/odd-edge geometry, unsupported
+OME/alpha layouts, both TIFF endian/directory variants, RGB noncontiguous strips,
+fractional full-area coverage, and source/cache fingerprint validation. A
+binding regression test compares gray16-to-JPEG display pixels at scale 1.
+Separate binding checks compared every decoded preview PNG pixel with the CLI
+for all five bands and all five ImageJ pages; the ignored reproducer is
+`artifacts/worker-check/check.py`.
+The binding's `get_coding` incorrectly calls the format getter in 2.3.0; the
+worker reads actual coding metadata instead. Native images use thread-local
+`Rc` handles, avoiding the binding's shallow native-pointer `Clone`.
+
+Native checks passed cancellation before GB preview and during detail,
+replacement with PNG, corrupted-file recovery, cached pyramid Zoom/Fit and
+five-channel Color rendering. Cancellation reached the reported cancelled
+state in about 24 ms and its decoder PID was reaped before replacement completed.
+Malformed/oversized protocol replies and unexpected EOF also reap the child.
+Completed generated pyramids release their decoder; native pyramids retain it
+for on-demand tiles. Source size, mtime and SHA256 checks remain unchanged.
+No generated data or native screenshots are committed.
+
+One preliminary fast-small measurement reached backend ready without a detected
+preview draw and was excluded, rather than inventing a time. A standalone five
+trial rerun and the complete repeated native matrix passed. The harness now
+checks complete level coverage and retains screenshots on timeout. Two transient
+WebDriver connection closures are retried only for inspection, never image-open
+mutations. Timings use the drawer's own timestamp, not inspection return time.
+
+### Remaining ceiling and next work
+
+Flat TIFFs still require source reads; compressed TIFFs still require codec
+work. Full-resolution generated pyramids remain separate background work after
+preview publication. More libvips threads did not solve flat TIFF latency.
+The current Rust route stops at eight threads; larger budgets were not measured.
+Cold storage, network disks, unusual metadata and unsupported layouts remain
+outside the fast-path benchmark. A useful next experiment is independently
+scheduled compressed strips with bounded buffers and area reduction, preserving
+predictors/channel semantics. For small images, pre-initializing a spare
+killable worker could remove library startup from the click path. Measure both
+before adding dependencies or changing the reader's supported formats.
+
+Repeat with `scripts/benchmark-loading.py`, a dedicated `XDG_CACHE_HOME` and
+`--driver-pid` for RSS. Use a separate D-Bus session when the normal app is open,
+so its single-instance guard and session are unaffected. Local ignored evidence
+is under `artifacts/worker-native/` and `artifacts/raw-strategies/`.

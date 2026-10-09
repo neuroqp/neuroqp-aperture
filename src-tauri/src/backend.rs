@@ -2,13 +2,14 @@ use crate::{
     channels::{self, Channel, Plane},
     native::{self, NativeLevel},
 };
-use serde::Serialize;
+use serde::{Deserialize, Serialize};
 use std::{
-    collections::hash_map::DefaultHasher,
+    cell::RefCell,
+    collections::{hash_map::DefaultHasher, HashMap},
     ffi::OsString,
     fs::{self, File},
     hash::{Hash, Hasher},
-    io::Read,
+    io::{Read, Seek, SeekFrom},
     path::{Path, PathBuf},
     process::{Command, Stdio},
     sync::{
@@ -16,7 +17,7 @@ use std::{
         Arc, Mutex,
     },
     thread,
-    time::{Duration, SystemTime, UNIX_EPOCH},
+    time::{Duration, Instant, SystemTime, UNIX_EPOCH},
 };
 
 pub const CACHE_LIMIT: u64 = 2 * 1024 * 1024 * 1024;
@@ -27,6 +28,7 @@ static NEXT_ID: AtomicU64 = AtomicU64::new(1);
 #[serde(rename_all = "camelCase")]
 pub struct ImageState {
     pub id: String,
+    pub revision: u64,
     pub name: String,
     pub width: u32,
     pub height: u32,
@@ -40,6 +42,8 @@ pub struct ImageState {
     pub channels: Vec<Channel>,
     pub channel_mode: bool,
 }
+
+type Notifier = Arc<dyn Fn(&ImageState) + Send + Sync>;
 
 pub struct Job {
     pub state: Mutex<ImageState>,
@@ -55,6 +59,11 @@ pub struct Job {
     root: PathBuf,
     cache_key: String,
     process_number: AtomicU64,
+    decoder: Mutex<Option<Arc<crate::decoder::Decoder>>>,
+    notifier: Option<Notifier>,
+    budget_check: Mutex<Instant>,
+    housekeeping: AtomicBool,
+    cache_access: Arc<Mutex<()>>,
 }
 
 pub struct Backend {
@@ -64,6 +73,8 @@ pub struct Backend {
     pub requests: AtomicU64,
     pub closing: AtomicBool,
     pub tile_slots: Arc<tokio::sync::Semaphore>,
+    notifier: Option<Notifier>,
+    cache_access: Arc<Mutex<()>>,
 }
 
 impl Backend {
@@ -92,7 +103,13 @@ impl Backend {
             closing: AtomicBool::new(false),
             requests: AtomicU64::new(0),
             tile_slots: Arc::new(tokio::sync::Semaphore::new(2)),
+            notifier: None,
+            cache_access: Arc::new(Mutex::new(())),
         })
+    }
+
+    pub fn set_notifier(&mut self, callback: impl Fn(&ImageState) + Send + Sync + 'static) {
+        self.notifier = Some(Arc::new(callback));
     }
 
     pub fn open(&self, path: &Path) -> Result<ImageState, String> {
@@ -116,7 +133,7 @@ impl Backend {
             return Err("Supported formats: JPEG, PNG, BMP, WebP, TIFF and BigTIFF.".into());
         }
         let mut hasher = DefaultHasher::new();
-        "aperture-display-v4-channels".hash(&mut hasher);
+        "aperture-display-v5-area-preview".hash(&mut hasher);
         source.hash(&mut hasher);
         metadata.len().hash(&mut hasher);
         #[cfg(unix)]
@@ -154,6 +171,7 @@ impl Backend {
         return Err("This proof of concept currently supports Linux only.".into());
         let initial = ImageState {
             id,
+            revision: 0,
             name: path
                 .file_name()
                 .unwrap_or(source.file_name().unwrap())
@@ -184,24 +202,38 @@ impl Backend {
             root: self.root.clone(),
             cache_key,
             process_number: AtomicU64::new(0),
+            decoder: Mutex::new(None),
+            notifier: self.notifier.clone(),
+            budget_check: Mutex::new(Instant::now()),
+            housekeeping: AtomicBool::new(false),
+            cache_access: self.cache_access.clone(),
         });
-        let mut current = self.current.lock().unwrap();
-        if let Some(old) = current.replace(job.clone()) {
+        let old = self.current.lock().unwrap().replace(job.clone());
+        if let Some(old) = old {
             old.cancel();
         }
-        drop(current);
         let mut workers = self.workers.lock().unwrap();
         workers.retain(|worker| !worker.is_finished());
         workers.push(thread::spawn(move || {
             if let Err(error) = load(&job) {
-                let mut state = job.state.lock().unwrap();
-                if !job.cancel.load(Ordering::Relaxed) {
+                job.update(|state| {
                     state.phase = "error".into();
                     state.error = Some(error);
                     state.detail = "Image loading failed.".into();
+                });
+            }
+            // Generated pyramids need no decoder once complete; native tiles do.
+            if job.native.lock().unwrap().is_empty() {
+                let decoder = job.decoder.lock().unwrap().take();
+                if let Some(decoder) = decoder {
+                    decoder.stop();
                 }
             }
             if job.cancel.load(Ordering::Relaxed) || job.state.lock().unwrap().phase == "error" {
+                let decoder = job.decoder.lock().unwrap().clone();
+                if let Some(decoder) = decoder {
+                    decoder.stop();
+                }
                 let dir = job.dir.lock().unwrap().clone();
                 if dir
                     .file_name()
@@ -224,7 +256,8 @@ impl Backend {
             .map(|job| job.state.lock().unwrap().clone())
     }
     pub fn cancel(&self) {
-        if let Some(job) = self.current.lock().unwrap().as_ref() {
+        let job = self.current.lock().unwrap().clone();
+        if let Some(job) = job {
             job.cancel();
         }
     }
@@ -242,22 +275,47 @@ impl Backend {
 
 impl Job {
     fn cancel(&self) {
-        self.cancel.store(true, Ordering::Relaxed);
-        let mut state = self.state.lock().unwrap();
-        state.phase = "cancelled".into();
-        state.detail = "Loading cancelled.".into();
-        state.progress = None;
+        let snapshot = {
+            let mut state = self.state.lock().unwrap();
+            if self.cancel.swap(true, Ordering::Relaxed) {
+                return;
+            }
+            state.phase = "cancelled".into();
+            state.detail = "Loading cancelled.".into();
+            state.progress = None;
+            state.revision += 1;
+            state.clone()
+        };
+        self.notify(&snapshot);
+        let decoder = self.decoder.lock().unwrap().clone();
+        if let Some(decoder) = decoder {
+            decoder.stop();
+        }
     }
     fn update(&self, action: impl FnOnce(&mut ImageState)) {
-        let mut state = self.state.lock().unwrap();
-        if !self.cancel.load(Ordering::Relaxed) {
+        let snapshot = {
+            let mut state = self.state.lock().unwrap();
+            if self.cancel.load(Ordering::Relaxed) {
+                return;
+            }
             action(&mut state);
+            state.revision += 1;
+            state.clone()
+        };
+        self.notify(&snapshot);
+    }
+    fn notify(&self, state: &ImageState) {
+        if let Some(notifier) = &self.notifier {
+            notifier(state);
         }
     }
 }
 
 impl Drop for Job {
     fn drop(&mut self) {
+        if let Some(decoder) = self.decoder.get_mut().unwrap().take() {
+            decoder.stop();
+        }
         let _ = fs::remove_dir_all(&self.work);
     }
 }
@@ -320,8 +378,191 @@ fn input(job: &Job, options: &str) -> OsString {
     OsString::from(format!("{}{}", job.input.display(), options))
 }
 
+#[derive(Serialize, Deserialize)]
+struct CacheManifest {
+    version: u32,
+    source_key: String,
+    tools: u64,
+    width: u32,
+    height: u32,
+    orientation: u8,
+    channels: Vec<Channel>,
+    channel_mode: bool,
+    planes: Vec<Plane>,
+    native: Vec<NativeLevel>,
+}
+
+// Metadata-only identity keeps a cache made with different decoder tools from
+// assuming that the installed reader still supports its native TIFF layout.
+fn tool_identity() -> u64 {
+    let mut hasher = DefaultHasher::new();
+    for program in ["vips", "vipsheader", "tiffinfo"] {
+        program.hash(&mut hasher);
+        for directory in std::env::split_paths(&std::env::var_os("PATH").unwrap_or_default()) {
+            let path = directory.join(program);
+            if let Ok(metadata) = fs::metadata(&path) {
+                if metadata.is_file() {
+                    path.hash(&mut hasher);
+                    metadata.len().hash(&mut hasher);
+                    metadata.modified().ok().hash(&mut hasher);
+                    #[cfg(unix)]
+                    {
+                        use std::os::unix::fs::MetadataExt;
+                        metadata.ctime().hash(&mut hasher);
+                        metadata.ctime_nsec().hash(&mut hasher);
+                    }
+                    break;
+                }
+            }
+        }
+    }
+    hasher.finish()
+}
+
+fn write_manifest(job: &Job, dir: &Path) -> Result<(), String> {
+    let state = job.state.lock().unwrap().clone();
+    let manifest = CacheManifest {
+        version: 1,
+        source_key: job.cache_key.clone(),
+        tools: tool_identity(),
+        width: state.width,
+        height: state.height,
+        orientation: state.orientation,
+        channels: state.channels,
+        channel_mode: state.channel_mode,
+        planes: job.planes.lock().unwrap().clone(),
+        native: job.native.lock().unwrap().clone(),
+    };
+    let bytes = serde_json::to_vec(&manifest).map_err(|error| error.to_string())?;
+    fs::write(dir.join("manifest.json"), bytes).map_err(|error| error.to_string())
+}
+
+fn cached_manifest(job: &Job, dir: &Path) -> Option<CacheManifest> {
+    if !dir.join("complete").is_file() || !valid_preview(&dir.join("preview.jpg"), false) {
+        return None;
+    }
+    let file = File::open(dir.join("manifest.json")).ok()?;
+    if file.metadata().ok()?.len() > 65536 {
+        return None;
+    }
+    let manifest: CacheManifest = serde_json::from_reader(file.take(65536)).ok()?;
+    if manifest.version != 1
+        || manifest.source_key != job.cache_key
+        || manifest.tools != tool_identity()
+        || !(1..=i32::MAX as u32).contains(&manifest.width)
+        || !(1..=i32::MAX as u32).contains(&manifest.height)
+        || !(1..=8).contains(&manifest.orientation)
+        || manifest.channels.is_empty()
+        || manifest.channels.len() > channels::MAX_CHANNELS as usize
+        || manifest.planes.len() != manifest.channels.len()
+        || manifest
+            .planes
+            .iter()
+            .any(|plane| plane.page >= 256 || plane.band >= channels::MAX_CHANNELS)
+        || manifest.native.len() > 29
+        || (!manifest.native.is_empty()
+            && !native::valid_cached_levels(&manifest.native, manifest.width, manifest.height))
+        || (manifest.channel_mode
+            && manifest.planes.iter().any(|plane| plane.page != 0)
+            && !manifest.native.is_empty())
+    {
+        return None;
+    }
+    if !valid_cache_assets(
+        dir,
+        manifest.channels.len(),
+        manifest.channel_mode,
+        !manifest.native.is_empty(),
+    ) {
+        return None;
+    }
+    Some(manifest)
+}
+
+fn valid_cache_assets(dir: &Path, channels: usize, channel_mode: bool, native: bool) -> bool {
+    dir.join("complete").is_file()
+        && valid_preview(&dir.join("preview.jpg"), false)
+        && if channel_mode {
+            (0..channels).all(|index| {
+                let channel = dir.join("channels").join(index.to_string());
+                valid_preview(&channel.join("preview.png"), true)
+                    && (native || channel.join("tiles_files").is_dir())
+            })
+        } else {
+            native || dir.join("tiles_files").is_dir()
+        }
+}
+
+fn valid_preview(path: &Path, png: bool) -> bool {
+    let Ok(mut file) = File::open(path) else {
+        return false;
+    };
+    let Ok(metadata) = file.metadata() else {
+        return false;
+    };
+    if !(16..=16 * 1024 * 1024).contains(&metadata.len()) {
+        return false;
+    }
+    let mut first = [0; 8];
+    let mut last = [0; 12];
+    if file.read_exact(&mut first).is_err()
+        || file.seek(SeekFrom::End(-12)).is_err()
+        || file.read_exact(&mut last).is_err()
+    {
+        return false;
+    }
+    if png {
+        first == *b"\x89PNG\r\n\x1a\n" && last == *b"\0\0\0\0IEND\xaeB`\x82"
+    } else {
+        first.starts_with(&[0xff, 0xd8]) && last.ends_with(&[0xff, 0xd9])
+    }
+}
+
+fn housekeeping(job: &Job) -> Result<(), String> {
+    let _access = job.cache_access.lock().unwrap();
+    if job.cancel.load(Ordering::Relaxed) {
+        return Err("Loading cancelled.".into());
+    }
+    let active = job.dir.lock().unwrap().clone();
+    prune_except(&job.root, CACHE_LIMIT / 2, Some(&active))?;
+    job.housekeeping.store(true, Ordering::Relaxed);
+    if tree_size(&job.root) > CACHE_LIMIT {
+        return Err("Display cache limit reached.".into());
+    }
+    Ok(())
+}
+
 fn load(job: &Arc<Job>) -> Result<(), String> {
-    prune(&job.root, CACHE_LIMIT)?;
+    let complete = job.root.join(&job.cache_key);
+    let manifest = {
+        let _access = job.cache_access.lock().unwrap();
+        if job.cancel.load(Ordering::Relaxed) {
+            return Err("Loading cancelled.".into());
+        }
+        let manifest = cached_manifest(job, &complete);
+        if let Some(manifest) = &manifest {
+            *job.native.lock().unwrap() = manifest.native.clone();
+            *job.planes.lock().unwrap() = manifest.planes.clone();
+            *job.dir.lock().unwrap() = complete.clone();
+        }
+        manifest
+    };
+    if let Some(manifest) = manifest {
+        job.update(|state| {
+            state.width = manifest.width;
+            state.height = manifest.height;
+            state.orientation = manifest.orientation;
+            state.channels = manifest.channels;
+            state.channel_mode = manifest.channel_mode;
+            state.preview_ready = true;
+            state.tiles_ready = true;
+            state.phase = "ready".into();
+            state.progress = Some(1.0);
+            state.detail = "Reused display cache. Source pixels unchanged.".into();
+        });
+        fs::write(complete.join("access"), b"").map_err(|e| e.to_string())?;
+        return housekeeping(job);
+    }
     let header = run(job, "vipsheader", &["-a".into(), input(job, "")])?;
     let (width, height) = validate_header(&header)?;
     let tiffinfo = if field(&header, "vips-loader") == Some("tiffload") {
@@ -351,11 +592,22 @@ fn load(job: &Arc<Job>) -> Result<(), String> {
             if pixel == "ushort" { 16 } else { 8 }
         );
     });
-    let levels = native::discover(
-        &header,
-        &|options| run(job, "vipsheader", &["-a".into(), input(job, options)]),
-        tiffinfo.as_deref(),
-    );
+    let headers = RefCell::new(HashMap::<String, Result<String, String>>::new());
+    let inspect = |options: &str| {
+        headers
+            .borrow_mut()
+            .entry(options.to_string())
+            .or_insert_with(|| run(job, "vipsheader", &["-a".into(), input(job, options)]))
+            .clone()
+    };
+    // Existing display bytes remain compatible. A legacy cache needs metadata
+    // discovery once, then gains the manifest without rereading its source pixels.
+    let legacy = complete.join("complete").is_file() && !complete.join("manifest.json").exists();
+    let levels = if layout.channel_mode || legacy {
+        native::discover(&header, &inspect, tiffinfo.as_deref())
+    } else {
+        native::discover_preview(&header, &inspect, tiffinfo.as_deref())
+    };
     // Channel-page hyperstacks cannot reuse page-zero resolutions for other pages.
     *job.native.lock().unwrap() = if layout.channel_mode
         && job
@@ -369,29 +621,40 @@ fn load(job: &Arc<Job>) -> Result<(), String> {
     } else {
         levels
     };
+    if legacy {
+        let reused = {
+            let _access = job.cache_access.lock().unwrap();
+            if job.cancel.load(Ordering::Relaxed) {
+                return Err("Loading cancelled.".into());
+            }
+            let state = job.state.lock().unwrap().clone();
+            let native = !job.native.lock().unwrap().is_empty();
+            if valid_cache_assets(&complete, state.channels.len(), state.channel_mode, native) {
+                write_manifest(job, &complete)?;
+                *job.dir.lock().unwrap() = complete.clone();
+                true
+            } else {
+                false
+            }
+        };
+        if reused {
+            job.update(|state| {
+                state.phase = "ready".into();
+                state.preview_ready = true;
+                state.tiles_ready = true;
+                state.progress = Some(1.0);
+                state.detail = "Reused display cache. Source pixels unchanged.".into();
+            });
+            fs::write(complete.join("access"), b"").map_err(|e| e.to_string())?;
+            return housekeeping(job);
+        }
+    }
     if layout.channel_mode {
         return load_channels(job, width, height, pixel == "ushort");
     }
     if job.cancel.load(Ordering::Relaxed) {
         return Err("Loading cancelled.".into());
     }
-    let complete = job.root.join(&job.cache_key);
-    if complete.join("complete").is_file()
-        && complete.join("preview.jpg").is_file()
-        && (!job.native.lock().unwrap().is_empty() || complete.join("tiles_files").is_dir())
-    {
-        fs::write(complete.join("access"), b"").map_err(|e| e.to_string())?;
-        *job.dir.lock().unwrap() = complete;
-        job.update(|s| {
-            s.phase = "ready".into();
-            s.preview_ready = true;
-            s.tiles_ready = true;
-            s.progress = Some(1.0);
-            s.detail = "Reused display cache. Source pixels unchanged.".into();
-        });
-        return Ok(());
-    }
-    prune(&job.root, CACHE_LIMIT / 2)?;
     let dir = job.dir.lock().unwrap().clone();
     let preview_partial = dir.join("preview.partial.jpg");
     // Explicit TIFF page=0 prevents unrelated pages from entering the displayed scene.
@@ -417,25 +680,57 @@ fn load(job: &Arc<Job>) -> Result<(), String> {
         ),
         None => (options.to_string(), scale),
     };
-    run(
-        job,
-        "vips",
-        &[
-            "resize".into(),
-            input(job, &preview_options),
-            OsString::from(format!(
-                "{}[Q=85,strip,background=52 54 51]",
-                preview_partial.display()
-            )),
-            preview_scale.to_string().into(),
-        ],
-    )?;
+    // Large, ordinary gray16/RGB8 strips use full-coverage area reduction. Other
+    // layouts retain libvips, and full-resolution detail always uses libvips.
+    let raw_preview = uses_worker(job)
+        && ((pixel == "ushort" && field(&header, "bands") == Some("1"))
+            || (pixel == "uchar"
+                && field(&header, "bands") == Some("3")
+                && field(&header, "interpretation") == Some("srgb")))
+        && u64::from(width) * u64::from(height) >= 64 * 1024 * 1024
+        && preview_options == options
+        && worker_call(
+            job,
+            &crate::vips_worker::Request::RawPreview {
+                input: job
+                    .input
+                    .to_str()
+                    .ok_or("Image decoder path is not UTF-8")?
+                    .into(),
+                output: preview_partial
+                    .to_str()
+                    .ok_or("Image decoder path is not UTF-8")?
+                    .into(),
+                max_edge: 1024,
+                threads: thread::available_parallelism()
+                    .map_or(1, |n| n.get())
+                    .min(8),
+            },
+        )? == "used";
+    if !raw_preview {
+        run(
+            job,
+            "vips",
+            &[
+                "resize".into(),
+                input(job, &preview_options),
+                OsString::from(format!(
+                    "{}[Q=85,strip,background=52 54 51]",
+                    preview_partial.display()
+                )),
+                preview_scale.to_string().into(),
+            ],
+        )?;
+    }
     fs::rename(preview_partial, dir.join("preview.jpg")).map_err(|e| e.to_string())?;
     job.update(|s| {
         s.preview_ready = true;
-        s.tiles_ready = true;
+        s.tiles_ready = false;
         s.detail = "Preview available. Sharper tiles are loading…".into();
     });
+    *job.native.lock().unwrap() = native::discover(&header, &inspect, tiffinfo.as_deref());
+    housekeeping(job)?;
+    job.update(|state| state.tiles_ready = true);
     if job.native.lock().unwrap().is_empty() {
         run(
             job,
@@ -455,8 +750,16 @@ fn load(job: &Arc<Job>) -> Result<(), String> {
     if job.cancel.load(Ordering::Relaxed) {
         return Err("Loading cancelled.".into());
     }
+    write_manifest(job, &dir)?;
     fs::write(dir.join("complete"), b"v2").map_err(|e| e.to_string())?;
     fs::write(dir.join("access"), b"").map_err(|e| e.to_string())?;
+    // Serialize promotion/eviction/cache selection. A replaced worker must never
+    // remove a cache selected by the next image job.
+    let access = job.cache_access.lock().unwrap();
+    if job.cancel.load(Ordering::Relaxed) {
+        return Err("Loading cancelled.".into());
+    }
+    let mut published = job.dir.lock().unwrap();
     // Keep a job-local source alias and temp directory for on-demand native tiles.
     let staging = job
         .root
@@ -464,6 +767,7 @@ fn load(job: &Arc<Job>) -> Result<(), String> {
     fs::create_dir(&staging).map_err(|e| e.to_string())?;
     for name in [
         "preview.jpg",
+        "manifest.json",
         "complete",
         "access",
         "tiles_files",
@@ -471,14 +775,20 @@ fn load(job: &Arc<Job>) -> Result<(), String> {
     ] {
         let source = dir.join(name);
         if source.exists() {
-            fs::rename(source, staging.join(name)).map_err(|e| e.to_string())?;
+            if name == "preview.jpg" {
+                fs::hard_link(source, staging.join(name)).map_err(|e| e.to_string())?;
+            } else {
+                fs::rename(source, staging.join(name)).map_err(|e| e.to_string())?;
+            }
         }
     }
     if complete.exists() {
         fs::remove_dir_all(&complete).map_err(|e| e.to_string())?;
     }
     fs::rename(staging, &complete).map_err(|e| e.to_string())?;
-    *job.dir.lock().unwrap() = complete;
+    *published = complete;
+    drop(published);
+    drop(access);
     job.update(|s| {
         s.phase = "ready".into();
         s.progress = Some(1.0);
@@ -552,82 +862,94 @@ fn load_channels(job: &Arc<Job>, width: u32, height: u32, ushort: bool) -> Resul
     let planes = job.planes.lock().unwrap().clone();
     let native = !job.native.lock().unwrap().is_empty();
     let complete = job.root.join(&job.cache_key);
-    if complete.join("complete").is_file()
-        && planes.iter().enumerate().all(|(index, _)| {
-            let channel = complete.join("channels").join(index.to_string());
-            channel.join("preview.png").is_file()
-                && (native || channel.join("tiles_files").is_dir())
-        })
-    {
-        fs::write(complete.join("access"), b"").map_err(|e| e.to_string())?;
-        *job.dir.lock().unwrap() = complete;
-        job.update(|state| {
-            state.phase = "ready".into();
-            state.preview_ready = true;
-            state.tiles_ready = true;
-            state.progress = Some(1.0);
-            state.detail = format!(
-                "Reused {}-channel display cache. First Z/T plane.",
-                planes.len()
-            );
-        });
-        return Ok(());
-    }
-    prune(&job.root, CACHE_LIMIT / 2)?;
     let dir = job.dir.lock().unwrap().clone();
-    for (index, plane) in planes.iter().enumerate() {
-        let channel = dir.join("channels").join(index.to_string());
-        fs::create_dir_all(&channel).map_err(|e| e.to_string())?;
-        let level = {
-            let levels = job.native.lock().unwrap();
-            levels
-                .iter()
-                .find(|level| level.width.max(level.height) <= 1024)
-                .or_else(|| levels.last())
-                .cloned()
-        };
-        let (options, scale) = match level {
-            Some(level) => (
-                level.options,
-                (1024.0 / level.width.max(level.height) as f64).min(1.0),
-            ),
-            None => (
-                format!("[page={},n=1,access=sequential]", plane.page),
-                (1024.0 / width.max(height) as f64).min(1.0),
-            ),
-        };
-        let resized = job.work.join(format!("preview-{index}.v"));
-        run(
+    let level = {
+        let levels = job.native.lock().unwrap();
+        levels
+            .iter()
+            .find(|level| level.width.max(level.height) <= 1024)
+            .or_else(|| levels.last())
+            .cloned()
+    };
+    if uses_worker(job) {
+        let (options, scale): (Vec<_>, Vec<_>) = planes
+            .iter()
+            .map(|plane| match &level {
+                Some(level) => (
+                    level.options.clone(),
+                    (1024.0 / level.width.max(level.height) as f64).min(1.0),
+                ),
+                None => (
+                    format!("[page={},n=1,access=sequential]", plane.page),
+                    (1024.0 / width.max(height) as f64).min(1.0),
+                ),
+            })
+            .unzip();
+        worker_call(
             job,
-            "vips",
-            &[
-                "resize".into(),
-                input(job, &options),
-                resized.clone().into_os_string(),
-                scale.to_string().into(),
-            ],
+            &crate::vips_worker::Request::ChannelPreviews {
+                input: job
+                    .input
+                    .to_str()
+                    .ok_or("Image decoder path is not UTF-8")?
+                    .into(),
+                options,
+                scale,
+                planes: planes.clone(),
+                ushort,
+                directory: dir
+                    .to_str()
+                    .ok_or("Image decoder path is not UTF-8")?
+                    .into(),
+            },
         )?;
-        let partial = channel.join("preview.partial.png");
-        extract_plane(
-            job,
-            resized.clone().into_os_string(),
-            plane.band,
-            &partial,
-            ushort,
-        )?;
-        let _ = fs::remove_file(resized);
-        fs::rename(partial, channel.join("preview.png")).map_err(|e| e.to_string())?;
-        if index == 0 {
-            // Display range histogram retains the first channel preview.
+    } else {
+        for (index, plane) in planes.iter().enumerate() {
+            let channel = dir.join("channels").join(index.to_string());
+            fs::create_dir_all(&channel).map_err(|e| e.to_string())?;
+            let (options, scale) = match &level {
+                Some(level) => (
+                    level.options.clone(),
+                    (1024.0 / level.width.max(level.height) as f64).min(1.0),
+                ),
+                None => (
+                    format!("[page={},n=1,access=sequential]", plane.page),
+                    (1024.0 / width.max(height) as f64).min(1.0),
+                ),
+            };
+            let resized = job.work.join(format!("preview-{index}.v"));
             run(
                 job,
                 "vips",
                 &[
-                    "copy".into(),
-                    channel.join("preview.png").into_os_string(),
-                    dir.join("preview.jpg").into_os_string(),
+                    "resize".into(),
+                    input(job, &options),
+                    resized.clone().into_os_string(),
+                    scale.to_string().into(),
                 ],
             )?;
+            let partial = channel.join("preview.partial.png");
+            extract_plane(
+                job,
+                resized.clone().into_os_string(),
+                plane.band,
+                &partial,
+                ushort,
+            )?;
+            let _ = fs::remove_file(resized);
+            fs::rename(partial, channel.join("preview.png")).map_err(|e| e.to_string())?;
+            if index == 0 {
+                // Display range histogram retains the first channel preview.
+                run(
+                    job,
+                    "vips",
+                    &[
+                        "copy".into(),
+                        channel.join("preview.png").into_os_string(),
+                        dir.join("preview.jpg").into_os_string(),
+                    ],
+                )?;
+            }
         }
     }
     job.update(|state| {
@@ -638,6 +960,7 @@ fn load_channels(job: &Arc<Job>, width: u32, height: u32, ushort: bool) -> Resul
             planes.len()
         );
     });
+    housekeeping(job)?;
     if !native {
         for (index, plane) in planes.iter().enumerate() {
             let normalized = job.work.join(format!("channel-{index}.v"));
@@ -671,20 +994,34 @@ fn load_channels(job: &Arc<Job>, width: u32, height: u32, ushort: bool) -> Resul
             });
         }
     }
+    write_manifest(job, &dir)?;
     fs::write(dir.join("complete"), b"channels-v1").map_err(|e| e.to_string())?;
     fs::write(dir.join("access"), b"").map_err(|e| e.to_string())?;
+    let access = job.cache_access.lock().unwrap();
+    if job.cancel.load(Ordering::Relaxed) {
+        return Err("Loading cancelled.".into());
+    }
+    let mut published = job.dir.lock().unwrap();
     let staging = job
         .root
         .join(format!("promote-{}", job.state.lock().unwrap().id));
     fs::create_dir(&staging).map_err(|e| e.to_string())?;
-    for name in ["preview.jpg", "channels", "complete", "access"] {
+    for name in [
+        "preview.jpg",
+        "channels",
+        "manifest.json",
+        "complete",
+        "access",
+    ] {
         fs::rename(dir.join(name), staging.join(name)).map_err(|e| e.to_string())?;
     }
     if complete.exists() {
         fs::remove_dir_all(&complete).map_err(|e| e.to_string())?;
     }
     fs::rename(staging, &complete).map_err(|e| e.to_string())?;
-    *job.dir.lock().unwrap() = complete;
+    *published = complete;
+    drop(published);
+    drop(access);
     job.update(|state| {
         state.phase = "ready".into();
         state.tiles_ready = true;
@@ -769,7 +1106,7 @@ fn read_channel_asset(job: &Arc<Job>, asset: Asset) -> Result<Vec<u8>, (u16, Str
             }
             _ => unreachable!(),
         };
-        if let Ok(bytes) = fs::read(path) {
+        if let Ok(bytes) = fs::read(&path) {
             if bytes.starts_with(b"\x89PNG\r\n\x1a\n") && bytes.ends_with(b"IEND\xaeB`\x82") {
                 return Ok(bytes);
             }
@@ -872,11 +1209,47 @@ fn native_channel_tile(
     result
 }
 
+// Before first pixels, count only this bounded preview workspace; prune and
+// count the persisted cache once the preview is visible. Short read-only metadata
+// commands then avoid repeatedly traversing thousands of cached display tiles.
+fn budget_exceeded(job: &Job, finished: bool) -> bool {
+    if !job.housekeeping.load(Ordering::Relaxed) {
+        if finished || job.budget_check.lock().unwrap().elapsed() >= Duration::from_millis(500) {
+            *job.budget_check.lock().unwrap() = Instant::now();
+            return tree_size(&job.work) > CACHE_LIMIT / 2;
+        }
+        return false;
+    }
+    let mut last = job.budget_check.lock().unwrap();
+    if !finished && last.elapsed() < Duration::from_millis(500) {
+        return false;
+    }
+    *last = Instant::now();
+    tree_size(&job.root) > CACHE_LIMIT
+}
+
 // Each decode lives in a killable process. libvips' operation cache is bounded;
 // codec memory is not a hard RSS limit and should be measured on representative files.
 pub(crate) fn run(job: &Job, program: &str, args: &[OsString]) -> Result<String, String> {
     if job.cancel.load(Ordering::Relaxed) {
         return Err("Loading cancelled.".into());
+    }
+    if uses_worker(job) && matches!(program, "vips" | "vipsheader") {
+        let args = args
+            .iter()
+            .map(|arg| {
+                arg.to_str()
+                    .map(String::from)
+                    .ok_or("Image decoder path is not UTF-8")
+            })
+            .collect::<Result<Vec<_>, _>>()?;
+        return worker_call(
+            job,
+            &crate::vips_worker::Request::Command {
+                program: program.into(),
+                args,
+            },
+        );
     }
     let dir = job.work.clone();
     let number = job.process_number.fetch_add(1, Ordering::Relaxed);
@@ -898,7 +1271,6 @@ pub(crate) fn run(job: &Job, program: &str, args: &[OsString]) -> Result<String,
         ]);
     }
     let mut child = command.stdout(Stdio::from(stdout)).stderr(Stdio::from(stderr)).spawn().map_err(|e| format!("Cannot run {program}: {e}. Install libvips tools (and libtiff tools for existing page pyramids)."))?;
-    let mut ticks = 0;
     let status = loop {
         if job.cancel.load(Ordering::Relaxed) {
             let _ = child.kill();
@@ -916,15 +1288,14 @@ pub(crate) fn run(job: &Job, program: &str, args: &[OsString]) -> Result<String,
                 return Err(error.to_string());
             }
         }
-        if ticks % 5 == 0 && tree_size(&job.root) > CACHE_LIMIT {
+        if budget_exceeded(job, false) {
             let _ = child.kill();
             let _ = child.wait();
             let _ = fs::remove_file(&stdout_path);
             let _ = fs::remove_file(&stderr_path);
             return Err("The 2 GiB display cache limit was reached. This image needs more temporary disk space than this proof of concept allows.".into());
         }
-        ticks += 1;
-        thread::sleep(Duration::from_millis(100));
+        thread::sleep(Duration::from_millis(2));
     };
     let mut output = String::new();
     File::open(&stdout_path)
@@ -940,7 +1311,7 @@ pub(crate) fn run(job: &Job, program: &str, args: &[OsString]) -> Result<String,
     }
     let _ = fs::remove_file(stdout_path);
     let _ = fs::remove_file(stderr_path);
-    if tree_size(&job.root) > CACHE_LIMIT {
+    if budget_exceeded(job, program == "vips") {
         return Err("Display cache limit reached.".into());
     }
     if status.success() {
@@ -948,6 +1319,35 @@ pub(crate) fn run(job: &Job, program: &str, args: &[OsString]) -> Result<String,
     } else {
         Err("Could not read this image. It may be damaged or use an unsupported format.".into())
     }
+}
+
+fn uses_worker(job: &Job) -> bool {
+    #[cfg(test)]
+    if std::env::var_os("APERTURE_WORKER_EXECUTABLE").is_none() {
+        return false;
+    }
+    matches!(
+        job.input.extension().and_then(|s| s.to_str()),
+        Some("tif" | "tiff")
+    )
+}
+
+fn worker_call(job: &Job, request: &crate::vips_worker::Request) -> Result<String, String> {
+    let decoder = {
+        let mut slot = job.decoder.lock().unwrap();
+        if job.cancel.load(Ordering::Relaxed) {
+            return Err("Loading cancelled.".into());
+        }
+        if slot.is_none() {
+            *slot = Some(Arc::new(crate::decoder::Decoder::start(&job.work)?));
+        }
+        slot.as_ref().unwrap().clone()
+    };
+    let output = decoder.call(request, &job.cancel, || budget_exceeded(job, false))?;
+    if budget_exceeded(job, true) {
+        return Err("Display cache limit reached.".into());
+    }
+    Ok(output)
 }
 
 pub fn max_level(width: u32, height: u32) -> u32 {
@@ -1038,11 +1438,14 @@ pub fn read_asset(job: &Arc<Job>, asset: Asset) -> Result<Vec<u8>, (u16, String)
                     .join(format!("{x}_{y}.jpg"))
             }
         };
-        if let Ok(bytes) = fs::read(path) {
+        if let Ok(bytes) = fs::read(&path) {
             // dzsave writes each tile directly; only expose complete JPEG streams.
             if bytes.starts_with(&[0xff, 0xd8]) && bytes.ends_with(&[0xff, 0xd9]) {
                 return Ok(bytes);
             }
+        }
+        if *job.dir.lock().unwrap() != dir {
+            continue;
         }
         if state.phase == "error" {
             return Err((500, state.error.unwrap_or_default()));
@@ -1143,12 +1546,18 @@ fn tree_size(path: &Path) -> u64 {
         .sum()
 }
 
+#[cfg(test)]
 fn prune(root: &Path, limit: u64) -> Result<(), String> {
+    prune_except(root, limit, None)
+}
+
+fn prune_except(root: &Path, limit: u64, protected: Option<&Path>) -> Result<(), String> {
     let mut entries: Vec<_> = fs::read_dir(root)
         .map_err(|e| e.to_string())?
         .flatten()
         .filter(|entry| {
-            entry.path().join("complete").is_file()
+            protected != Some(entry.path().as_path())
+                && entry.path().join("complete").is_file()
                 && !entry.file_name().to_string_lossy().starts_with("work-")
         })
         .collect();
@@ -1172,6 +1581,174 @@ fn prune(root: &Path, limit: u64) -> Result<(), String> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    fn wait_ready(backend: &Backend) -> ImageState {
+        let deadline = Instant::now() + Duration::from_secs(20);
+        loop {
+            let state = backend.snapshot().unwrap();
+            if state.phase != "loading" {
+                assert_eq!(state.phase, "ready", "{state:?}");
+                return state;
+            }
+            assert!(Instant::now() < deadline);
+            thread::sleep(Duration::from_millis(10));
+        }
+    }
+
+    #[test]
+    fn early_cache_requires_valid_manifest_preview_and_source_fingerprint() {
+        let root = std::env::temp_dir().join(format!(
+            "aperture-early-cache-{}",
+            NEXT_ID.fetch_add(1, Ordering::Relaxed)
+        ));
+        fs::create_dir_all(&root).unwrap();
+        let source = root.join("source.tif");
+        channel_fixture(&source, 1, 1, "");
+        let mut backend = Backend::new(root.join("cache")).unwrap();
+        let events = Arc::new(Mutex::new(Vec::<ImageState>::new()));
+        let recorded = events.clone();
+        let callback_job = Arc::new(Mutex::new(None::<std::sync::Weak<Job>>));
+        let target = callback_job.clone();
+        backend.set_notifier(move |state| {
+            if let Some(job) = target
+                .lock()
+                .unwrap()
+                .as_ref()
+                .and_then(std::sync::Weak::upgrade)
+            {
+                let _snapshot = job.state.lock().unwrap().clone();
+            }
+            recorded.lock().unwrap().push(state.clone());
+        });
+        backend.open(&source).unwrap();
+        let first = wait_ready(&backend);
+        let dir = backend
+            .current
+            .lock()
+            .unwrap()
+            .as_ref()
+            .unwrap()
+            .dir
+            .lock()
+            .unwrap()
+            .clone();
+        let manifest = fs::read(dir.join("manifest.json")).unwrap();
+        let preview_metadata = fs::metadata(dir.join("preview.jpg")).unwrap();
+        fs::remove_file(dir.join("manifest.json")).unwrap();
+        backend.open(&source).unwrap();
+        assert!(wait_ready(&backend).detail.contains("Reused"));
+        assert_eq!(
+            fs::metadata(dir.join("preview.jpg"))
+                .unwrap()
+                .modified()
+                .unwrap(),
+            preview_metadata.modified().unwrap()
+        );
+        assert!(dir.join("manifest.json").is_file());
+        let job = backend.current.lock().unwrap().clone().unwrap();
+        assert_eq!(
+            job.process_number.load(Ordering::Relaxed),
+            if uses_worker(&job) { 1 } else { 2 },
+            "legacy cache migration uses only metadata; vipsheader shares the worker"
+        );
+        for corrupt in [b"{invalid".to_vec(), vec![b'x'; 65537]] {
+            fs::write(dir.join("manifest.json"), corrupt).unwrap();
+            backend.open(&source).unwrap();
+            assert!(!wait_ready(&backend).detail.contains("Reused"));
+        }
+        fs::write(dir.join("manifest.json"), &manifest).unwrap();
+        let reopened = backend.open(&source).unwrap();
+        let ready = wait_ready(&backend);
+        assert!(ready.detail.contains("Reused"));
+        let job = backend.current.lock().unwrap().clone().unwrap();
+        assert_eq!(
+            job.process_number.load(Ordering::Relaxed),
+            0,
+            "cache hit must not spawn readers"
+        );
+        // Reenter this same job's state mutex from its callback.
+        *callback_job.lock().unwrap() = Some(Arc::downgrade(&job));
+        job.update(|state| state.detail = "Reused cache notification check".into());
+        fs::write(dir.join("preview.jpg"), b"broken preview").unwrap();
+        backend.open(&source).unwrap();
+        assert!(!wait_ready(&backend).detail.contains("Reused"));
+        // Same path with a changed source cannot reuse its previous descriptor.
+        channel_fixture(&source, 1, 1, "changed metadata");
+        backend.open(&source).unwrap();
+        assert!(!wait_ready(&backend).detail.contains("Reused"));
+        backend.cancel();
+        let events = events.lock().unwrap();
+        let initial_events: Vec<_> = events.iter().filter(|state| state.id == first.id).collect();
+        assert!(initial_events
+            .windows(2)
+            .all(|pair| pair[0].revision < pair[1].revision));
+        assert!(
+            initial_events
+                .iter()
+                .position(|state| state.preview_ready)
+                .unwrap()
+                < initial_events
+                    .iter()
+                    .position(|state| state.phase == "ready")
+                    .unwrap()
+        );
+        assert!(events
+            .iter()
+            .any(|state| state.id == reopened.id && state.phase == "ready"));
+        assert_eq!(events.last().unwrap().phase, "cancelled");
+        drop(events);
+        backend.shutdown();
+        fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn deferred_housekeeping_pins_live_cache_and_preview_work_remains_bounded() {
+        let root = std::env::temp_dir().join(format!(
+            "aperture-budget-{}",
+            NEXT_ID.fetch_add(1, Ordering::Relaxed)
+        ));
+        let active = root.join("active");
+        let stale = root.join("stale");
+        for dir in [&active, &stale] {
+            fs::create_dir_all(dir).unwrap();
+            fs::write(dir.join("complete"), b"ok").unwrap();
+            fs::write(dir.join("preview.jpg"), b"preview").unwrap();
+        }
+        prune_except(&root, 0, Some(&active)).unwrap();
+        assert!(active.join("preview.jpg").is_file());
+        assert!(!stale.exists());
+        let backend = Backend::new(root.join("cache")).unwrap();
+        let source = root.join("source.tif");
+        channel_fixture(&source, 1, 1, "");
+        backend.open(&source).unwrap();
+        wait_ready(&backend);
+        let job = backend.current.lock().unwrap().clone().unwrap();
+        // A replaced worker waiting on cache housekeeping must recheck cancel
+        // while holding the same guard used by the next warm-cache selection.
+        let guard = backend.cache_access.lock().unwrap();
+        let replaced = job.clone();
+        let old_housekeeping = thread::spawn(move || housekeeping(&replaced));
+        backend.open(&source).unwrap();
+        assert_eq!(backend.snapshot().unwrap().phase, "loading");
+        drop(guard);
+        assert!(old_housekeeping
+            .join()
+            .unwrap()
+            .unwrap_err()
+            .contains("cancelled"));
+        assert!(wait_ready(&backend).detail.contains("Reused"));
+        let oversized = File::create(job.work.join("oversized")).unwrap();
+        oversized.set_len(CACHE_LIMIT / 2 + 1).unwrap();
+        job.housekeeping.store(false, Ordering::Relaxed);
+        assert!(budget_exceeded(&job, true));
+        fs::remove_file(job.work.join("oversized")).unwrap();
+        let oversized = File::create(job.dir.lock().unwrap().join("oversized")).unwrap();
+        oversized.set_len(CACHE_LIMIT + 1).unwrap();
+        job.housekeeping.store(true, Ordering::Relaxed);
+        assert!(budget_exceeded(&job, true));
+        backend.shutdown();
+        fs::remove_dir_all(root).unwrap();
+    }
+
     // Small generated TIFFs keep source data and validation caches out of Git.
     fn channel_fixture(path: &Path, bands: u16, pages: u16, description: &str) {
         let mut bytes = b"II\x2a\0\x08\0\0\0".to_vec();
@@ -1494,6 +2071,7 @@ mod tests {
             thread::sleep(Duration::from_millis(20));
         }
         let second = backend.current.lock().unwrap().clone().unwrap();
+        assert_eq!(second.process_number.load(Ordering::Relaxed), 0);
         assert!(second.input.exists());
         assert!(read_asset(
             &second,

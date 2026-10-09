@@ -31,7 +31,7 @@ On Ubuntu 24.04:
 
 ```sh
 sudo apt-get install build-essential libgtk-3-dev libwebkit2gtk-4.1-dev \
-  libayatana-appindicator3-dev librsvg2-dev libvips-tools libtiff-tools
+  libayatana-appindicator3-dev librsvg2-dev libvips-dev libvips-tools libtiff-tools
 ```
 
 ```sh
@@ -56,12 +56,16 @@ pnpm format:check
 pnpm test
 pnpm build
 cargo fmt --manifest-path src-tauri/Cargo.toml --all -- --check
-cargo test --manifest-path src-tauri/Cargo.toml --locked
+cargo build --manifest-path src-tauri/Cargo.toml --features custom-protocol --locked
+APERTURE_WORKER_EXECUTABLE="$PWD/src-tauri/target/debug/aperture" \
+  cargo test --manifest-path src-tauri/Cargo.toml --locked
 cargo clippy --manifest-path src-tauri/Cargo.toml --all-targets --locked -- -D warnings
 ```
 
 Use `pnpm format` and `cargo fmt --manifest-path src-tauri/Cargo.toml --all` to
 format changes. Linux CI runs the checks above.
+The executable override makes decoder tests use the production child worker.
+Without it, isolated unit runs retain the CLI fixture path.
 
 ## Test images
 
@@ -146,6 +150,13 @@ No microscopy source files are modified.
 - Display previews and tiles are separate from the source pixels. They are not
   scientific data exports. Transparent images are composited against the canvas;
   unsigned 16-bit values are mapped to an 8-bit display range.
+- TIFF decoding uses Rust libvips bindings in one image-scoped, killable worker.
+  Channel previews resize each source page once before extracting its bands.
+  Ordinary uncompressed gray16 and RGB8 sRGB TIFFs of at least 64 megapixels use a bounded
+  Rust reader with up to eight threads for the overview. Its area filter includes every source
+  pixel and differs from the general Lanczos preview; full detail uses libvips.
+  Compressed, tiled, oriented, alpha and multipage layouts retain the general reader.
+  The changed overview filter invalidates existing display caches once.
 - Display files use the application's cache directory. Completed entries are
   reused, old entries are evicted, and generation stops when its 2 GiB soft disk
   limit is reached. libvips cache settings limit working storage but are not a

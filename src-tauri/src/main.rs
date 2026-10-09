@@ -2,13 +2,16 @@
 mod annotation_io;
 mod backend;
 mod channels;
+mod decoder;
 mod native;
+mod raw_tiff;
 mod roi;
 mod tiff_annotations;
+mod vips_worker;
 
 use backend::{Backend, ImageState};
 use std::sync::atomic::Ordering;
-use tauri::{Manager, State};
+use tauri::{Emitter, Manager, State};
 
 #[tauri::command]
 fn open_image(path: String, backend: State<'_, Backend>) -> Result<ImageState, String> {
@@ -116,6 +119,13 @@ async fn save_annotations(
 }
 
 fn main() {
+    if std::env::args_os().nth(1).as_deref() == Some(std::ffi::OsStr::new("--image-worker")) {
+        if let Err(error) = vips_worker::worker_main() {
+            eprintln!("{error}");
+            std::process::exit(1);
+        }
+        return;
+    }
     tauri::Builder::default()
         .plugin(tauri_plugin_single_instance::init(|app, _, _| {
             if let Some(window) = app.get_webview_window("main") {
@@ -126,7 +136,12 @@ fn main() {
         .plugin(tauri_plugin_dialog::init())
         .setup(|app| {
             let root = app.path().app_cache_dir()?.join("display-v2");
-            app.manage(Backend::new(root).map_err(std::io::Error::other)?);
+            let mut backend = Backend::new(root).map_err(std::io::Error::other)?;
+            let handle = app.handle().clone();
+            backend.set_notifier(move |state| {
+                let _ = handle.emit("image-state", state);
+            });
+            app.manage(backend);
             Ok(())
         })
         .invoke_handler(tauri::generate_handler![

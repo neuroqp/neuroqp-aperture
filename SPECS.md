@@ -25,9 +25,11 @@ preview as soon as possible, and stays responsive while loading large images.
 - Keep file access, image decoding, and preview/pyramid generation behind the
   Rust backend. Supply previews and individual display tiles to the viewer.
 - Use vanilla TypeScript and CSS for the initial UI, keeping dependencies small.
-- The Linux proof of concept uses libvips command-line workers for image
-  reading and pyramid generation. Packaging image readers for other operating
-  systems remains future work.
+- The Linux proof of concept uses Rust libvips bindings in an isolated,
+  image-scoped worker for TIFF reading and pyramid generation. Non-TIFF inputs
+  use libvips tools. Large ordinary uncompressed gray16/RGB8 sRGB TIFF overviews use a
+  Rust area reducer with up to eight threads; it reads every pixel and leaves full detail to
+  libvips. Packaging image readers for other operating systems remains future work.
 
 ## Development principles
 

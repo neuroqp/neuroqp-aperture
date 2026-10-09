@@ -1,5 +1,6 @@
 export type ImageState = {
   id: string;
+  revision: number;
   name: string;
   width: number;
   height: number;
@@ -71,10 +72,17 @@ export class ImageLoader {
   private generation = 0;
   private timer: ReturnType<typeof setTimeout> | undefined;
   private state: ImageState | null = null;
+  private active = false;
+  private pending = false;
+  private disposed = false;
+  private buffered = new Map<string, ImageState>();
+  private listening: Promise<void>;
+  private unlisten: (() => void) | undefined;
   private commands: {
     open: (path: string) => Promise<ImageState>;
     state: () => Promise<ImageState | null>;
     cancel: () => Promise<void>;
+    listen?: (changed: (state: ImageState) => void) => Promise<() => void>;
   };
   private changed: (state: ImageState) => void;
   private failed: (message: string) => void;
@@ -87,6 +95,19 @@ export class ImageLoader {
     this.commands = commands;
     this.changed = changed;
     this.failed = failed;
+    this.listening = commands.listen
+      ? commands
+          .listen((state) => this.receive(state))
+          .then(
+            (unlisten) => {
+              if (this.disposed) unlisten();
+              else this.unlisten = unlisten;
+            },
+            (error) => {
+              if (!this.disposed) this.failed(String(error));
+            },
+          )
+      : Promise.resolve();
   }
 
   private invalidate() {
@@ -94,56 +115,120 @@ export class ImageLoader {
     return ++this.generation;
   }
 
-  async open(path: string) {
+  private begin() {
     const generation = this.invalidate();
     this.state = null;
+    this.active = true;
+    this.pending = true;
+    this.buffered.clear();
+    return generation;
+  }
+
+  async open(path: string) {
+    const generation = this.begin();
     try {
+      await this.listening;
+      if (generation !== this.generation || this.disposed) return;
       const state = await this.commands.open(path);
-      if (generation === this.generation) this.accept(state, generation);
+      if (generation === this.generation) this.finish(state, generation);
     } catch (error) {
-      if (generation === this.generation) this.failed(String(error));
+      if (generation === this.generation) {
+        this.active = false;
+        this.pending = false;
+        this.buffered.clear();
+        this.failed(String(error));
+      }
     }
   }
 
   async restore() {
-    const generation = this.generation;
+    const generation = this.begin();
     try {
+      await this.listening;
+      if (generation !== this.generation || this.disposed) return;
       const state = await this.commands.state();
-      if (state && generation === this.generation)
-        this.accept(state, generation);
+      if (generation === this.generation) this.finish(state, generation);
     } catch (error) {
-      if (generation === this.generation) this.failed(String(error));
+      if (generation === this.generation) {
+        this.active = false;
+        this.pending = false;
+        this.buffered.clear();
+        this.failed(String(error));
+      }
     }
   }
 
+  private finish(state: ImageState | null, generation: number) {
+    this.pending = false;
+    if (state) {
+      const buffered = this.buffered.get(state.id);
+      this.accept(
+        buffered && buffered.revision > state.revision ? buffered : state,
+        generation,
+      );
+    } else this.active = false;
+    this.buffered.clear();
+  }
+
+  private receive(state: ImageState) {
+    if (this.disposed || !this.active) return;
+    if (this.pending) {
+      const previous = this.buffered.get(state.id);
+      if (!previous || state.revision > previous.revision)
+        this.buffered.set(state.id, state);
+    } else if (state.id === this.state?.id) this.accept(state, this.generation);
+  }
+
   private accept(state: ImageState, generation: number) {
+    if (this.state?.id === state.id && state.revision <= this.state.revision)
+      return;
     this.state = state;
     this.changed(state);
-    if (state.phase === "loading") {
-      this.timer = setTimeout(() => void this.poll(generation, state.id), 250);
+    this.schedulePoll(generation);
+  }
+
+  private schedulePoll(generation: number) {
+    clearTimeout(this.timer);
+    if (this.state?.phase === "loading") {
+      const id = this.state.id;
+      this.timer = setTimeout(() => void this.poll(generation, id), 250);
     }
   }
 
   private async poll(generation: number, id: string) {
+    const revision = this.state?.revision;
     try {
       const state = await this.commands.state();
       if (generation !== this.generation) return;
       if (!state || state.id !== id) {
-        this.failed("The image load is no longer available.");
-        return;
-      }
-      this.accept(state, generation);
+        if (this.state?.revision === revision) {
+          this.failed("The image load is no longer available.");
+          return;
+        }
+      } else this.accept(state, generation);
+      this.schedulePoll(generation);
     } catch (error) {
-      if (generation === this.generation) this.failed(String(error));
+      if (generation === this.generation && this.state?.revision === revision)
+        this.failed(String(error));
     }
   }
 
   async cancel() {
     const generation = this.invalidate();
+    this.active = false;
+    this.pending = false;
+    this.buffered.clear();
     try {
       await this.commands.cancel();
       if (generation === this.generation && this.state) {
-        this.accept({ ...this.state, phase: "cancelled" }, generation);
+        this.accept(
+          {
+            ...this.state,
+            revision: this.state.revision + 1,
+            phase: "cancelled",
+          },
+          generation,
+        );
       }
       return generation === this.generation;
     } catch (error) {
@@ -153,6 +238,11 @@ export class ImageLoader {
   }
 
   dispose() {
+    this.disposed = true;
+    this.active = false;
+    this.buffered.clear();
+    this.unlisten?.();
+    this.unlisten = undefined;
     this.invalidate();
   }
 }

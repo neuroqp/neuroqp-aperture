@@ -1,4 +1,6 @@
-#[derive(Clone, Debug)]
+use serde::{Deserialize, Serialize};
+
+#[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct NativeLevel {
     pub options: String,
     pub width: u32,
@@ -46,6 +48,39 @@ fn reduced(base: &NativeLevel, candidate: &NativeLevel) -> bool {
             && (base.width / factor..=base.width.div_ceil(factor)).contains(&candidate.width)
             && (base.height / factor..=base.height.div_ceil(factor)).contains(&candidate.height)
     })
+}
+
+pub fn valid_cached_levels(levels: &[NativeLevel], width: u32, height: u32) -> bool {
+    let Some(base) = levels.first() else {
+        return false;
+    };
+    levels.len() >= 2
+        && base.width == width
+        && base.height == height
+        && base.options == "[page=0,n=1,access=random]"
+        && levels.windows(2).all(|pair| {
+            pair[0].width >= pair[1].width
+                && pair[0].height >= pair[1].height
+                && (pair[0].width != pair[1].width || pair[0].height != pair[1].height)
+        })
+        && levels.iter().skip(1).all(|candidate| {
+            let Some(options) = candidate
+                .options
+                .strip_prefix("[page=")
+                .and_then(|s| s.strip_suffix(",access=random]"))
+            else {
+                return false;
+            };
+            let Some((page, remainder)) = options.split_once(",n=1") else {
+                return false;
+            };
+            page.parse::<u32>().is_ok_and(|page| page < 256)
+                && (remainder.is_empty()
+                    || remainder.strip_prefix(",subifd=").is_some_and(|index| {
+                        page == "0" && index.parse::<u32>().is_ok_and(|index| index < 28)
+                    }))
+                && reduced(base, candidate)
+        })
 }
 
 // libvips before 8.18 omits tile dimensions in vipsheader. libtiff's metadata
@@ -119,6 +154,25 @@ pub fn discover(
     inspect: &dyn Fn(&str) -> Result<String, String>,
     tiffinfo: Option<&str>,
 ) -> Vec<NativeLevel> {
+    discover_levels(header, inspect, tiffinfo, false)
+}
+
+/// Validate an overview near the existing 1024-pixel preview size first. Levels wait
+/// until first pixels are available; scientific page-selection rules are shared.
+pub fn discover_preview(
+    header: &str,
+    inspect: &dyn Fn(&str) -> Result<String, String>,
+    tiffinfo: Option<&str>,
+) -> Vec<NativeLevel> {
+    discover_levels(header, inspect, tiffinfo, true)
+}
+
+fn discover_levels(
+    header: &str,
+    inspect: &dyn Fn(&str) -> Result<String, String>,
+    tiffinfo: Option<&str>,
+    preview_only: bool,
+) -> Vec<NativeLevel> {
     if field(header, "vips-loader") != Some("tiffload") {
         return Vec::new();
     }
@@ -131,8 +185,11 @@ pub fn discover(
         return Vec::new();
     };
     let mut levels = vec![base.clone()];
+    if preview_only && base.width.max(base.height) <= 1024 {
+        return levels;
+    }
     let subifds = number(header, "n-subifds").unwrap_or(0);
-    let options: Vec<_> = if (1..=28).contains(&subifds) {
+    let mut options: Vec<_> = if (1..=28).contains(&subifds) {
         (0..subifds)
             .map(|index| {
                 (
@@ -151,6 +208,21 @@ pub fn discover(
             .map(|index| (format!("[page={index},n=1,access=random]"), (index, None)))
             .collect()
     };
+    if preview_only {
+        // TIFF pyramids normally list successive halvings. Probe the index near
+        // the target size, then fall back to other validated candidates if that
+        // convention does not hold. Never trade first-preview detail for speed.
+        let mut size = base.width.max(base.height);
+        let mut shift: usize = 0;
+        while size > 1024 {
+            size = size.div_ceil(2);
+            shift += 1;
+        }
+        let preferred = shift.saturating_sub(1);
+        if preferred < options.len() {
+            options.swap(0, preferred);
+        }
+    }
     for (options, directory) in options {
         let Ok(candidate_header) = inspect(&options) else {
             continue;
@@ -172,6 +244,17 @@ pub fn discover(
             })
         {
             levels.push(candidate);
+            if preview_only
+                && (512..=1024).contains(
+                    &levels
+                        .last()
+                        .unwrap()
+                        .width
+                        .max(levels.last().unwrap().height),
+                )
+            {
+                break;
+            }
         }
     }
     if levels.len() < 2 {
@@ -186,6 +269,32 @@ mod tests {
     use super::*;
     fn header(width: u32, height: u32, extra: &str) -> String {
         format!("width: {width}\nheight: {height}\nbands: 3\nformat: uchar\ninterpretation: srgb\nvips-loader: tiffload\ntile-width: 16\ntile-height: 16\norientation: 1\n{extra}")
+    }
+
+    #[test]
+    fn preview_probes_target_sized_overview_without_accepting_unrelated_pages() {
+        let base = header(8192, 6144, "n-subifds: 3\n");
+        let probes = std::cell::RefCell::new(Vec::new());
+        let levels = discover_preview(
+            &base,
+            &|options| {
+                probes.borrow_mut().push(options.to_string());
+                Ok(header(1024, 768, ""))
+            },
+            None,
+        );
+        assert_eq!(probes.borrow().len(), 1);
+        assert!(levels[1].options.contains("subifd=2"));
+        assert!(valid_cached_levels(&levels, 8192, 6144));
+        let mut corrupt = levels;
+        corrupt[1].options = "[page=0,n=-1,access=random]".into();
+        assert!(!valid_cached_levels(&corrupt, 8192, 6144));
+        assert!(discover_preview(
+            &header(8192, 6144, "n-pages: 3\n"),
+            &|_| panic!("ordinary pages must not be probed"),
+            None
+        )
+        .is_empty());
     }
 
     #[test]
