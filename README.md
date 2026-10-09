@@ -20,18 +20,19 @@ initial theme follows the system.
 
 Install Node.js 22.18 or newer, pnpm 9, a current Rust toolchain, and the Tauri
 Linux build dependencies. `vips` and `vipsheader` must be on PATH.
+Parallel strip previews link libtiff 4.5 or newer.
 
 On Arch Linux:
 
 ```sh
-sudo pacman -S --needed base-devel gtk3 webkit2gtk-4.1 librsvg libvips
+sudo pacman -S --needed base-devel gtk3 webkit2gtk-4.1 librsvg libvips libtiff
 ```
 
 On Ubuntu 24.04:
 
 ```sh
 sudo apt-get install build-essential libgtk-3-dev libwebkit2gtk-4.1-dev \
-  libayatana-appindicator3-dev librsvg2-dev libvips-dev libvips-tools libtiff-tools
+  libayatana-appindicator3-dev librsvg2-dev libvips-dev libvips-tools libtiff-dev libtiff-tools
 ```
 
 ```sh

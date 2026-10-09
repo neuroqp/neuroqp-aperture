@@ -10,6 +10,7 @@ means no completed app cache, not a cold operating-system filesystem cache.
 import argparse
 import base64
 import json
+import os
 from http.client import RemoteDisconnected
 from pathlib import Path
 import re
@@ -27,12 +28,16 @@ def main():
     parser.add_argument("--output", type=Path, required=True)
     parser.add_argument("--cache-root", type=Path, required=True)
     parser.add_argument("--driver-url", default="http://127.0.0.1:4445")
-    parser.add_argument("--driver-pid", type=int, help="Linux process-tree RSS sampling through first draw")
+    parser.add_argument("--driver-pid", type=int, help="Linux process-tree RSS sampling through preview and pyramid completion")
     parser.add_argument("--rounds", type=int, default=3)
     parser.add_argument("--warm-only", action="store_true", help="Reuse existing app caches without clearing them")
+    parser.add_argument("--fresh-only", action="store_true", help="Measure new-file loading without a cached reopen")
+    parser.add_argument("--evict-source-pages", action="store_true", help="Ask Linux to discard this source's clean page cache before each fresh trial")
     parser.add_argument("--timeout", type=float, default=180)
     parser.add_argument("--cancel-after-preview", type=Path, action="append", default=[])
     args = parser.parse_args()
+    if args.warm_only and args.fresh_only:
+        parser.error("--warm-only and --fresh-only are mutually exclusive")
     args.output.parent.mkdir(parents=True, exist_ok=True)
     # Only our dedicated benchmark cache can be cleared.
     cache = args.cache_root.resolve()
@@ -51,15 +56,18 @@ def main():
             headers={"Content-Type": "application/json"},
         )
         # WebKitWebDriver can close a connection during a page transition.
-        # Retry inspection only; never replay clicks or other mutations.
-        inspect_only = method == "GET" or (route.endswith("/execute/sync") and body["script"].startswith("return "))
+        # Retry inspection and idempotent cancellation only. Never replay Open
+        # or other UI mutations when their first response is lost.
+        retry_safe = method == "GET" or (route.endswith("/execute/sync") and body["script"].startswith("return ")) or (
+            route.endswith("/execute/async") and body.get("args", [None])[0] in ("image_state", "cancel_load")
+        )
         for attempt in range(3):
             try:
                 with urlopen(req, timeout=30) as response:
                     value = json.load(response).get("value")
                 break
             except RemoteDisconnected:
-                if not inspect_only or attempt == 2:
+                if not retry_safe or attempt == 2:
                     raise
                 time.sleep(0.05)
         if isinstance(value, dict) and isinstance(value.get("error"), str):
@@ -70,6 +78,7 @@ def main():
         "browserName": "wry",
         "tauri:options": {"application": str(args.binary.resolve())},
     }}})["sessionId"]
+    args.output.with_suffix(".session.json").write_text(json.dumps({"sessionId": sid}) + "\n")
     route = f"/session/{sid}"
 
     def js(script, values=None, asynchronous=False):
@@ -166,17 +175,19 @@ def main():
           };
           setInterval(()=>{
             const metric=window.__loadBenchmark;
-            if(metric.openAt && !metric.backendPreviewMs)
+            if(metric.openAt && !metric.backendReadyMs)
               originalInvoke('image_state').then(state=>{
                 if(window.__loadBenchmark===metric && state?.previewReady && !metric.backendPreviewMs)
                   metric.backendPreviewMs=performance.now()-metric.selectedAt;
+                if(window.__loadBenchmark===metric && state?.phase==='ready' && !metric.backendReadyMs)
+                  metric.backendReadyMs=performance.now()-metric.selectedAt;
               });
           },10);
           return true;
         """)
         for image in args.images:
             for round_index in range(args.rounds):
-                for condition in (("reopen",) if args.warm_only else ("fresh", "reopen")):
+                for condition in (("reopen",) if args.warm_only else ("fresh",) if args.fresh_only else ("fresh", "reopen")):
                     invoke("cancel_load")
                     time.sleep(0.05)
                     if condition == "fresh" and cache.exists():
@@ -186,6 +197,11 @@ def main():
                                     and not entry.is_symlink() and entry.is_dir()
                                     and (entry / "complete").is_file()):
                                 shutil.rmtree(entry)
+                    if condition == "fresh" and args.evict_source_pages:
+                        # Read-only, file-local advisory eviction. This changes
+                        # neither source bytes nor the system-wide cache policy.
+                        with image.open("rb") as source:
+                            os.posix_fadvise(source.fileno(), 0, 0, os.POSIX_FADV_DONTNEED)
                     stop = threading.Event()
                     peaks = {}
                     monitor = threading.Thread(target=rss_monitor, args=(stop, peaks)) if args.driver_pid else None
@@ -204,30 +220,36 @@ def main():
                             args.output.with_suffix(".timeout.png").write_bytes(base64.b64decode(request("GET", route + "/screenshot")))
                             raise TimeoutError((image, condition, metric, status))
                         time.sleep(0.01)
-                    metric.update(image=image.name, condition=condition, round=round_index, renderer=renderer)
-                    stop.set()
-                    if monitor:
-                        monitor.join()
-                        metric.update(peaks)
+                    metric.update(image=image.name, condition=condition, round=round_index, renderer=renderer, sourcePageEvictionRequested=condition == "fresh" and args.evict_source_pages)
                     if round_index == 0 and condition == "fresh":
                         screenshot = args.output.parent / f"{args.output.stem}-{image.stem}.png"
                         screenshot.write_bytes(base64.b64decode(request("GET", route + "/screenshot")))
                         metric["screenshot"] = str(screenshot)
                     records.append(metric)
-                    print(json.dumps(metric), flush=True)
                     if image.resolve() in cancel_paths:
                         invoke("cancel_load")
+                        stop.set()
+                        if monitor:
+                            monitor.join()
+                            metric.update(peaks)
+                        print(json.dumps(metric), flush=True)
                         break
                     while (state := invoke("image_state"))["phase"] == "loading":
                         if time.monotonic() > deadline:
                             raise TimeoutError((image, "detail", state))
-                        time.sleep(0.05)
+                        time.sleep(0.01)
                     if state["phase"] != "ready":
                         raise RuntimeError(state)
                     if condition == "fresh" and "Reused display cache" in state["detail"]:
                         raise RuntimeError("Fresh trial reused a cache; check the driver's XDG_CACHE_HOME")
                     if args.warm_only and "Reused display cache" not in state["detail"]:
                         raise RuntimeError(f"No completed cache for {image}")
+                    metric.update(js("const m=window.__loadBenchmark;if(!m.backendReadyMs)m.backendReadyMs=performance.now()-m.selectedAt;return m;"))
+                    stop.set()
+                    if monitor:
+                        monitor.join()
+                        metric.update(peaks)
+                    print(json.dumps(metric), flush=True)
                     args.output.write_text(json.dumps({"records": records}, indent=2) + "\n")
         summary = []
         for image in args.images:
@@ -235,7 +257,7 @@ def main():
                 group = [row for row in records if row["image"] == image.name and row["condition"] == condition]
                 if group:
                     summary.append({"image": image.name, "condition": condition, "samples": len(group),
-                        **{key: round(statistics.median(row[key] for row in group), 1) for key in ("backendPreviewMs", "firstDrawMs", "nextFrameMs")}})
+                        **{key: round(statistics.median(row[key] for row in group), 1) for key in ("backendPreviewMs", "firstDrawMs", "nextFrameMs", "backendReadyMs") if all(key in row for row in group)}})
         args.output.write_text(json.dumps({"records": records, "summary": summary}, indent=2) + "\n")
         print(json.dumps(summary, indent=2))
     finally:

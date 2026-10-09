@@ -27,6 +27,12 @@ pub enum Request {
         ushort: bool,
         directory: String,
     },
+    ChannelPyramid {
+        input: String,
+        output: String,
+        band: u32,
+        ushort: bool,
+    },
     RawPreview {
         input: String,
         output: String,
@@ -83,13 +89,47 @@ impl Worker {
                 self.channel_previews(&input, &options, &scale, &planes, ushort, &directory)?;
                 Ok(String::new())
             }
+            Request::ChannelPyramid {
+                input,
+                output,
+                band,
+                ushort,
+            } => {
+                let result = (|| {
+                    let source = self.open(&input)?;
+                    let band = i32::try_from(band).map_err(|_| "Invalid image band.")?;
+                    let extracted = ops::extract_band(&source, band).map_err(|e| e.to_string())?;
+                    let pixels = if ushort {
+                        ops::cast_with_opts(
+                            &extracted,
+                            ops::BandFormat::Uchar,
+                            &ops::CastOptions { shift: true },
+                        )
+                        .map_err(|e| e.to_string())?
+                    } else {
+                        extracted
+                    };
+                    // Keep extraction and display normalization lazy, so one
+                    // source traversal feeds the lossless pyramid without full
+                    // decoded planes in memory or intermediate disk files.
+                    save_pyramid(
+                        &grayscale(&pixels)?,
+                        &output,
+                        "tile-size=256,overlap=0,suffix=.png[strip],depth=onepixel",
+                    )
+                })();
+                if input.contains("access=sequential") {
+                    self.images.remove(&input);
+                }
+                result.map(|_| String::new())
+            }
             Request::RawPreview {
                 input,
                 output,
                 max_edge,
                 threads,
             } => {
-                if max_edge == 0 || max_edge > 1024 || threads == 0 || threads > 8 {
+                if max_edge == 0 || max_edge > 1024 || threads == 0 || threads > 16 {
                     return Err("Invalid raw TIFF preview limits.".into());
                 }
                 let Some(preview) =
@@ -184,9 +224,7 @@ impl Worker {
                 .map_err(|e| e.to_string()),
             "dzsave" => {
                 let options = dz_options(&args[3..])?;
-                image
-                    .image_write_to_file(&format!("{output}.dz[container=fs,{options}]"))
-                    .map_err(|e| e.to_string())
+                save_pyramid(&image, output, &options)
             }
             "affine"
                 if args.len() == 7
@@ -431,6 +469,21 @@ fn numbers<T: std::str::FromStr>(value: &str, length: usize) -> Result<Vec<T>, S
     Ok(values)
 }
 
+fn save_pyramid(image: &VipsImage, output: &str, options: &str) -> Result<(), String> {
+    let threads = std::thread::available_parallelism()
+        .map_or(1, |n| n.get())
+        .min(8) as i32;
+    // Requests run serially in this isolated worker. Raise the global libvips
+    // budget only for the pyramid sink, then restore preview/native-tile limits.
+    let previous = unsafe { libvips::bindings::vips_concurrency_get() };
+    unsafe { libvips::bindings::vips_concurrency_set(threads) };
+    let result = image
+        .image_write_to_file(&format!("{output}.dz[container=fs,{options}]"))
+        .map_err(|e| e.to_string());
+    unsafe { libvips::bindings::vips_concurrency_set(previous) };
+    result
+}
+
 fn dz_options(args: &[String]) -> Result<String, String> {
     let mut options = Vec::new();
     for arg in args {
@@ -443,6 +496,7 @@ fn dz_options(args: &[String]) -> Result<String, String> {
                 | "background=52 54 51"
                 | "suffix=.png[strip]"
                 | "suffix=.jpg[Q=85,strip,background=52 54 51]"
+                | "Q=85"
         ) {
             return Err("Unsupported pyramid option.".into());
         }
@@ -528,7 +582,7 @@ mod tests {
     }
 
     #[test]
-    fn raw_ushort_bridge_preserves_high_byte_display_pixels() {
+    fn raw_and_channel_bridges_preserve_display_pixels() {
         // This is the only in-process VipsApp test. Other decoder tests use
         // isolated processes, so libvips initialization cannot race here.
         let app = VipsApp::new("aperture-raw-binding-test", false).unwrap();
@@ -577,7 +631,190 @@ mod tests {
         drop(difference);
         drop(expected);
         drop(actual);
+        channel_pyramids_match_materialized_planes(&mut worker, &directory);
         drop(worker);
         fs::remove_dir_all(directory).unwrap();
+    }
+
+    fn channel_pyramids_match_materialized_planes(worker: &mut Worker, directory: &Path) {
+        for (bits, bands, band) in [(8, 3, 2), (16, 3, 1), (16, 1, 0)] {
+            // Odd edges, more than one tile, and varying low bytes catch
+            // accidental changes to normalization/shrink order at every level.
+            let samples = (0..259 * 257 * bands)
+                .flat_map(|i| {
+                    let sample = ((i * 7919 + i / 259 * 257) % 65536) as u16;
+                    if bits == 16 {
+                        sample.to_ne_bytes().to_vec()
+                    } else {
+                        vec![(sample >> 8) as u8]
+                    }
+                })
+                .collect::<Vec<_>>();
+            let image = VipsImage::new_from_memory_copy(
+                &samples,
+                259,
+                257,
+                bands,
+                if bits == 16 {
+                    ops::BandFormat::Ushort
+                } else {
+                    ops::BandFormat::Uchar
+                },
+            )
+            .unwrap();
+            let source = directory.join(format!("channel-{bits}-{bands}.tif"));
+            reinterpret(
+                &image,
+                match (bits, bands) {
+                    (16, 1) => ops::Interpretation::Grey16,
+                    (16, _) => ops::Interpretation::Rgb16,
+                    _ => ops::Interpretation::Srgb,
+                },
+            )
+            .unwrap()
+            .image_write_to_file(source.to_str().unwrap())
+            .unwrap();
+            let source = format!("{}[page=0,n=1,access=sequential]", source.display());
+            if bits == 8 {
+                rgb_direct_pyramid_matches(worker, directory, &source);
+            }
+            let actual = directory.join(format!("actual-{bits}-{bands}"));
+            worker
+                .process(Request::ChannelPyramid {
+                    input: source.clone(),
+                    output: actual.to_str().unwrap().into(),
+                    band,
+                    ushort: bits == 16,
+                })
+                .unwrap();
+            let raw = directory.join("raw.v").to_str().unwrap().to_owned();
+            let cast = directory.join("cast.v").to_str().unwrap().to_owned();
+            let normalized = directory.join("normalized.v").to_str().unwrap().to_owned();
+            worker
+                .command(
+                    "vips",
+                    &[
+                        "extract_band".into(),
+                        source,
+                        raw.clone(),
+                        band.to_string(),
+                        "--n=1".into(),
+                    ],
+                )
+                .unwrap();
+            let pixels = if bits == 16 {
+                worker
+                    .command(
+                        "vips",
+                        &[
+                            "cast".into(),
+                            raw,
+                            cast.clone(),
+                            "uchar".into(),
+                            "--shift".into(),
+                        ],
+                    )
+                    .unwrap();
+                cast
+            } else {
+                raw
+            };
+            worker
+                .command(
+                    "vips",
+                    &[
+                        "copy".into(),
+                        pixels,
+                        normalized.clone(),
+                        "--interpretation=b-w".into(),
+                    ],
+                )
+                .unwrap();
+            let expected = directory.join(format!("expected-{bits}-{bands}"));
+            worker
+                .command(
+                    "vips",
+                    &[
+                        "dzsave".into(),
+                        normalized,
+                        expected.to_str().unwrap().into(),
+                        "--tile-size=256".into(),
+                        "--overlap=0".into(),
+                        "--suffix=.png[strip]".into(),
+                        "--depth=onepixel".into(),
+                    ],
+                )
+                .unwrap();
+            let actual_tiles = actual.with_file_name(format!("actual-{bits}-{bands}_files"));
+            let expected_tiles = expected.with_file_name(format!("expected-{bits}-{bands}_files"));
+            for level in fs::read_dir(&actual_tiles).unwrap() {
+                let level = level.unwrap();
+                if !level.file_type().unwrap().is_dir() {
+                    continue;
+                }
+                for tile in fs::read_dir(level.path()).unwrap() {
+                    let tile = tile.unwrap();
+                    let expected_tile = expected_tiles
+                        .join(level.file_name())
+                        .join(tile.file_name());
+                    let a = VipsImage::new_from_file(tile.path().to_str().unwrap()).unwrap();
+                    let b = VipsImage::new_from_file(expected_tile.to_str().unwrap()).unwrap();
+                    assert_eq!(
+                        (a.get_width(), a.get_height()),
+                        (b.get_width(), b.get_height())
+                    );
+                    assert_eq!(
+                        a.image_write_to_memory(),
+                        b.image_write_to_memory(),
+                        "{}",
+                        tile.path().display()
+                    );
+                }
+            }
+        }
+    }
+
+    fn rgb_direct_pyramid_matches(worker: &mut Worker, directory: &Path, source: &str) {
+        for (name, jpeg) in [
+            ("rgb-direct", "--Q=85"),
+            (
+                "rgb-suffix",
+                "--suffix=.jpg[Q=85,strip,background=52 54 51]",
+            ),
+        ] {
+            worker
+                .command(
+                    "vips",
+                    &[
+                        "dzsave".into(),
+                        source.into(),
+                        directory.join(name).to_str().unwrap().into(),
+                        "--tile-size=256".into(),
+                        "--overlap=0".into(),
+                        jpeg.into(),
+                        "--background=52 54 51".into(),
+                        "--depth=onepixel".into(),
+                    ],
+                )
+                .unwrap();
+            assert_eq!(unsafe { libvips::bindings::vips_concurrency_get() }, 2);
+        }
+        for level in fs::read_dir(directory.join("rgb-direct_files")).unwrap() {
+            let level = level.unwrap();
+            if !level.file_type().unwrap().is_dir() {
+                continue;
+            }
+            for tile in fs::read_dir(level.path()).unwrap() {
+                let tile = tile.unwrap();
+                let expected = directory
+                    .join("rgb-suffix_files")
+                    .join(level.file_name())
+                    .join(tile.file_name())
+                    .with_extension("jpg");
+                let a = VipsImage::new_from_file(tile.path().to_str().unwrap()).unwrap();
+                let b = VipsImage::new_from_file(expected.to_str().unwrap()).unwrap();
+                assert_eq!(a.image_write_to_memory(), b.image_write_to_memory());
+            }
+        }
     }
 }

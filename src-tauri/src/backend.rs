@@ -680,14 +680,15 @@ fn load(job: &Arc<Job>) -> Result<(), String> {
         ),
         None => (options.to_string(), scale),
     };
-    // Large, ordinary gray16/RGB8 strips use full-coverage area reduction. Other
+    // Large, ordinary gray/RGB8 strips use full-coverage area reduction. Other
     // layouts retain libvips, and full-resolution detail always uses libvips.
     let raw_preview = uses_worker(job)
         && ((pixel == "ushort" && field(&header, "bands") == Some("1"))
             || (pixel == "uchar"
-                && field(&header, "bands") == Some("3")
-                && field(&header, "interpretation") == Some("srgb")))
-        && u64::from(width) * u64::from(height) >= 64 * 1024 * 1024
+                && (field(&header, "bands") == Some("1")
+                    || (field(&header, "bands") == Some("3")
+                        && field(&header, "interpretation") == Some("srgb")))))
+        && u64::from(width) * u64::from(height) >= 16 * 1024 * 1024
         && preview_options == options
         && worker_call(
             job,
@@ -702,9 +703,13 @@ fn load(job: &Arc<Job>) -> Result<(), String> {
                     .ok_or("Image decoder path is not UTF-8")?
                     .into(),
                 max_edge: 1024,
-                threads: thread::available_parallelism()
-                    .map_or(1, |n| n.get())
-                    .min(8),
+                threads: thread::available_parallelism().map_or(1, |n| n.get()).min(
+                    if u64::from(width) * u64::from(height) >= 256 * 1024 * 1024 {
+                        16
+                    } else {
+                        8
+                    },
+                ),
             },
         )? == "used";
     if !raw_preview {
@@ -732,6 +737,17 @@ fn load(job: &Arc<Job>) -> Result<(), String> {
     housekeeping(job)?;
     job.update(|state| state.tiles_ready = true);
     if job.native.lock().unwrap().is_empty() {
+        // The direct JPEG saver avoids constructing a new libvips graph per tile.
+        // Ushort keeps its existing shrink-then-convert order for pixel parity.
+        let jpeg = if uses_worker(job)
+            && pixel == "uchar"
+            && field(&header, "bands") == Some("3")
+            && field(&header, "interpretation") == Some("srgb")
+        {
+            "--Q=85"
+        } else {
+            "--suffix=.jpg[Q=85,strip,background=52 54 51]"
+        };
         run(
             job,
             "vips",
@@ -741,7 +757,7 @@ fn load(job: &Arc<Job>) -> Result<(), String> {
                 dir.join("tiles").into_os_string(),
                 "--tile-size=256".into(),
                 "--overlap=0".into(),
-                "--suffix=.jpg[Q=85,strip,background=52 54 51]".into(),
+                jpeg.into(),
                 "--background=52 54 51".into(),
                 "--depth=onepixel".into(),
             ],
@@ -963,32 +979,37 @@ fn load_channels(job: &Arc<Job>, width: u32, height: u32, ushort: bool) -> Resul
     housekeeping(job)?;
     if !native {
         for (index, plane) in planes.iter().enumerate() {
-            let normalized = job.work.join(format!("channel-{index}.v"));
-            extract_plane(
-                job,
-                input(job, &format!("[page={},n=1,access=sequential]", plane.page)),
-                plane.band,
-                &normalized,
-                ushort,
-            )?;
-            let result = run(
-                job,
-                "vips",
-                &[
-                    "dzsave".into(),
-                    normalized.clone().into_os_string(),
-                    dir.join("channels")
-                        .join(index.to_string())
-                        .join("tiles")
-                        .into_os_string(),
-                    "--tile-size=256".into(),
-                    "--overlap=0".into(),
-                    "--suffix=.png[strip]".into(),
-                    "--depth=onepixel".into(),
-                ],
-            );
-            let _ = fs::remove_file(normalized);
-            result?;
+            let source = input(job, &format!("[page={},n=1,access=sequential]", plane.page));
+            let destination = dir.join("channels").join(index.to_string()).join("tiles");
+            if uses_worker(job) {
+                worker_call(
+                    job,
+                    &crate::vips_worker::Request::ChannelPyramid {
+                        input: source.to_str().ok_or("Invalid image path.")?.into(),
+                        output: destination.to_str().ok_or("Invalid pyramid path.")?.into(),
+                        band: plane.band,
+                        ushort,
+                    },
+                )?;
+            } else {
+                let normalized = job.work.join(format!("channel-{index}.v"));
+                extract_plane(job, source, plane.band, &normalized, ushort)?;
+                let result = run(
+                    job,
+                    "vips",
+                    &[
+                        "dzsave".into(),
+                        normalized.clone().into_os_string(),
+                        destination.into_os_string(),
+                        "--tile-size=256".into(),
+                        "--overlap=0".into(),
+                        "--suffix=.png[strip]".into(),
+                        "--depth=onepixel".into(),
+                    ],
+                );
+                let _ = fs::remove_file(normalized);
+                result?;
+            }
             job.update(|state| {
                 state.progress = Some((index + 1) as f64 / planes.len() as f64);
             });
@@ -1438,7 +1459,16 @@ pub fn read_asset(job: &Arc<Job>, asset: Asset) -> Result<Vec<u8>, (u16, String)
                     .join(format!("{x}_{y}.jpg"))
             }
         };
-        if let Ok(bytes) = fs::read(&path) {
+        // libvips' direct DeepZoom saver uses .jpeg; older caches use .jpg.
+        if let Ok(bytes) = fs::read(&path).or_else(|error| {
+            if path.extension().is_some_and(|ext| ext == "jpg")
+                && error.kind() == std::io::ErrorKind::NotFound
+            {
+                fs::read(path.with_extension("jpeg"))
+            } else {
+                Err(error)
+            }
+        }) {
             // dzsave writes each tile directly; only expose complete JPEG streams.
             if bytes.starts_with(&[0xff, 0xd8]) && bytes.ends_with(&[0xff, 0xd9]) {
                 return Ok(bytes);
