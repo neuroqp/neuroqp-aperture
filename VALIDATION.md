@@ -407,8 +407,92 @@ Local JSON and screenshot evidence stays ignored under `test-data/color-*`.
 Coverage is limited to the supported TIFF layouts and these generated fixtures.
 OME mapping, planar-separate multiband TIFFs, scientific alpha layouts, and
 single-directory contiguous ImageJ hyperstacks report explicit errors. Color
-uses 8-bit display samples; original 16-bit pixels remain intact. Compositing is
-on the UI thread with frame-coalesced updates and OSD visible-tile invalidation;
-32-channel, large-preview smoothness and large multichannel datasets have not
-been validated. Display range still samples the original preview histogram
+uses 8-bit display samples; original 16-bit pixels remain intact. The original CPU compositor used UI-thread tile invalidation; the GPU follow-up
+below replaces that path when WebGL2 is available. Display range still samples the original preview histogram
 (first channel for scientific channel TIFFs), not the recolored composite.
+
+## GPU color rendering (October 9, 2026)
+
+Color now uses a custom OpenSeadragon WebGL2 drawer. Source samples are uploaded
+once per tile-cache lifetime. Color edits upload a 256 × 32 RGBA float lookup
+(128 KiB), then replay the last displayed tile geometry in a coalesced microtask.
+Normal OpenSeadragon frames still select tiles, advance blending and update
+camera transforms. Evicted textures invalidate replay; unavailable/lost GPU
+contexts recover through the existing CPU compositor. No wgpu, new dependency,
+Rust loading change, or pyramid-conversion optimization is included.
+
+The first GPU implementation waited for the next OpenSeadragon frame. Native
+measurement exposed that scheduling delay, so the second iteration added cached
+geometry replay. On the same pre-existing 9,878 × 7,410 RGB SubIFD pyramid and
+2,832 × 1,558 drawing surface (DPR 2), measured results were:
+
+| Renderer                              | Input to viewport submission, median / p95 | Next-frame opportunity, median / p95 |
+| ------------------------------------- | ------------------------------------------ | ------------------------------------ |
+| CPU baseline, 30 edits                | 576 / 625 ms                               | 576 / 625 ms                         |
+| GPU, scheduled OSD redraw, 20 edits   | 29 / 30 ms                                 | 60 / 60 ms                           |
+| GPU, cached geometry replay, 40 edits | 2 / 2 ms                                   | 27 / 27 ms                           |
+
+The replay run observed GPU completion at 4 / 6 ms (median / p95, including
+fence polling). All three runs used the fitted view after loading. The final CPU
+and GPU runs recorded zero tile fetches; the GPU run additionally recorded zero
+2D pixel readbacks or source texture uploads. CPU recoloring made 3,030 readbacks
+across its 30 measured edits. GPU frame intervals were 33 / 34 ms rather than the
+CPU baseline's 34 / 589 ms (median / p95). These native runs were unfocused and
+WebKit ran animation frames near 30 Hz. Neither submission, a fence, nor the
+next animation frame proves physical display presentation or 60 Hz performance.
+
+Run the reproducible native benchmark against an already-open, fitted pyramid:
+
+```sh
+python3 scripts/native-color-benchmark.py --session test-data/color-session.json \
+  --output test-data/gpu-benchmark.json --trials 40 --warmup 8 --gpu-fence
+```
+
+The session file contains the WebKitWebDriver `sessionId`; the driver defaults
+to localhost:4444. Navigate the native webview to `tauri://localhost/?colorBenchmark`
+for viewport diagnostics and sustained validation. Add `colorRenderer=cpu` for
+the previous CPU path. `--sustained --trials 120 --drag-interval-ms 16.6667`
+requests a continuous input stream and reports the cadence actually achieved,
+including coalesced inputs and a final-setting framebuffer check. Timing uses
+the real Color input handler; framebuffer readback is a separate correctness
+pass. GPU fences are optional because polling itself adds measurement overhead.
+Raw JSON, screenshots and generated microscopy fixtures remain ignored in
+`test-data/`; source test images are never modified.
+
+A prebuilt 513 × 385, 32-channel uint16 pyramid exercised all channels on the
+same drawing surface, including one-pixel-wide edge tiles. Low-intensity output
+colors kept all contributions visible instead of saturating the composite.
+After all display tiles were resident, 40 edits submitted at 1 / 2 ms and GPU
+completion was observed at 9 / 11 ms (median / p95). An integer `texelFetch`
+shader iteration changed the median completion observation from 10 to 9 ms,
+with no p95 improvement; this small difference is not evidence of a substantial
+speedup. Its explicit RGB branch also bounds vector indexing. The comparison
+used a shader replacement in the running native WebGL context to retain exactly
+the same source textures; the final embedded build was then rebuilt and checked.
+
+A separate 120-input sustained run on that settled 32-channel view submitted all
+120 changes, matched the final setting's reference framebuffer, and recorded
+zero fetches, source uploads or pixel readbacks. Submission was 1 / 2 ms and the
+next-frame opportunity 17 / 32 ms. Requested input spacing was 16.67 ms; WebKit's
+unfocused event loop achieved 30 / 30 ms. This does not establish 60 Hz dragging.
+The 32-channel fixture is a rendering stress test, not proof of large-file load
+performance. Larger five-channel runs were excluded from settled-render claims
+because their tile caches were still loading.
+
+A native shader check compared 19,080 screen samples against the actual cached
+32-channel planes and found zero byte differences. Comparing against the original
+synthetic TIFF instead exposed some zero-valued decoded display samples; these
+zeros already existed before GPU upload. That conversion discrepancy is deferred
+with the loading/conversion work and must not be described as fixed here.
+
+The final embedded Linux build passed 53 frontend tests, production/Tauri builds
+and formatting. Native checks verified real pointer dragging changes pixels,
+brightness/contrast and custom colors, exact Reset and return-to-Fit, black with
+all routes removed, and CPU recovery after forced `WEBGL_lose_context` with
+custom settings retained. EXIF orientation 6, grayscale16, the 2,051 × 1,025 odd
+pyramid and the existing alpha-image display path were compared against CPU
+rendering. GPU horizontal flip matched the exact mirrored framebuffer. A final
+40-edit RGB run reproduced 2 / 2 ms submission and 4 / 6 ms observed completion
+with only lookup uploads; a 120-input RGB run also retained the final setting.
+Independent renderer and benchmark reviews found no remaining blockers. Rust
+source and image conversion are unchanged by this GPU follow-up.

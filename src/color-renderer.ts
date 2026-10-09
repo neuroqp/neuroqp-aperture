@@ -3,8 +3,8 @@ import type { ColorSettings } from "./color-settings";
 import { copyColorSettings } from "./color-settings.ts";
 import type { ImageState } from "./image";
 
-const planeType = "aperturePlanes";
-type Planes = { width: number; height: number; planes: Uint8Array[] };
+export const planeType = "aperturePlanes";
+export type Planes = { width: number; height: number; planes: Uint8Array[] };
 type ColorSource = OpenSeadragon.TileSourceOptions & {
   getTileUrl: (level: number, x: number, y: number) => string;
   apertureChannelCount?: number;
@@ -20,7 +20,31 @@ export function composeColorPixels(
   const size = planes[0]?.length ?? 0;
   if (planes.some((plane) => plane.length !== size))
     throw new Error("Channel tile dimensions differ.");
-  const lookup = planes.map(() => new Float64Array(256 * 3));
+  const lookup = colorLookup(planes.length, settings);
+  const output = new Uint8ClampedArray(size * 4);
+  for (let pixel = 0; pixel < size; pixel++) {
+    let red = 0,
+      green = 0,
+      blue = 0;
+    for (let channel = 0; channel < planes.length; channel++) {
+      const at = planes[channel][pixel] * 3;
+      const table = lookup[channel];
+      red += table[at];
+      green += table[at + 1];
+      blue += table[at + 2];
+    }
+    const at = pixel * 4;
+    output[at] = red;
+    output[at + 1] = green;
+    output[at + 2] = blue;
+    output[at + 3] = alpha?.[pixel] ?? 255;
+  }
+  return output;
+}
+
+/** Keep route clipping ahead of summation, including values above 255. */
+export function colorLookup(count: number, settings: ColorSettings) {
+  const lookup = Array.from({ length: count }, () => new Float64Array(256 * 3));
   for (const route of settings.connections) {
     const table = lookup[Number(route.source)];
     const hex = settings.colors[route.color];
@@ -42,25 +66,7 @@ export function composeColorPixels(
         table[value * 3 + component] += intensity * color[component];
     }
   }
-  const output = new Uint8ClampedArray(size * 4);
-  for (let pixel = 0; pixel < size; pixel++) {
-    let red = 0,
-      green = 0,
-      blue = 0;
-    for (let channel = 0; channel < planes.length; channel++) {
-      const at = planes[channel][pixel] * 3;
-      const table = lookup[channel];
-      red += table[at];
-      green += table[at + 1];
-      blue += table[at + 2];
-    }
-    const at = pixel * 4;
-    output[at] = red;
-    output[at + 1] = green;
-    output[at + 2] = blue;
-    output[at + 3] = alpha?.[pixel] ?? 255;
-  }
-  return output;
+  return lookup;
 }
 
 function rendered(planes: Planes, settings: ColorSettings, alpha?: Uint8Array) {
@@ -148,6 +154,7 @@ export function bindColorRenderer(
   let revision = 0;
   let disposed = false;
   const handleTile = async (event: OpenSeadragon.TileInvalidatedEvent) => {
+    if (viewer.drawer.getType() === "aperture-gpu") return;
     const source = event.tiledImage.source as OpenSeadragon.TileSource &
       ColorSource;
     const count = source.apertureChannelCount;
@@ -201,8 +208,17 @@ export function bindColorRenderer(
     }
   };
   viewer.addHandler("tile-invalidated", handleTile);
+  if (viewer.drawer.getType() !== "aperture-gpu")
+    viewer.drawer.canvas.dataset.colorRenderer = "cpu";
   return {
     refresh() {
+      if (viewer.drawer.getType() === "aperture-gpu") {
+        (
+          viewer.drawer as OpenSeadragon.DrawerBase & { refreshColors(): void }
+        ).refreshColors();
+        return;
+      }
+      viewer.drawer.canvas.dataset.colorRenderer = "cpu";
       revision++;
       if (frame || disposed) return;
       frame = requestAnimationFrame(() => {

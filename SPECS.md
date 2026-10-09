@@ -130,7 +130,7 @@ on Open or Close. Cancellation or save failure must retain unsaved edits.
   Neutral custom shades belong to Gray. The Gray preset is white so a grayscale
   channel retains its full intensity range. A header help tooltip explains the
   interactions. Support both app themes and keyboard access.
-- Color settings update cached display pixels live, without decoding the source
+- Color settings update the GPU view live, without decoding the source
   again, rebuilding pyramids, or modifying source pixels or annotations. Each
   connection adjusts its source intensity, tints it with its output color, and
   contributes additively to a clamped RGB composite. Display range then adjusts
@@ -142,6 +142,12 @@ on Open or Close. Cancellation or save failure must retain unsaved edits.
   unsupported OME mapping and ambiguous alpha layouts with an explicit error.
   Channel TIFF display caches retain separate lossless 8-bit planes (16-bit
   inputs use their high byte); these are display samples, not scientific exports.
+  Use WebGL2 to retain immutable channel textures and apply a small color lookup
+  in the shader. Coalesce settings changes within an event-loop turn and redraw
+  the last displayed tile geometry immediately; OpenSeadragon still owns tile
+  selection, pan, zoom, and cache eviction. Fall back to CPU compositing if WebGL2
+  is unavailable or the context is lost. GPU optimization must not change the
+  image-loading or pyramid-generation pipeline.
 - Use the approved T1/B2/C1/D1/S1/P2/M2 styling: recessed lavender toggles, tinted
   action buttons, solid purple checkboxes, raised dropdowns, fine round-handle
   sliders, and quiet compact panels. Use purple and orange accents in light and

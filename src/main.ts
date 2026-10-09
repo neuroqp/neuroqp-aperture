@@ -21,6 +21,7 @@ import { bindTheme } from "./theme";
 import { applyDisplay, loadHistogram } from "./display";
 import { bindColorPanel } from "./color-panel";
 import { bindColorRenderer } from "./color-renderer";
+import { createGpuColorDrawer } from "./gpu-color-drawer";
 import {
   ImageLoader,
   orientation,
@@ -100,12 +101,27 @@ const tools = bindTools(applyDisplay, updatePointTool, {
 bindTheme();
 const native = isTauri();
 const windowHandle = native ? getCurrentWindow() : null;
+let colorRenderer: ReturnType<typeof bindColorRenderer> | undefined;
+const colorPanel = bindColorPanel(() => colorRenderer?.refresh());
+const colorError = (message: string) => {
+  tileError = message;
+  if (currentImage) showImage(currentImage);
+};
+const GpuColorDrawer = createGpuColorDrawer(
+  OpenSeadragon,
+  () => colorPanel.settings(),
+  (message) => queueMicrotask(() => colorError(message)),
+);
 const viewer = OpenSeadragon({
   element: $("viewer"),
   showNavigationControl: false,
   showSequenceControl: false,
   showNavigator: false,
-  drawer: "canvas",
+  // A diagnostic switch keeps the previous renderer available for native A/B checks.
+  drawer:
+    new URLSearchParams(location.search).get("colorRenderer") === "cpu"
+      ? "canvas"
+      : [GpuColorDrawer, "canvas"],
   crossOriginPolicy: "Anonymous",
   imageSmoothingEnabled: false,
   imageLoaderLimit: 4,
@@ -119,16 +135,14 @@ const viewer = OpenSeadragon({
   pixelsPerArrowPress: 300,
   gestureSettingsMouse: { clickToZoom: false, dblClickToZoom: true },
 });
+if (new URLSearchParams(location.search).has("colorBenchmark")) {
+  Object.assign(window, { __apertureViewer: viewer });
+}
 
-let colorRenderer: ReturnType<typeof bindColorRenderer> | undefined;
-const colorPanel = bindColorPanel(() => colorRenderer?.refresh());
 colorRenderer = bindColorRenderer(
   viewer,
   () => colorPanel.settings(),
-  (message) => {
-    tileError = message;
-    if (currentImage) showImage(currentImage);
-  },
+  colorError,
 );
 let colorImageId: string | null = null;
 

@@ -8,6 +8,10 @@ Display range, Color, and multi-point options open independently at the viewer's
 Color connects image channels to editable output colors, with live brightness
 and contrast per connection. Drag wires to reroute or remove them; click an
 output to pick its shade. These settings affect only the display.
+WebGL2 keeps image samples on the GPU and redraws cached tiles when colors change;
+unavailable or lost GPU contexts fall back to CPU rendering. No additional Rust
+renderer or graphics dependency is required. Loading and pyramid generation are
+separate from this rendering path.
 Point type, color, and size buttons preview the current combination. The header's
 sun/moon button switches light and dark modes and remembers your choice; the
 initial theme follows the system.
