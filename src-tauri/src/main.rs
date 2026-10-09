@@ -2,9 +2,12 @@
 mod annotation_io;
 mod backend;
 mod channels;
+mod decoder;
 mod native;
+mod raw_tiff;
 mod roi;
 mod tiff_annotations;
+mod vips_worker;
 
 use backend::{Backend, ImageState};
 use std::sync::atomic::Ordering;
@@ -116,6 +119,13 @@ async fn save_annotations(
 }
 
 fn main() {
+    if std::env::args_os().nth(1).as_deref() == Some(std::ffi::OsStr::new("--image-worker")) {
+        if let Err(error) = vips_worker::worker_main() {
+            eprintln!("{error}");
+            std::process::exit(1);
+        }
+        return;
+    }
     tauri::Builder::default()
         .plugin(tauri_plugin_single_instance::init(|app, _, _| {
             if let Some(window) = app.get_webview_window("main") {

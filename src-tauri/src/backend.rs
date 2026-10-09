@@ -59,6 +59,7 @@ pub struct Job {
     root: PathBuf,
     cache_key: String,
     process_number: AtomicU64,
+    decoder: Mutex<Option<Arc<crate::decoder::Decoder>>>,
     notifier: Option<Notifier>,
     budget_check: Mutex<Instant>,
     housekeeping: AtomicBool,
@@ -132,7 +133,7 @@ impl Backend {
             return Err("Supported formats: JPEG, PNG, BMP, WebP, TIFF and BigTIFF.".into());
         }
         let mut hasher = DefaultHasher::new();
-        "aperture-display-v4-channels".hash(&mut hasher);
+        "aperture-display-v5-area-preview".hash(&mut hasher);
         source.hash(&mut hasher);
         metadata.len().hash(&mut hasher);
         #[cfg(unix)]
@@ -201,6 +202,7 @@ impl Backend {
             root: self.root.clone(),
             cache_key,
             process_number: AtomicU64::new(0),
+            decoder: Mutex::new(None),
             notifier: self.notifier.clone(),
             budget_check: Mutex::new(Instant::now()),
             housekeeping: AtomicBool::new(false),
@@ -220,7 +222,18 @@ impl Backend {
                     state.detail = "Image loading failed.".into();
                 });
             }
+            // Generated pyramids need no decoder once complete; native tiles do.
+            if job.native.lock().unwrap().is_empty() {
+                let decoder = job.decoder.lock().unwrap().take();
+                if let Some(decoder) = decoder {
+                    decoder.stop();
+                }
+            }
             if job.cancel.load(Ordering::Relaxed) || job.state.lock().unwrap().phase == "error" {
+                let decoder = job.decoder.lock().unwrap().clone();
+                if let Some(decoder) = decoder {
+                    decoder.stop();
+                }
                 let dir = job.dir.lock().unwrap().clone();
                 if dir
                     .file_name()
@@ -274,6 +287,10 @@ impl Job {
             state.clone()
         };
         self.notify(&snapshot);
+        let decoder = self.decoder.lock().unwrap().clone();
+        if let Some(decoder) = decoder {
+            decoder.stop();
+        }
     }
     fn update(&self, action: impl FnOnce(&mut ImageState)) {
         let snapshot = {
@@ -296,6 +313,9 @@ impl Job {
 
 impl Drop for Job {
     fn drop(&mut self) {
+        if let Some(decoder) = self.decoder.get_mut().unwrap().take() {
+            decoder.stop();
+        }
         let _ = fs::remove_dir_all(&self.work);
     }
 }
@@ -660,19 +680,48 @@ fn load(job: &Arc<Job>) -> Result<(), String> {
         ),
         None => (options.to_string(), scale),
     };
-    run(
-        job,
-        "vips",
-        &[
-            "resize".into(),
-            input(job, &preview_options),
-            OsString::from(format!(
-                "{}[Q=85,strip,background=52 54 51]",
-                preview_partial.display()
-            )),
-            preview_scale.to_string().into(),
-        ],
-    )?;
+    // Large, ordinary gray16/RGB8 strips use full-coverage area reduction. Other
+    // layouts retain libvips, and full-resolution detail always uses libvips.
+    let raw_preview = uses_worker(job)
+        && ((pixel == "ushort" && field(&header, "bands") == Some("1"))
+            || (pixel == "uchar"
+                && field(&header, "bands") == Some("3")
+                && field(&header, "interpretation") == Some("srgb")))
+        && u64::from(width) * u64::from(height) >= 64 * 1024 * 1024
+        && preview_options == options
+        && worker_call(
+            job,
+            &crate::vips_worker::Request::RawPreview {
+                input: job
+                    .input
+                    .to_str()
+                    .ok_or("Image decoder path is not UTF-8")?
+                    .into(),
+                output: preview_partial
+                    .to_str()
+                    .ok_or("Image decoder path is not UTF-8")?
+                    .into(),
+                max_edge: 1024,
+                threads: thread::available_parallelism()
+                    .map_or(1, |n| n.get())
+                    .min(8),
+            },
+        )? == "used";
+    if !raw_preview {
+        run(
+            job,
+            "vips",
+            &[
+                "resize".into(),
+                input(job, &preview_options),
+                OsString::from(format!(
+                    "{}[Q=85,strip,background=52 54 51]",
+                    preview_partial.display()
+                )),
+                preview_scale.to_string().into(),
+            ],
+        )?;
+    }
     fs::rename(preview_partial, dir.join("preview.jpg")).map_err(|e| e.to_string())?;
     job.update(|s| {
         s.preview_ready = true;
@@ -814,59 +863,93 @@ fn load_channels(job: &Arc<Job>, width: u32, height: u32, ushort: bool) -> Resul
     let native = !job.native.lock().unwrap().is_empty();
     let complete = job.root.join(&job.cache_key);
     let dir = job.dir.lock().unwrap().clone();
-    for (index, plane) in planes.iter().enumerate() {
-        let channel = dir.join("channels").join(index.to_string());
-        fs::create_dir_all(&channel).map_err(|e| e.to_string())?;
-        let level = {
-            let levels = job.native.lock().unwrap();
-            levels
-                .iter()
-                .find(|level| level.width.max(level.height) <= 1024)
-                .or_else(|| levels.last())
-                .cloned()
-        };
-        let (options, scale) = match level {
-            Some(level) => (
-                level.options,
-                (1024.0 / level.width.max(level.height) as f64).min(1.0),
-            ),
-            None => (
-                format!("[page={},n=1,access=sequential]", plane.page),
-                (1024.0 / width.max(height) as f64).min(1.0),
-            ),
-        };
-        let resized = job.work.join(format!("preview-{index}.v"));
-        run(
+    let level = {
+        let levels = job.native.lock().unwrap();
+        levels
+            .iter()
+            .find(|level| level.width.max(level.height) <= 1024)
+            .or_else(|| levels.last())
+            .cloned()
+    };
+    if uses_worker(job) {
+        let (options, scale): (Vec<_>, Vec<_>) = planes
+            .iter()
+            .map(|plane| match &level {
+                Some(level) => (
+                    level.options.clone(),
+                    (1024.0 / level.width.max(level.height) as f64).min(1.0),
+                ),
+                None => (
+                    format!("[page={},n=1,access=sequential]", plane.page),
+                    (1024.0 / width.max(height) as f64).min(1.0),
+                ),
+            })
+            .unzip();
+        worker_call(
             job,
-            "vips",
-            &[
-                "resize".into(),
-                input(job, &options),
-                resized.clone().into_os_string(),
-                scale.to_string().into(),
-            ],
+            &crate::vips_worker::Request::ChannelPreviews {
+                input: job
+                    .input
+                    .to_str()
+                    .ok_or("Image decoder path is not UTF-8")?
+                    .into(),
+                options,
+                scale,
+                planes: planes.clone(),
+                ushort,
+                directory: dir
+                    .to_str()
+                    .ok_or("Image decoder path is not UTF-8")?
+                    .into(),
+            },
         )?;
-        let partial = channel.join("preview.partial.png");
-        extract_plane(
-            job,
-            resized.clone().into_os_string(),
-            plane.band,
-            &partial,
-            ushort,
-        )?;
-        let _ = fs::remove_file(resized);
-        fs::rename(partial, channel.join("preview.png")).map_err(|e| e.to_string())?;
-        if index == 0 {
-            // Display range histogram retains the first channel preview.
+    } else {
+        for (index, plane) in planes.iter().enumerate() {
+            let channel = dir.join("channels").join(index.to_string());
+            fs::create_dir_all(&channel).map_err(|e| e.to_string())?;
+            let (options, scale) = match &level {
+                Some(level) => (
+                    level.options.clone(),
+                    (1024.0 / level.width.max(level.height) as f64).min(1.0),
+                ),
+                None => (
+                    format!("[page={},n=1,access=sequential]", plane.page),
+                    (1024.0 / width.max(height) as f64).min(1.0),
+                ),
+            };
+            let resized = job.work.join(format!("preview-{index}.v"));
             run(
                 job,
                 "vips",
                 &[
-                    "copy".into(),
-                    channel.join("preview.png").into_os_string(),
-                    dir.join("preview.jpg").into_os_string(),
+                    "resize".into(),
+                    input(job, &options),
+                    resized.clone().into_os_string(),
+                    scale.to_string().into(),
                 ],
             )?;
+            let partial = channel.join("preview.partial.png");
+            extract_plane(
+                job,
+                resized.clone().into_os_string(),
+                plane.band,
+                &partial,
+                ushort,
+            )?;
+            let _ = fs::remove_file(resized);
+            fs::rename(partial, channel.join("preview.png")).map_err(|e| e.to_string())?;
+            if index == 0 {
+                // Display range histogram retains the first channel preview.
+                run(
+                    job,
+                    "vips",
+                    &[
+                        "copy".into(),
+                        channel.join("preview.png").into_os_string(),
+                        dir.join("preview.jpg").into_os_string(),
+                    ],
+                )?;
+            }
         }
     }
     job.update(|state| {
@@ -1151,6 +1234,23 @@ pub(crate) fn run(job: &Job, program: &str, args: &[OsString]) -> Result<String,
     if job.cancel.load(Ordering::Relaxed) {
         return Err("Loading cancelled.".into());
     }
+    if uses_worker(job) && matches!(program, "vips" | "vipsheader") {
+        let args = args
+            .iter()
+            .map(|arg| {
+                arg.to_str()
+                    .map(String::from)
+                    .ok_or("Image decoder path is not UTF-8")
+            })
+            .collect::<Result<Vec<_>, _>>()?;
+        return worker_call(
+            job,
+            &crate::vips_worker::Request::Command {
+                program: program.into(),
+                args,
+            },
+        );
+    }
     let dir = job.work.clone();
     let number = job.process_number.fetch_add(1, Ordering::Relaxed);
     let stdout_path = dir.join(format!("stdout-{number}"));
@@ -1219,6 +1319,35 @@ pub(crate) fn run(job: &Job, program: &str, args: &[OsString]) -> Result<String,
     } else {
         Err("Could not read this image. It may be damaged or use an unsupported format.".into())
     }
+}
+
+fn uses_worker(job: &Job) -> bool {
+    #[cfg(test)]
+    if std::env::var_os("APERTURE_WORKER_EXECUTABLE").is_none() {
+        return false;
+    }
+    matches!(
+        job.input.extension().and_then(|s| s.to_str()),
+        Some("tif" | "tiff")
+    )
+}
+
+fn worker_call(job: &Job, request: &crate::vips_worker::Request) -> Result<String, String> {
+    let decoder = {
+        let mut slot = job.decoder.lock().unwrap();
+        if job.cancel.load(Ordering::Relaxed) {
+            return Err("Loading cancelled.".into());
+        }
+        if slot.is_none() {
+            *slot = Some(Arc::new(crate::decoder::Decoder::start(&job.work)?));
+        }
+        slot.as_ref().unwrap().clone()
+    };
+    let output = decoder.call(request, &job.cancel, || budget_exceeded(job, false))?;
+    if budget_exceeded(job, true) {
+        return Err("Display cache limit reached.".into());
+    }
+    Ok(output)
 }
 
 pub fn max_level(width: u32, height: u32) -> u32 {
@@ -1515,17 +1644,11 @@ mod tests {
             preview_metadata.modified().unwrap()
         );
         assert!(dir.join("manifest.json").is_file());
+        let job = backend.current.lock().unwrap().clone().unwrap();
         assert_eq!(
-            backend
-                .current
-                .lock()
-                .unwrap()
-                .as_ref()
-                .unwrap()
-                .process_number
-                .load(Ordering::Relaxed),
-            2,
-            "legacy cache migration uses only vipsheader and tiffinfo"
+            job.process_number.load(Ordering::Relaxed),
+            if uses_worker(&job) { 1 } else { 2 },
+            "legacy cache migration uses only metadata; vipsheader shares the worker"
         );
         for corrupt in [b"{invalid".to_vec(), vec![b'x'; 65537]] {
             fs::write(dir.join("manifest.json"), corrupt).unwrap();

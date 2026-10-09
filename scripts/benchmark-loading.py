@@ -10,10 +10,12 @@ means no completed app cache, not a cold operating-system filesystem cache.
 import argparse
 import base64
 import json
+from http.client import RemoteDisconnected
 from pathlib import Path
 import re
 import shutil
 import statistics
+import threading
 import time
 from urllib.request import Request, urlopen
 
@@ -25,6 +27,7 @@ def main():
     parser.add_argument("--output", type=Path, required=True)
     parser.add_argument("--cache-root", type=Path, required=True)
     parser.add_argument("--driver-url", default="http://127.0.0.1:4445")
+    parser.add_argument("--driver-pid", type=int, help="Linux process-tree RSS sampling through first draw")
     parser.add_argument("--rounds", type=int, default=3)
     parser.add_argument("--warm-only", action="store_true", help="Reuse existing app caches without clearing them")
     parser.add_argument("--timeout", type=float, default=180)
@@ -47,8 +50,18 @@ def main():
             method=method,
             headers={"Content-Type": "application/json"},
         )
-        with urlopen(req, timeout=30) as response:
-            value = json.load(response).get("value")
+        # WebKitWebDriver can close a connection during a page transition.
+        # Retry inspection only; never replay clicks or other mutations.
+        inspect_only = method == "GET" or (route.endswith("/execute/sync") and body["script"].startswith("return "))
+        for attempt in range(3):
+            try:
+                with urlopen(req, timeout=30) as response:
+                    value = json.load(response).get("value")
+                break
+            except RemoteDisconnected:
+                if not inspect_only or attempt == 2:
+                    raise
+                time.sleep(0.05)
         if isinstance(value, dict) and isinstance(value.get("error"), str):
             raise RuntimeError(value)
         return value
@@ -68,6 +81,31 @@ def main():
         return js("const done=arguments[arguments.length-1]; window.__TAURI_INTERNALS__.invoke(arguments[0]).then(done,e=>done({error:String(e)}));", [command], True)
 
     records = []
+    def rss_monitor(stop, peaks):
+        while not stop.is_set():
+            pending = [args.driver_pid]
+            seen = set()
+            tree = decoder = 0
+            while pending:
+                pid = pending.pop()
+                if pid in seen:
+                    continue
+                seen.add(pid)
+                proc = Path(f"/proc/{pid}")
+                try:
+                    status = proc.joinpath("status").read_text()
+                    match = re.search(r"^VmRSS:\s+(\d+)", status, re.M)
+                    rss = int(match[1]) if match else 0
+                    tree += rss
+                    if b"--image-worker" in proc.joinpath("cmdline").read_bytes():
+                        decoder += rss
+                    for task in proc.joinpath("task").iterdir():
+                        pending.extend(map(int, task.joinpath("children").read_text().split()))
+                except (OSError, ValueError):
+                    continue
+            peaks["treePeakRssMiB"] = max(peaks.get("treePeakRssMiB", 0), round(tree / 1024, 1))
+            peaks["decoderPeakRssMiB"] = max(peaks.get("decoderPeakRssMiB", 0), round(decoder / 1024, 1))
+            stop.wait(0.05)
     before = {str(path.resolve()): (path.stat().st_size, path.stat().st_mtime_ns) for path in args.images}
     try:
         url = request("GET", route + "/url").split("?")[0]
@@ -96,10 +134,22 @@ def main():
           viewer.drawer.draw=function(items) {
             const result=draw.call(this,items), metric=window.__loadBenchmark;
             if(metric.openAt && !metric.firstDrawMs) {
-              const preview=items.find(item=>item.source.maxLevel===0 && item.getTilesToDraw().some(({tile})=>tile.opacity>0 && this.getDataToDraw(tile)));
+              const preview=items.find(item=>{
+                const levels=new Map();
+                for(const {tile} of item.getTilesToDraw()) {
+                  if(!(tile.opacity>0) || !this.getDataToDraw(tile)) continue;
+                  const tiles=levels.get(tile.level) ?? new Set();
+                  tiles.add(`${tile.x},${tile.y}`);levels.set(tile.level,tiles);
+                }
+                return [...levels].some(([level,tiles])=>{
+                  const count=item.source.getNumTiles(level);
+                  return tiles.size===count.x*count.y;
+                });
+              });
               const drawn=preview && (this.packets?.some(packet=>packet.opacity>0) || this.getType()==='canvas');
               if(drawn) {
                 metric.firstDrawMs=performance.now()-metric.selectedAt;
+                metric.firstDrawKind=preview.source.maxLevel===0 ? 'preview' : 'complete-detail-level';
                 const tile=preview.getTilesToDraw()[0]?.tile;
                 const data=tile && this.getDataToDraw(tile);
                 metric.previewWidth=data?.width ?? data?.canvas?.width;
@@ -136,6 +186,11 @@ def main():
                                     and not entry.is_symlink() and entry.is_dir()
                                     and (entry / "complete").is_file()):
                                 shutil.rmtree(entry)
+                    stop = threading.Event()
+                    peaks = {}
+                    monitor = threading.Thread(target=rss_monitor, args=(stop, peaks)) if args.driver_pid else None
+                    if monitor:
+                        monitor.start()
                     js("window.__loadBenchmark={path:arguments[0]};document.getElementById('open-button').click();return true;", [str(image.resolve())])
                     deadline = time.monotonic() + args.timeout
                     while True:
@@ -146,9 +201,14 @@ def main():
                         if status["phase"] == "error":
                             raise RuntimeError(status)
                         if time.monotonic() > deadline:
+                            args.output.with_suffix(".timeout.png").write_bytes(base64.b64decode(request("GET", route + "/screenshot")))
                             raise TimeoutError((image, condition, metric, status))
                         time.sleep(0.01)
                     metric.update(image=image.name, condition=condition, round=round_index, renderer=renderer)
+                    stop.set()
+                    if monitor:
+                        monitor.join()
+                        metric.update(peaks)
                     if round_index == 0 and condition == "fresh":
                         screenshot = args.output.parent / f"{args.output.stem}-{image.stem}.png"
                         screenshot.write_bytes(base64.b64decode(request("GET", route + "/screenshot")))
@@ -179,6 +239,10 @@ def main():
         args.output.write_text(json.dumps({"records": records, "summary": summary}, indent=2) + "\n")
         print(json.dumps(summary, indent=2))
     finally:
+        if "stop" in locals():
+            stop.set()
+            if monitor:
+                monitor.join()
         request("DELETE", route)
         for path, stat in before.items():
             actual = Path(path).stat()
