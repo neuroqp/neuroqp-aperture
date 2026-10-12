@@ -874,11 +874,36 @@ mod tests {
         drop(difference);
         drop(expected);
         drop(actual);
-        // Exercise the actual native sink signal in the existing single
-        // VipsApp test, without another concurrently initialized native app.
-        let progress = Progress {
-            last: Mutex::new(Some((0, Instant::now() - Duration::from_secs(1)))),
-        };
+        // A tiny sink can finish before libvips emits an intermediate eval.
+        // Exercise the real GLib signal deterministically, without depending
+        // on image size, thread scheduling, or another VipsApp initialization.
+        let progress = Progress::new();
+        unsafe {
+            use libvips::bindings;
+            let image = bindings::vips_image_new();
+            assert!(!image.is_null());
+            let mut native_progress: bindings::VipsProgress = std::mem::zeroed();
+            native_progress.percent = 50;
+            {
+                let _hook = EvalProgress::new(&progress, 0.0, 1.0).unwrap();
+                // Both the image and payload stay alive during synchronous emission.
+                bindings::g_signal_emit_by_name(
+                    image.cast(),
+                    c"eval".as_ptr(),
+                    &native_progress as *const bindings::VipsProgress,
+                );
+            }
+            let reported = progress.last.lock().unwrap().take().unwrap().0;
+            // Removal must stop callbacks before their context is freed.
+            bindings::g_signal_emit_by_name(
+                image.cast(),
+                c"eval".as_ptr(),
+                &native_progress as *const bindings::VipsProgress,
+            );
+            bindings::g_object_unref(image.cast());
+            assert_eq!(reported, 5);
+            assert!(progress.last.lock().unwrap().is_none());
+        }
         let native_image = worker.open(source.to_str().unwrap()).unwrap();
         save_image(
             &native_image,
@@ -888,11 +913,6 @@ mod tests {
             1.0,
         )
         .unwrap();
-        assert!(progress
-            .last
-            .lock()
-            .unwrap()
-            .is_some_and(|(bucket, _)| bucket > 0));
         // Error returns remove their emission hook before callback data drops.
         assert!(save_image(
             &native_image,
