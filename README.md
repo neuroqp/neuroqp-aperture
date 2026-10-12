@@ -52,6 +52,12 @@ pnpm tauri build --debug --no-bundle
 
 ## Checks
 
+PR checks run Prettier, Rust formatting, TypeScript type checking, and frontend
+unit tests. They run once per PR update and cancel superseded runs. They do not
+install native dependencies or build the application.
+
+Run full validation locally with:
+
 ```sh
 pnpm format:check
 pnpm test
@@ -64,7 +70,9 @@ cargo clippy --manifest-path src-tauri/Cargo.toml --all-targets --locked -- -D w
 ```
 
 Use `pnpm format` and `cargo fmt --manifest-path src-tauri/Cargo.toml --all` to
-format changes. Linux CI runs the checks above.
+format changes. The **Native validation** workflow runs the full checks above
+manually from GitHub Actions. It becomes available after the workflow lands on
+`main`; choose the branch to validate with **Run workflow**.
 The executable override makes decoder tests use the production child worker.
 Without it, isolated unit runs retain the CLI fixture path.
 
