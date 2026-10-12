@@ -740,3 +740,185 @@ Repeat with `scripts/benchmark-loading.py`, a dedicated `XDG_CACHE_HOME` and
 `--driver-pid` for RSS. Use a separate D-Bus session when the normal app is open,
 so its single-instance guard and session are unaffected. Local ignored evidence
 is under `artifacts/worker-native/` and `artifacts/raw-strategies/`.
+
+## Parallel compressed strips and pyramid conversion, October 9, 2026
+
+This follow-up starts from merged PR #6, commit `610c8fa`. It changes new-file
+decoding and pyramid conversion. Workers still start on demand when an image is
+opened. Existing completed display caches are not used in the fresh trials.
+
+### Selected implementation
+
+Ordinary single-directory unsigned grayscale and RGB8 sRGB TIFFs of at least
+16 megapixels can use the existing full-coverage area reducer for uncompressed,
+LZW and Deflate strips. Each compressed worker owns an independent libtiff 4.5+
+handle, with mapping disabled. LibTIFF reverses predictors and returns native
+endian samples. Gray16 stays 16-bit until the existing preview JPEG conversion.
+The reducer uses eight available threads below 256 megapixels, up to sixteen
+above that threshold. Uncompressed reads remain capped at eight. This preview
+filter differs from libvips' Lanczos fallback; it includes every source pixel.
+
+Compressed and decoded strips are each capped at 16 MiB. Each native handle has
+a 16 MiB single-allocation limit. All declared directory-field payloads,
+including ignored private tags, count toward a 4 MiB metadata limit before
+opening handles. This last guard addresses a reproduced amplification case:
+eight 4 MiB private fields retained 36.4 MiB in one native handle despite its
+single-allocation limit. Unsupported layouts and larger strips/metadata fall
+back to libvips. Corrupt eligible strip data fails instead of displaying it.
+Existing pyramid selection, multipage/channel mapping and orientation rules
+remain in force.
+
+Pyramid sinks temporarily use up to eight libvips threads, restoring the normal
+two-thread preview/native-tile budget afterward. RGB8 sRGB uses direct JPEG
+region encoding at quality 85, eliminating a separate graph for every tile.
+Its native `.jpeg` tile names and older `.jpg` cache names both work through the
+existing asset URLs. Gray16 retains its shrink-then-convert order. Scientific
+channel pyramids now lazily extract, normalize and write PNG tiles in one graph,
+avoiding the full-resolution raw, normalized and final plane intermediates.
+The 2 GiB cache watchdog, process cancellation and source preservation remain.
+
+### Strategies tested
+
+Warm-file process medians for the generated 1.58 GB Deflate TIFF, three trials
+per budget, were 13.459 / 6.836 / 3.513 / 2.163 / 1.506 / 1.599 seconds for
+1 / 2 / 4 / 8 / 16 / 22 preview threads. Sixteen was selected. At sixteen,
+libdeflate plus a Rust predictor pass took 1.249 seconds for decoding, versus
+1.268 seconds through independent libtiff handles. LibTIFF was selected for
+equivalent measured speed, existing availability and LZW/predictor coverage.
+The final production libtiff reducer took 1.482 seconds in a separate check;
+its preview-byte checksum matched the earlier decoder experiment.
+
+For the 76.6 MB LZW derivative, production preview medians at 1 / 4 / 8 / 16
+threads were 935 / 268 / 187 / 240 ms. Smaller inputs retain eight threads.
+For the original 64.9 MB Deflate image, initialized-process decoding at
+1 / 2 / 4 / 8 threads took 301 / 152 / 82 / 47 ms with libdeflate and
+306 / 159 / 81 / 48 ms with libtiff.
+
+The initial RGB pyramid experiment took 1.853 seconds with the previous suffix
+and two threads, versus 0.472 seconds using direct JPEG and eight threads.
+All 1,548 tiles, 292.8 million decoded channel samples, matched exactly.
+These screening runs overlapped corpus generation; the native quiet repeats
+below are the final performance evidence. Gray16 direct encoding was rejected:
+it changes conversion order and produced a maximum decoded JPEG difference of 16. High-byte disk staging was rejected for the same ordering change; preserving
+full uint16 staging would exceed the large-image cache budget. No staging path
+or sampled-pixel preview was shipped.
+
+### Native measurements
+
+Hardware is Core Ultra 9 185H, 22 logical CPUs, 31 GiB RAM, local SSD, Arch,
+libvips 8.18.6 and libtiff 4.7.2. Embedded frontend debug binaries use optimized
+Aperture Rust code. The baseline is merged PR #6. The native WebDriver harness
+supplies the accepted chooser result; Rust IPC, reading, assets and GPU drawing
+are real. First draw ends at submission of a complete preview, rather than
+physical display presentation. Ready time ends at backend pyramid completion.
+Each table value is the median of three fresh-app-cache trials with filesystem
+pages uncontrolled. The large selected trials use separate native sessions.
+
+| TIFF input                                                                  | Previous first draw | Selected first draw | Previous ready | Selected ready |
+| --------------------------------------------------------------------------- | ------------------: | ------------------: | -------------: | -------------: |
+| Gray16 Deflate, 1.58 GB file / 2.53 GB decoded, predictor 2, 64-row strips  |            14.170 s |             1.769 s |       37.943 s |       18.797 s |
+| Gray16 Deflate, 64.9 MB file / 101.2 MB decoded, predictor 1, 15-row strips |             0.719 s |             0.329 s |        1.672 s |        0.874 s |
+| Gray16 LZW, 76.6 MB file / 101.2 MB decoded, predictor 2, 64-row strips     |             1.067 s |             0.397 s |        2.304 s |        1.287 s |
+| RGB8 uncompressed, 219.6 MB                                                 |             0.413 s |             0.410 s |        1.866 s |        0.778 s |
+| Five interleaved ushort channels, generated 33.5 MB, 2048 × 1638            |             0.634 s |             0.660 s |        1.099 s |        0.867 s |
+
+Native pyramid reuse still showed a preview in 226 ms, and the five-page ImageJ
+fixture in 274 ms, three fresh trials each. Channel previews were not changed;
+their measured small difference is noise, while completion improved. The
+large compressed input is an owned BigTIFF derivative of the real 2.53 GB gray16
+source. The smaller LZW derivative uses the original 64.9 MB Deflate source.
+Neither original was changed. The channel derivative was generated from the
+small fixture, with its extra planes explicitly marked unspecified channels.
+
+Source-local page eviction was also tested on the large Deflate file using
+read-only `posix_fadvise(DONTNEED)`. `fincore` reported zero resident bytes before
+each of three native sessions; preview draws were 2.511 / 2.370 / 2.273 seconds.
+The median is 2.370 seconds. These tests cancel after preview and do not measure
+full conversion with evicted pages. They do not control SSD firmware caches,
+network storage or all system memory. The reusable harness exposes
+`--fresh-only`, `--evict-source-pages` and backend ready timings.
+
+RSS was sampled every 50 ms through preview and completion. On the large file,
+previous decoder peaks were 241–247 MiB versus selected 258–260 MiB; native
+driver process-tree sums were 727–765 MiB versus 728–750 MiB. RGB decoder peaks
+rose from 104–105 MiB to 197–216 MiB with the larger encoding budget. These are
+sampled RSS values, with shared pages counted across processes, not hard limits.
+
+One initial mixed trial hit a WebKitWebDriver connection reset after completing
+the large conversion; the repeated separate sessions succeeded. Inspection and
+idempotent cancellation may retry transport resets, while Open is never
+replayed. An old cached-reopen trial delayed drawing despite prompt backend
+readiness; cached reopen results are excluded from this new-file assessment.
+
+### Correctness and remaining ceiling
+
+All 48 Rust tests passed with the production worker, including 96 combinations
+of Classic/BigTIFF, endian order, grayscale/RGB, 8/16-bit, LZW/Deflate and
+predictors 1/2. Noncontiguous strips, final short strips, actual sixteen-thread
+fractional reductions, corruption, strip bounds and metadata fallback are
+covered. Direct RGB JPEG and fused channel PNG pixels match the previous graph
+at every tested pyramid level. Strict Clippy, Rust formatting, 62 frontend tests,
+Prettier and the frontend build passed.
+
+Native checks passed cancellation during compressed decoding, worker reaping,
+replacement, cancellation during detail conversion, error recovery, cached
+native zoom/fit and five-channel Color rendering. Cancellation was observed in
+47.3 ms before reopening a PNG; old workers disappeared. Screenshots were
+inspected. Source hashes, sizes and modification times matched the previous
+integrity records, including all seven unrelated original-checkout files.
+
+The approximately one-second GB goal is not reached. Full-coverage decoding is
+still the preview floor: sixteen threads beat eight, and twenty-two added no
+benefit. Source I/O raised the native preview median from 1.769 to 2.370 seconds
+after page eviction. Full gray16 pyramid generation still decodes strips through
+libvips' sequential reader and rereads after the preview. Its eight encoding
+threads cut overall completion, but do not make source decompression parallel.
+A next experiment would feed a bounded pool of parallel decoded uint16 strips
+directly into a libvips image generator, retaining shrink order and avoiding
+full-image staging. A progressively filled preview would be a separate product
+choice if the first visible result must arrive before a full decode completes.
+Oversized compressed strips, unsupported layouts, release binaries and
+Windows/macOS remain unmeasured by this fast-path benchmark.
+
+Local ignored evidence is under `artifacts/compressed-native/` and
+`artifacts/pyramid-strategies/`. Repeat with `scripts/benchmark-loading.py` and a
+dedicated cache/D-Bus session. The relevant native behavior is documented in
+[libtiff strip reads](https://libtiff.gitlab.io/libtiff/functions/TIFFReadEncodedStrip.html),
+[libtiff open options](https://libtiff.gitlab.io/libtiff/functions/TIFFOpen.html) and
+[libvips dzsave](https://github.com/libvips/libvips/blob/v8.18.6/libvips/foreign/dzsave.c).
+
+## Filename loading progress
+
+The filename now carries a quiet background fill and a percentage while loading.
+Backend notifications advance in five-percentage-point steps, at most twenty
+progress advances per load. Preview work occupies the first 20%, pyramid work
+occupies the next 79%, and completion is reserved for ready assets. These are
+approximate work weights, not elapsed-time estimates. Unknown metadata progress
+uses a static tint; completion, cancellation and errors clear the display.
+
+Raw TIFF progress counts completed rows across parallel partitions. Libvips
+progress uses public GLib evaluation hooks scoped to each synchronous sink,
+without accessing private Rust binding fields or enabling CLI stdout output.
+Worker reports use coarse buckets and a 250 ms throttle. Existing image events
+carry the fractions, including aggregate channel progress; no new polling or
+dependencies were added. Existing early cache/preview notification order remains.
+
+Validation passed with 52 Rust tests using the production worker, 62 frontend
+tests, frontend/native builds, formatting and strict Clippy. Tests cover streaming
+progress followed by terminal responses, invalid fractions, cancellation/reaping,
+raw pixel parity, actual native evaluation callbacks, and monotonic multichannel
+progress. Independent read-only review found no actionable defects.
+
+Native WebKit validation exercised the 1.58 GB Deflate TIFF through preview and
+pyramid generation. The observed work percentages advanced from 0 through 95%,
+then ready cleared the fill. Cancellation, opening another image, worker reaping,
+error recovery, cached pyramid zoom/fit and five-channel Color passed. Light/dark
+screenshots and raw results remain ignored in `artifacts/loading-progress/`.
+
+A three-trial fresh-display-cache comparison using the existing native harness
+reported median first draws of 2.005 s before and 1.767 s with progress. Source
+pages were not explicitly evicted. Trial variation and sequential ordering make
+this a regression screen, not evidence that progress itself speeds loading.
+The screenshot-instrumented full-load trial took 20.562 s and emitted fifteen
+known loading percentages, followed by ready. No physical display-presentation
+claim is made. Source files were opened read-only and left unchanged.

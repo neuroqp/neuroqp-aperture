@@ -20,18 +20,19 @@ initial theme follows the system.
 
 Install Node.js 22.18 or newer, pnpm 9, a current Rust toolchain, and the Tauri
 Linux build dependencies. `vips` and `vipsheader` must be on PATH.
+Parallel strip previews link libtiff 4.5 or newer.
 
 On Arch Linux:
 
 ```sh
-sudo pacman -S --needed base-devel gtk3 webkit2gtk-4.1 librsvg libvips
+sudo pacman -S --needed base-devel gtk3 webkit2gtk-4.1 librsvg libvips libtiff
 ```
 
 On Ubuntu 24.04:
 
 ```sh
 sudo apt-get install build-essential libgtk-3-dev libwebkit2gtk-4.1-dev \
-  libayatana-appindicator3-dev librsvg2-dev libvips-dev libvips-tools libtiff-tools
+  libayatana-appindicator3-dev librsvg2-dev libvips-dev libvips-tools libtiff-dev libtiff-tools
 ```
 
 ```sh
@@ -51,6 +52,12 @@ pnpm tauri build --debug --no-bundle
 
 ## Checks
 
+PR checks run Prettier, Rust formatting, TypeScript type checking, and frontend
+unit tests. They run once per PR update and cancel superseded runs. They do not
+install native dependencies or build the application.
+
+Run full validation locally with:
+
 ```sh
 pnpm format:check
 pnpm test
@@ -63,7 +70,9 @@ cargo clippy --manifest-path src-tauri/Cargo.toml --all-targets --locked -- -D w
 ```
 
 Use `pnpm format` and `cargo fmt --manifest-path src-tauri/Cargo.toml --all` to
-format changes. Linux CI runs the checks above.
+format changes. The **Native validation** workflow runs the full checks above
+manually from GitHub Actions. It becomes available after the workflow lands on
+`main`; choose the branch to validate with **Run workflow**.
 The executable override makes decoder tests use the production child worker.
 Without it, isolated unit runs retain the CLI fixture path.
 

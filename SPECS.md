@@ -27,9 +27,16 @@ preview as soon as possible, and stays responsive while loading large images.
 - Use vanilla TypeScript and CSS for the initial UI, keeping dependencies small.
 - The Linux proof of concept uses Rust libvips bindings in an isolated,
   image-scoped worker for TIFF reading and pyramid generation. Non-TIFF inputs
-  use libvips tools. Large ordinary uncompressed gray16/RGB8 sRGB TIFF overviews use a
-  Rust area reducer with up to eight threads; it reads every pixel and leaves full detail to
-  libvips. Packaging image readers for other operating systems remains future work.
+  use libvips tools. Ordinary single-page grayscale and RGB8 sRGB TIFF overviews
+  of at least 16 megapixels use a full-coverage Rust area reducer for supported
+  strip layouts. Independent libtiff handles decode LZW/Deflate strips with up to
+  16 threads; uncompressed reads use up to eight. Encoded and decoded compressed
+  strips are each limited to 16 MiB, with other layouts left to libvips. Full
+  detail stays in libvips, using up to eight threads for pyramid sinks. RGB8
+  pyramids use direct JPEG tile encoding; grayscale retains its existing
+  conversion order. Channel pyramids fuse extraction and normalization into the
+  pyramid graph to avoid full-resolution intermediate files. Packaging image
+  readers for other operating systems remains future work.
 
 ## Development principles
 
@@ -203,6 +210,11 @@ on Open or Close. Cancellation or save failure must retain unsaved edits.
   preview as usable image regions or resolution levels become available.
 - Show loading/conversion progress. Allow cancellation or opening another image
   without waiting for the previous load to complete.
+- Show a quiet percentage fill behind the filename, advancing in coarse steps.
+  TIFF progress uses processed preview rows and libvips evaluation work, with
+  approximate weights for preview and pyramid conversion. Do not show time
+  estimates. Reserve completion for ready assets; clear the fill on completion,
+  cancellation, or failure.
 - For huge images, read and display the regions and resolution needed for the
   current view. Keep memory and GPU usage bounded rather than proportional to
   the full decoded image size.

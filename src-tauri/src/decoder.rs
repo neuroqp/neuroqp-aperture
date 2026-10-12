@@ -75,6 +75,7 @@ impl Decoder {
         request: &Request,
         cancel: &AtomicBool,
         exceeded: impl Fn() -> bool,
+        mut progress: impl FnMut(f64),
     ) -> Result<String, String> {
         let mut io = self.io.lock().unwrap();
         if cancel.load(Ordering::Relaxed) {
@@ -100,11 +101,26 @@ impl Decoder {
             }
             match io.1.recv_timeout(Duration::from_millis(2)) {
                 Ok(Ok(response)) => {
-                    return response.result.map_err(|error| {
-                        eprintln!("Image decoder: {error}");
-                        "Could not read this image. It may be damaged or use an unsupported format."
-                            .into()
-                    })
+                    if cancel.load(Ordering::Relaxed) {
+                        self.stop();
+                        return Err("Loading cancelled.".into());
+                    }
+                    match response {
+                        Response::Progress { progress: fraction } => {
+                            if !fraction.is_finite() || !(0.0..=1.0).contains(&fraction) {
+                                self.stop();
+                                return Err("Invalid image decoder progress.".into());
+                            }
+                            progress(fraction);
+                        }
+                        Response::Complete { result } => {
+                            return result.map_err(|error| {
+                                eprintln!("Image decoder: {error}");
+                                "Could not read this image. It may be damaged or use an unsupported format."
+                                    .into()
+                            });
+                        }
+                    }
                 }
                 Ok(Err(e)) => {
                     self.stop();
@@ -179,7 +195,7 @@ mod tests {
             let (decoder, root) = helper(body);
             let pid = decoder.child.lock().unwrap().id();
             assert!(decoder
-                .call(&request(), &AtomicBool::new(false), || false)
+                .call(&request(), &AtomicBool::new(false), || false, |_| {})
                 .is_err());
             assert!(!Path::new(&format!("/proc/{pid}")).exists());
             drop(decoder);
@@ -192,7 +208,7 @@ mod tests {
         let call = {
             let decoder = decoder.clone();
             let cancel = cancel.clone();
-            thread::spawn(move || decoder.call(&request(), &cancel, || false))
+            thread::spawn(move || decoder.call(&request(), &cancel, || false, |_| {}))
         };
         thread::sleep(Duration::from_millis(50));
         let start = Instant::now();
@@ -200,6 +216,69 @@ mod tests {
         decoder.stop();
         assert!(call.join().unwrap().is_err());
         assert!(start.elapsed() < Duration::from_secs(1));
+        assert!(!Path::new(&format!("/proc/{pid}")).exists());
+        drop(decoder);
+        fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn progress_precedes_terminal_response_without_consuming_next_request() {
+        let (decoder, root) = helper(
+            "print('{\"progress\":0.1}',flush=True)\nprint('{\"progress\":1.0}',flush=True)\nprint('{\"result\":{\"Ok\":\"first\"}}',flush=True)\nsys.stdin.readline()\nprint('{\"result\":{\"Ok\":\"second\"}}',flush=True)",
+        );
+        let mut fractions = Vec::new();
+        assert_eq!(
+            decoder.call(
+                &request(),
+                &AtomicBool::new(false),
+                || false,
+                |value| fractions.push(value)
+            ),
+            Ok("first".into())
+        );
+        assert_eq!(fractions, [0.1, 1.0]);
+        assert_eq!(
+            decoder.call(
+                &request(),
+                &AtomicBool::new(false),
+                || false,
+                |_| panic!("unexpected progress")
+            ),
+            Ok("second".into())
+        );
+        drop(decoder);
+        fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn invalid_progress_and_cancellation_during_progress_reap_worker() {
+        for fraction in ["-0.1", "1.1", "NaN", "null"] {
+            let (decoder, root) = helper(&format!(
+                "print('{{\"progress\":{fraction}}}',flush=True)\ntime.sleep(30)"
+            ));
+            let pid = decoder.child.lock().unwrap().id();
+            assert!(decoder
+                .call(
+                    &request(),
+                    &AtomicBool::new(false),
+                    || false,
+                    |_| panic!("invalid progress forwarded")
+                )
+                .is_err());
+            assert!(!Path::new(&format!("/proc/{pid}")).exists());
+            drop(decoder);
+            fs::remove_dir_all(root).unwrap();
+        }
+        let (decoder, root) = helper("print('{\"progress\":0.1}',flush=True)\nprint('{\"result\":{\"Ok\":\"finished\"}}',flush=True)\ntime.sleep(30)");
+        let pid = decoder.child.lock().unwrap().id();
+        let cancel = AtomicBool::new(false);
+        let result = decoder.call(
+            &request(),
+            &cancel,
+            || false,
+            |_| cancel.store(true, Ordering::Relaxed),
+        );
+        assert!(result.unwrap_err().contains("cancelled"));
         assert!(!Path::new(&format!("/proc/{pid}")).exists());
         drop(decoder);
         fs::remove_dir_all(root).unwrap();

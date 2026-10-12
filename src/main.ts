@@ -41,7 +41,11 @@ document.querySelector<HTMLDivElement>("#app")!.innerHTML = `
   <header class="image-bar">
     <div class="image-title" data-tauri-drag-region>
       <img src="${appIcon}" width="20" height="20" alt="" draggable="false" data-tauri-drag-region>
-      <span id="filename" data-tauri-drag-region>NeuroQP Aperture</span>
+      <div class="filename-progress" data-tauri-drag-region>
+        <div id="progress" role="progressbar" aria-label="Image loading" aria-valuemin="0" aria-valuemax="100" hidden><span></span></div>
+        <span id="filename" data-tauri-drag-region>NeuroQP Aperture</span>
+        <span id="loading-percent" aria-hidden="true" data-tauri-drag-region hidden></span>
+      </div>
     </div>
     <div class="file-actions">
       <button id="open-button" class="file-button" type="button" title="Open image (Ctrl+O)">${icon("open")}<span>Open</span></button>
@@ -71,7 +75,6 @@ document.querySelector<HTMLDivElement>("#app")!.innerHTML = `
       ${tool("zoom-out-button", "zoomOut", "Zoom out (-)")}
       ${tool("fit-button", "fit", "Fit image (F)")}
     </div>
-    <div id="progress" role="progressbar" aria-label="Image loading" hidden><span></span></div>
   </nav>
   <div class="viewer-workspace">
     <section id="viewer" aria-label="Image viewer"></section>
@@ -330,17 +333,21 @@ function setLoading(active: boolean, progress: number | null = null) {
   loading = active;
   $("cancel-button").hidden = !active;
   const bar = $("progress");
+  const percent = $("loading-percent");
+  const value =
+    active && progress !== null
+      ? Math.round(Math.min(100, Math.max(0, progress * 100)))
+      : null;
   bar.hidden = !active;
-  bar.classList.toggle("indeterminate", progress === null);
-  if (progress === null) bar.removeAttribute("aria-valuenow");
-  else {
-    const value = Math.min(100, Math.max(0, progress * 100));
-    bar.setAttribute("aria-valuenow", String(Math.round(value)));
-    bar.firstElementChild!.setAttribute(
-      "style",
-      `transform:scaleX(${value / 100})`,
-    );
-  }
+  bar.classList.toggle("indeterminate", active && value === null);
+  percent.hidden = value === null;
+  percent.textContent = value === null ? "" : `${value}%`;
+  if (value === null) bar.removeAttribute("aria-valuenow");
+  else bar.setAttribute("aria-valuenow", String(value));
+  bar.firstElementChild!.setAttribute(
+    "style",
+    `transform:scaleX(${(value ?? 0) / 100})`,
+  );
 }
 
 function resetViewer() {
@@ -550,6 +557,7 @@ async function openPath(path: string, checked = false) {
   resetViewer();
   $("viewer").dataset.phase = "loading";
   $("filename").textContent = path.split(/[\\/]/).pop() || path;
+  $("filename").title = $("filename").textContent || "";
   $("status").textContent = "Opening…";
   $("status").classList.remove("error");
   setLoading(true);

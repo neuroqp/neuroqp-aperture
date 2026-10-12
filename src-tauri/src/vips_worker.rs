@@ -9,6 +9,8 @@ use std::{
     io::{self, BufRead, Read, Write},
     path::Path,
     rc::Rc,
+    sync::Mutex,
+    time::{Duration, Instant},
 };
 
 pub const MAX_MESSAGE: usize = 64 * 1024;
@@ -27,6 +29,12 @@ pub enum Request {
         ushort: bool,
         directory: String,
     },
+    ChannelPyramid {
+        input: String,
+        output: String,
+        band: u32,
+        ushort: bool,
+    },
     RawPreview {
         input: String,
         output: String,
@@ -36,8 +44,159 @@ pub enum Request {
 }
 
 #[derive(Debug, Serialize, Deserialize)]
-pub struct Response {
-    pub result: Result<String, String>,
+#[serde(untagged)]
+pub enum Response {
+    Progress { progress: f64 },
+    Complete { result: Result<String, String> },
+}
+
+struct Progress {
+    last: Mutex<Option<(u8, Instant)>>,
+}
+
+impl Progress {
+    fn new() -> Self {
+        Self {
+            last: Mutex::new(None),
+        }
+    }
+
+    fn update(&self, fraction: f64) {
+        if let Some(progress) = self.accept(fraction, Instant::now()) {
+            // Never hold stdout while evaluating a native image or raw strip.
+            let _ = write_response(&Response::Progress { progress });
+        }
+    }
+
+    fn accept(&self, fraction: f64, now: Instant) -> Option<f64> {
+        if !fraction.is_finite() {
+            return None;
+        }
+        let bucket = (fraction.clamp(0.0, 1.0) * 10.0).floor() as u8;
+        let mut last = self.last.lock().ok()?;
+        if let Some((previous, at)) = *last {
+            if bucket <= previous
+                || (bucket < 10 && now.duration_since(at) < Duration::from_millis(250))
+            {
+                return None;
+            }
+        }
+        *last = Some((bucket, now));
+        Some(f64::from(bucket) / 10.0)
+    }
+}
+
+struct EvalData<'a> {
+    progress: &'a Progress,
+    start: f64,
+    span: f64,
+}
+
+struct EvalProgress<'a> {
+    signal: u32,
+    hook: std::os::raw::c_ulong,
+    // Stable allocation remains alive until the emission hook is removed.
+    _data: Box<EvalData<'a>>,
+}
+
+impl<'a> EvalProgress<'a> {
+    fn new(progress: &'a Progress, start: f64, span: f64) -> Result<Self, String> {
+        use libvips::bindings;
+        let mut data = Box::new(EvalData {
+            progress,
+            start,
+            span,
+        });
+        // The public GLib emission hook avoids reading the binding's private
+        // native-pointer field. This worker evaluates exactly one sink at a time.
+        let signal =
+            unsafe { bindings::g_signal_lookup(c"eval".as_ptr(), bindings::vips_image_get_type()) };
+        if signal == 0 {
+            return Err("libvips evaluation progress signal is unavailable.".into());
+        }
+        let hook = unsafe {
+            bindings::g_signal_add_emission_hook(
+                signal,
+                0,
+                Some(eval_progress),
+                (&mut *data as *mut EvalData<'a>).cast(),
+                None,
+            )
+        };
+        if hook == 0 {
+            return Err("Cannot observe libvips evaluation progress.".into());
+        }
+        Ok(Self {
+            signal,
+            hook,
+            _data: data,
+        })
+    }
+}
+
+impl Drop for EvalProgress<'_> {
+    fn drop(&mut self) {
+        unsafe { libvips::bindings::g_signal_remove_emission_hook(self.signal, self.hook) };
+    }
+}
+
+unsafe extern "C" fn eval_progress(
+    _: *mut libvips::bindings::GSignalInvocationHint,
+    count: u32,
+    values: *const libvips::bindings::GValue,
+    data: *mut std::ffi::c_void,
+) -> i32 {
+    if count >= 2 && !values.is_null() && !data.is_null() {
+        let native = libvips::bindings::g_value_get_pointer(values.add(1))
+            .cast::<libvips::bindings::VipsProgress>();
+        if !native.is_null() {
+            let data = &*data.cast::<EvalData<'_>>();
+            // Completion belongs to the whole request, after its sink succeeds.
+            let fraction = f64::from((*native).percent).clamp(0.0, 100.0) / 100.0;
+            data.progress
+                .update((data.start + data.span * fraction).min(0.99));
+        }
+    }
+    1
+}
+
+fn evaluate<T>(
+    image: &VipsImage,
+    progress: &Progress,
+    start: f64,
+    span: f64,
+    sink: impl FnOnce() -> Result<T, String>,
+) -> Result<T, String> {
+    let _hook = EvalProgress::new(progress, start, span)?;
+    image.image_set_progress(true);
+    let result = sink();
+    image.image_set_progress(false);
+    result
+}
+
+fn save_image(
+    image: &VipsImage,
+    output: &str,
+    progress: &Progress,
+    start: f64,
+    span: f64,
+) -> Result<(), String> {
+    evaluate(image, progress, start, span, || {
+        image.image_write_to_file(output).map_err(|e| e.to_string())
+    })
+}
+
+fn write_response(response: &Response) -> Result<(), String> {
+    let response = serde_json::to_vec(response).map_err(|e| e.to_string())?;
+    if response.len() >= MAX_MESSAGE {
+        return Err("Image worker response exceeds its size limit.".into());
+    }
+    let mut stdout = io::stdout().lock();
+    stdout
+        .write_all(&response)
+        .and_then(|_| stdout.write_all(b"\n"))
+        .and_then(|_| stdout.flush())
+        .map_err(|e| e.to_string())
 }
 
 struct Worker {
@@ -70,8 +229,24 @@ impl Worker {
     }
 
     fn process(&mut self, request: Request) -> Result<String, String> {
+        let progress = Progress::new();
+        progress.update(0.0);
+        let result = self.process_with_progress(request, &progress);
+        if result.as_ref().is_ok_and(|value| value != "unsupported") {
+            progress.update(1.0);
+        }
+        result
+    }
+
+    fn process_with_progress(
+        &mut self,
+        request: Request,
+        progress: &Progress,
+    ) -> Result<String, String> {
         match request {
-            Request::Command { program, args } => self.command(&program, &args),
+            Request::Command { program, args } => {
+                self.command_with_progress(&program, &args, progress)
+            }
             Request::ChannelPreviews {
                 input,
                 options,
@@ -80,8 +255,50 @@ impl Worker {
                 ushort,
                 directory,
             } => {
-                self.channel_previews(&input, &options, &scale, &planes, ushort, &directory)?;
+                self.channel_previews(
+                    &input,
+                    &options,
+                    &scale,
+                    &planes,
+                    ushort,
+                    (&directory, progress),
+                )?;
                 Ok(String::new())
+            }
+            Request::ChannelPyramid {
+                input,
+                output,
+                band,
+                ushort,
+            } => {
+                let result = (|| {
+                    let source = self.open(&input)?;
+                    let band = i32::try_from(band).map_err(|_| "Invalid image band.")?;
+                    let extracted = ops::extract_band(&source, band).map_err(|e| e.to_string())?;
+                    let pixels = if ushort {
+                        ops::cast_with_opts(
+                            &extracted,
+                            ops::BandFormat::Uchar,
+                            &ops::CastOptions { shift: true },
+                        )
+                        .map_err(|e| e.to_string())?
+                    } else {
+                        extracted
+                    };
+                    // Keep extraction and display normalization lazy, so one
+                    // source traversal feeds the lossless pyramid without full
+                    // decoded planes in memory or intermediate disk files.
+                    save_pyramid(
+                        &grayscale(&pixels)?,
+                        &output,
+                        "tile-size=256,overlap=0,suffix=.png[strip],depth=onepixel",
+                        progress,
+                    )
+                })();
+                if input.contains("access=sequential") {
+                    self.images.remove(&input);
+                }
+                result.map(|_| String::new())
             }
             Request::RawPreview {
                 input,
@@ -89,12 +306,16 @@ impl Worker {
                 max_edge,
                 threads,
             } => {
-                if max_edge == 0 || max_edge > 1024 || threads == 0 || threads > 8 {
+                if max_edge == 0 || max_edge > 1024 || threads == 0 || threads > 16 {
                     return Err("Invalid raw TIFF preview limits.".into());
                 }
-                let Some(preview) =
-                    crate::raw_tiff::preview_with_threads(Path::new(&input), max_edge, threads)
-                        .map_err(|e| e.to_string())?
+                let Some(preview) = crate::raw_tiff::preview_with_progress(
+                    Path::new(&input),
+                    max_edge,
+                    threads,
+                    &|fraction| progress.update(fraction * 0.98),
+                )
+                .map_err(|e| e.to_string())?
                 else {
                     return Ok("unsupported".into());
                 };
@@ -113,15 +334,29 @@ impl Worker {
                     format,
                 )
                 .map_err(|e| e.to_string())?;
-                reinterpret(&image, interpretation)?
-                    .image_write_to_file(&format!("{output}[Q=85,strip,background=52 54 51]"))
-                    .map_err(|e| e.to_string())?;
+                save_image(
+                    &reinterpret(&image, interpretation)?,
+                    &format!("{output}[Q=85,strip,background=52 54 51]"),
+                    progress,
+                    0.98,
+                    0.02,
+                )?;
                 Ok("used".into())
             }
         }
     }
 
+    #[cfg(test)]
     fn command(&mut self, program: &str, args: &[String]) -> Result<String, String> {
+        self.command_with_progress(program, args, &Progress::new())
+    }
+
+    fn command_with_progress(
+        &mut self,
+        program: &str,
+        args: &[String],
+        progress: &Progress,
+    ) -> Result<String, String> {
         if program == "vipsheader" {
             if args.len() != 2 || args[0] != "-a" {
                 return Err("Unsupported metadata request.".into());
@@ -143,8 +378,10 @@ impl Worker {
             let pixel = ops::extract_area(&image, x, y, 1, 1)
                 .and_then(|i| ops::cast(&i, ops::BandFormat::Double))
                 .map_err(|e| e.to_string())?;
-            let values = pixel
-                .image_write_to_memory()
+            let memory = evaluate(&pixel, progress, 0.0, 1.0, || {
+                Ok(pixel.image_write_to_memory())
+            })?;
+            let values = memory
                 .as_chunks::<8>()
                 .0
                 .iter()
@@ -157,36 +394,29 @@ impl Worker {
             "resize" if args.len() == 4 => {
                 let scale = positive(&args[3])?;
                 let resized = ops::resize(&image, scale).map_err(|e| e.to_string())?;
-                resized
-                    .image_write_to_file(output)
-                    .map_err(|e| e.to_string())
+                save_image(&resized, output, progress, 0.0, 1.0)
             }
             "extract_band" if args.len() == 5 && args[4] == "--n=1" => {
                 let band = args[3].parse::<i32>().map_err(|_| "Invalid image band.")?;
-                ops::extract_band(&image, band)
-                    .and_then(|i| i.image_write_to_file(output))
-                    .map_err(|e| e.to_string())
+                let extracted = ops::extract_band(&image, band).map_err(|e| e.to_string())?;
+                save_image(&extracted, output, progress, 0.0, 1.0)
             }
             "cast" if args.len() == 5 && args[3] == "uchar" && args[4] == "--shift" => {
-                ops::cast_with_opts(
+                let pixels = ops::cast_with_opts(
                     &image,
                     ops::BandFormat::Uchar,
                     &ops::CastOptions { shift: true },
                 )
-                .and_then(|i| i.image_write_to_file(output))
-                .map_err(|e| e.to_string())
+                .map_err(|e| e.to_string())?;
+                save_image(&pixels, output, progress, 0.0, 1.0)
             }
-            "copy" if args.len() == 3 => {
-                image.image_write_to_file(output).map_err(|e| e.to_string())
+            "copy" if args.len() == 3 => save_image(&image, output, progress, 0.0, 1.0),
+            "copy" if args.len() == 4 && args[3] == "--interpretation=b-w" => {
+                save_image(&grayscale(&image)?, output, progress, 0.0, 1.0)
             }
-            "copy" if args.len() == 4 && args[3] == "--interpretation=b-w" => grayscale(&image)?
-                .image_write_to_file(output)
-                .map_err(|e| e.to_string()),
             "dzsave" => {
                 let options = dz_options(&args[3..])?;
-                image
-                    .image_write_to_file(&format!("{output}.dz[container=fs,{options}]"))
-                    .map_err(|e| e.to_string())
+                save_pyramid(&image, output, &options, progress)
             }
             "affine"
                 if args.len() == 7
@@ -218,11 +448,11 @@ impl Worker {
                     background: vec![0.0],
                     premultiplied: false,
                 };
-                ops::affine_with_opts(
+                let transformed = ops::affine_with_opts(
                     &image, matrix[0], matrix[1], matrix[2], matrix[3], &settings,
                 )
-                .and_then(|i| i.image_write_to_file(output))
-                .map_err(|e| e.to_string())
+                .map_err(|e| e.to_string())?;
+                save_image(&transformed, output, progress, 0.0, 1.0)
             }
             _ => Err(format!("Unsupported libvips operation: {}.", args[0])),
         };
@@ -241,7 +471,7 @@ impl Worker {
         scales: &[f64],
         planes: &[Plane],
         ushort: bool,
-        directory: &str,
+        (directory, progress): (&str, &Progress),
     ) -> Result<(), String> {
         if planes.is_empty()
             || planes.len() > 32
@@ -271,7 +501,15 @@ impl Worker {
                 }
                 // Evaluate once before splitting bands. Multiple PNG sinks must
                 // never traverse the full TIFF source again with cache disabled.
+                // This temporary image is consumed by copy_memory and never retained.
+                let hook = EvalProgress::new(
+                    progress,
+                    index as f64 / planes.len() as f64,
+                    0.9 / planes.len() as f64,
+                )?;
+                small.image_set_progress(true);
                 let memory = VipsImage::image_copy_memory(small).map_err(|e| e.to_string())?;
+                drop(hook);
                 resized.insert(key.clone(), memory);
                 self.images.remove(&source_name);
             }
@@ -293,20 +531,27 @@ impl Worker {
                 .join(index.to_string());
             fs::create_dir_all(&channel).map_err(|e| e.to_string())?;
             let partial = channel.join("preview.partial.png");
-            display
-                .image_write_to_file(partial.to_str().ok_or("Invalid preview path.")?)
-                .map_err(|e| e.to_string())?;
+            save_image(
+                &display,
+                partial.to_str().ok_or("Invalid preview path.")?,
+                progress,
+                (index as f64 + 0.9) / planes.len() as f64,
+                0.05 / planes.len() as f64,
+            )?;
             fs::rename(partial, channel.join("preview.png")).map_err(|e| e.to_string())?;
             if index == 0 {
-                display
-                    .image_write_to_file(
-                        Path::new(directory)
-                            .join("preview.jpg")
-                            .to_str()
-                            .ok_or("Invalid preview path.")?,
-                    )
-                    .map_err(|e| e.to_string())?;
+                save_image(
+                    &display,
+                    Path::new(directory)
+                        .join("preview.jpg")
+                        .to_str()
+                        .ok_or("Invalid preview path.")?,
+                    progress,
+                    (index as f64 + 0.95) / planes.len() as f64,
+                    0.05 / planes.len() as f64,
+                )?;
             }
+            progress.update(((index + 1) as f64 / planes.len() as f64).min(0.99));
             // Each page needs at most one <=1024px image. Release pages as soon
             // as their last band is written instead of retaining all 32 pages.
             if !(index + 1..planes.len())
@@ -431,6 +676,30 @@ fn numbers<T: std::str::FromStr>(value: &str, length: usize) -> Result<Vec<T>, S
     Ok(values)
 }
 
+fn save_pyramid(
+    image: &VipsImage,
+    output: &str,
+    options: &str,
+    progress: &Progress,
+) -> Result<(), String> {
+    let threads = std::thread::available_parallelism()
+        .map_or(1, |n| n.get())
+        .min(8) as i32;
+    // Requests run serially in this isolated worker. Raise the global libvips
+    // budget only for the pyramid sink, then restore preview/native-tile limits.
+    let previous = unsafe { libvips::bindings::vips_concurrency_get() };
+    unsafe { libvips::bindings::vips_concurrency_set(threads) };
+    let result = save_image(
+        image,
+        &format!("{output}.dz[container=fs,{options}]"),
+        progress,
+        0.0,
+        1.0,
+    );
+    unsafe { libvips::bindings::vips_concurrency_set(previous) };
+    result
+}
+
 fn dz_options(args: &[String]) -> Result<String, String> {
     let mut options = Vec::new();
     for arg in args {
@@ -443,6 +712,7 @@ fn dz_options(args: &[String]) -> Result<String, String> {
                 | "background=52 54 51"
                 | "suffix=.png[strip]"
                 | "suffix=.jpg[Q=85,strip,background=52 54 51]"
+                | "Q=85"
         ) {
             return Err("Unsupported pyramid option.".into());
         }
@@ -463,7 +733,6 @@ pub fn worker_main() -> Result<(), String> {
     };
     let stdin = io::stdin();
     let mut input = stdin.lock();
-    let mut stdout = io::stdout().lock();
     loop {
         let mut line = Vec::new();
         let read = input
@@ -492,15 +761,7 @@ pub fn worker_main() -> Result<(), String> {
         });
         // Optional absent metadata fields also append errors to libvips' buffer.
         app.error_clear();
-        let response = serde_json::to_vec(&Response { result }).map_err(|e| e.to_string())?;
-        if response.len() >= MAX_MESSAGE {
-            return Err("Image worker response exceeds its size limit.".into());
-        }
-        stdout
-            .write_all(&response)
-            .and_then(|_| stdout.write_all(b"\n"))
-            .and_then(|_| stdout.flush())
-            .map_err(|e| e.to_string())?;
+        write_response(&Response::Complete { result })?;
     }
     // Drop all image handles before VipsApp shuts libvips down.
     drop(worker);
@@ -510,6 +771,42 @@ pub fn worker_main() -> Result<(), String> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[test]
+    fn progress_is_coarse_monotonic_throttled_and_finishes() {
+        let progress = Progress::new();
+        let now = Instant::now();
+        assert_eq!(progress.accept(f64::NAN, now), None);
+        assert_eq!(progress.accept(0.0, now), Some(0.0));
+        assert_eq!(
+            progress.accept(0.25, now + Duration::from_millis(100)),
+            None
+        );
+        assert_eq!(
+            progress.accept(0.25, now + Duration::from_millis(250)),
+            Some(0.2)
+        );
+        assert_eq!(progress.accept(0.1, now + Duration::from_secs(1)), None);
+        assert_eq!(
+            progress.accept(1.0, now + Duration::from_millis(251)),
+            Some(1.0)
+        );
+        assert_eq!(progress.accept(1.0, now + Duration::from_secs(2)), None);
+        let progress = Progress::new();
+        let updates = (0..=1000)
+            .filter_map(|n| progress.accept(n as f64 / 1000.0, now + Duration::from_millis(n)))
+            .collect::<Vec<_>>();
+        assert_eq!(updates.first(), Some(&0.0));
+        assert_eq!(updates.last(), Some(&1.0));
+        assert!(updates.len() <= 11);
+        assert_eq!(
+            serde_json::to_string(&Response::Complete {
+                result: Ok("used".into())
+            })
+            .unwrap(),
+            r#"{"result":{"Ok":"used"}}"#
+        );
+    }
+
     #[test]
     fn validates_operation_numbers_and_pyramid_options() {
         assert!(positive("NaN").is_err());
@@ -528,7 +825,7 @@ mod tests {
     }
 
     #[test]
-    fn raw_ushort_bridge_preserves_high_byte_display_pixels() {
+    fn raw_and_channel_bridges_preserve_display_pixels() {
         // This is the only in-process VipsApp test. Other decoder tests use
         // isolated processes, so libvips initialization cannot race here.
         let app = VipsApp::new("aperture-raw-binding-test", false).unwrap();
@@ -577,7 +874,239 @@ mod tests {
         drop(difference);
         drop(expected);
         drop(actual);
+        // A tiny sink can finish before libvips emits an intermediate eval.
+        // Exercise the real GLib signal deterministically, without depending
+        // on image size, thread scheduling, or another VipsApp initialization.
+        let progress = Progress::new();
+        unsafe {
+            use libvips::bindings;
+            let image = bindings::vips_image_new();
+            assert!(!image.is_null());
+            let mut native_progress: bindings::VipsProgress = std::mem::zeroed();
+            native_progress.percent = 50;
+            {
+                let _hook = EvalProgress::new(&progress, 0.0, 1.0).unwrap();
+                // Both the image and payload stay alive during synchronous emission.
+                bindings::g_signal_emit_by_name(
+                    image.cast(),
+                    c"eval".as_ptr(),
+                    &native_progress as *const bindings::VipsProgress,
+                );
+            }
+            let reported = progress.last.lock().unwrap().take().unwrap().0;
+            // Removal must stop callbacks before their context is freed.
+            bindings::g_signal_emit_by_name(
+                image.cast(),
+                c"eval".as_ptr(),
+                &native_progress as *const bindings::VipsProgress,
+            );
+            bindings::g_object_unref(image.cast());
+            assert_eq!(reported, 5);
+            assert!(progress.last.lock().unwrap().is_none());
+        }
+        let native_image = worker.open(source.to_str().unwrap()).unwrap();
+        save_image(
+            &native_image,
+            directory.join("progress.jpg").to_str().unwrap(),
+            &progress,
+            0.0,
+            1.0,
+        )
+        .unwrap();
+        // Error returns remove their emission hook before callback data drops.
+        assert!(save_image(
+            &native_image,
+            directory.join("missing/output.jpg").to_str().unwrap(),
+            &progress,
+            0.0,
+            1.0
+        )
+        .is_err());
+        drop(native_image);
+        channel_pyramids_match_materialized_planes(&mut worker, &directory);
         drop(worker);
         fs::remove_dir_all(directory).unwrap();
+    }
+
+    fn channel_pyramids_match_materialized_planes(worker: &mut Worker, directory: &Path) {
+        for (bits, bands, band) in [(8, 3, 2), (16, 3, 1), (16, 1, 0)] {
+            // Odd edges, more than one tile, and varying low bytes catch
+            // accidental changes to normalization/shrink order at every level.
+            let samples = (0..259 * 257 * bands)
+                .flat_map(|i| {
+                    let sample = ((i * 7919 + i / 259 * 257) % 65536) as u16;
+                    if bits == 16 {
+                        sample.to_ne_bytes().to_vec()
+                    } else {
+                        vec![(sample >> 8) as u8]
+                    }
+                })
+                .collect::<Vec<_>>();
+            let image = VipsImage::new_from_memory_copy(
+                &samples,
+                259,
+                257,
+                bands,
+                if bits == 16 {
+                    ops::BandFormat::Ushort
+                } else {
+                    ops::BandFormat::Uchar
+                },
+            )
+            .unwrap();
+            let source = directory.join(format!("channel-{bits}-{bands}.tif"));
+            reinterpret(
+                &image,
+                match (bits, bands) {
+                    (16, 1) => ops::Interpretation::Grey16,
+                    (16, _) => ops::Interpretation::Rgb16,
+                    _ => ops::Interpretation::Srgb,
+                },
+            )
+            .unwrap()
+            .image_write_to_file(source.to_str().unwrap())
+            .unwrap();
+            let source = format!("{}[page=0,n=1,access=sequential]", source.display());
+            if bits == 8 {
+                rgb_direct_pyramid_matches(worker, directory, &source);
+            }
+            let actual = directory.join(format!("actual-{bits}-{bands}"));
+            worker
+                .process(Request::ChannelPyramid {
+                    input: source.clone(),
+                    output: actual.to_str().unwrap().into(),
+                    band,
+                    ushort: bits == 16,
+                })
+                .unwrap();
+            let raw = directory.join("raw.v").to_str().unwrap().to_owned();
+            let cast = directory.join("cast.v").to_str().unwrap().to_owned();
+            let normalized = directory.join("normalized.v").to_str().unwrap().to_owned();
+            worker
+                .command(
+                    "vips",
+                    &[
+                        "extract_band".into(),
+                        source,
+                        raw.clone(),
+                        band.to_string(),
+                        "--n=1".into(),
+                    ],
+                )
+                .unwrap();
+            let pixels = if bits == 16 {
+                worker
+                    .command(
+                        "vips",
+                        &[
+                            "cast".into(),
+                            raw,
+                            cast.clone(),
+                            "uchar".into(),
+                            "--shift".into(),
+                        ],
+                    )
+                    .unwrap();
+                cast
+            } else {
+                raw
+            };
+            worker
+                .command(
+                    "vips",
+                    &[
+                        "copy".into(),
+                        pixels,
+                        normalized.clone(),
+                        "--interpretation=b-w".into(),
+                    ],
+                )
+                .unwrap();
+            let expected = directory.join(format!("expected-{bits}-{bands}"));
+            worker
+                .command(
+                    "vips",
+                    &[
+                        "dzsave".into(),
+                        normalized,
+                        expected.to_str().unwrap().into(),
+                        "--tile-size=256".into(),
+                        "--overlap=0".into(),
+                        "--suffix=.png[strip]".into(),
+                        "--depth=onepixel".into(),
+                    ],
+                )
+                .unwrap();
+            let actual_tiles = actual.with_file_name(format!("actual-{bits}-{bands}_files"));
+            let expected_tiles = expected.with_file_name(format!("expected-{bits}-{bands}_files"));
+            for level in fs::read_dir(&actual_tiles).unwrap() {
+                let level = level.unwrap();
+                if !level.file_type().unwrap().is_dir() {
+                    continue;
+                }
+                for tile in fs::read_dir(level.path()).unwrap() {
+                    let tile = tile.unwrap();
+                    let expected_tile = expected_tiles
+                        .join(level.file_name())
+                        .join(tile.file_name());
+                    let a = VipsImage::new_from_file(tile.path().to_str().unwrap()).unwrap();
+                    let b = VipsImage::new_from_file(expected_tile.to_str().unwrap()).unwrap();
+                    assert_eq!(
+                        (a.get_width(), a.get_height()),
+                        (b.get_width(), b.get_height())
+                    );
+                    assert_eq!(
+                        a.image_write_to_memory(),
+                        b.image_write_to_memory(),
+                        "{}",
+                        tile.path().display()
+                    );
+                }
+            }
+        }
+    }
+
+    fn rgb_direct_pyramid_matches(worker: &mut Worker, directory: &Path, source: &str) {
+        for (name, jpeg) in [
+            ("rgb-direct", "--Q=85"),
+            (
+                "rgb-suffix",
+                "--suffix=.jpg[Q=85,strip,background=52 54 51]",
+            ),
+        ] {
+            worker
+                .command(
+                    "vips",
+                    &[
+                        "dzsave".into(),
+                        source.into(),
+                        directory.join(name).to_str().unwrap().into(),
+                        "--tile-size=256".into(),
+                        "--overlap=0".into(),
+                        jpeg.into(),
+                        "--background=52 54 51".into(),
+                        "--depth=onepixel".into(),
+                    ],
+                )
+                .unwrap();
+            assert_eq!(unsafe { libvips::bindings::vips_concurrency_get() }, 2);
+        }
+        for level in fs::read_dir(directory.join("rgb-direct_files")).unwrap() {
+            let level = level.unwrap();
+            if !level.file_type().unwrap().is_dir() {
+                continue;
+            }
+            for tile in fs::read_dir(level.path()).unwrap() {
+                let tile = tile.unwrap();
+                let expected = directory
+                    .join("rgb-suffix_files")
+                    .join(level.file_name())
+                    .join(tile.file_name())
+                    .with_extension("jpg");
+                let a = VipsImage::new_from_file(tile.path().to_str().unwrap()).unwrap();
+                let b = VipsImage::new_from_file(expected.to_str().unwrap()).unwrap();
+                assert_eq!(a.image_write_to_memory(), b.image_write_to_memory());
+            }
+        }
     }
 }
