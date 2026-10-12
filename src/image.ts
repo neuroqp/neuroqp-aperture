@@ -2,6 +2,7 @@ export type ImageState = {
   id: string;
   revision: number;
   name: string;
+  path?: string;
   width: number;
   height: number;
   phase: "loading" | "ready" | "cancelled" | "error";

@@ -16,6 +16,8 @@ import {
   Moon,
   CircleHelp,
   ChevronDown,
+  ChevronLeft,
+  ChevronRight,
   Palette,
   Trash2,
   type IconNode,
@@ -38,6 +40,8 @@ const icons = {
   moon: Moon,
   help: CircleHelp,
   dropdown: ChevronDown,
+  previous: ChevronLeft,
+  next: ChevronRight,
   color: Palette,
   trash: Trash2,
   // Three point markers, drawn on Lucide's 24px grid.

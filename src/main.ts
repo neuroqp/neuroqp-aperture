@@ -4,6 +4,7 @@ import { listen } from "@tauri-apps/api/event";
 import { getCurrentWindow } from "@tauri-apps/api/window";
 import { open, save, confirm } from "@tauri-apps/plugin-dialog";
 import { AnnotationViewer } from "./annotation-viewer";
+import { FolderNavigation } from "./folder-navigation";
 import {
   addPoint,
   movePoint,
@@ -41,11 +42,13 @@ document.querySelector<HTMLDivElement>("#app")!.innerHTML = `
   <header class="image-bar">
     <div class="image-title" data-tauri-drag-region>
       <img src="${appIcon}" width="20" height="20" alt="" draggable="false" data-tauri-drag-region>
+      <button id="previous-image-button" class="tool image-navigation" type="button" title="Previous image" aria-label="Previous image" disabled>${icon("previous")}</button>
       <div class="filename-progress" data-tauri-drag-region>
         <div id="progress" role="progressbar" aria-label="Image loading" aria-valuemin="0" aria-valuemax="100" hidden><span></span></div>
         <span id="filename" data-tauri-drag-region>NeuroQP Aperture</span>
         <span id="loading-percent" aria-hidden="true" data-tauri-drag-region hidden></span>
       </div>
+      <button id="next-image-button" class="tool image-navigation" type="button" title="Next image" aria-label="Next image" disabled>${icon("next")}</button>
     </div>
     <div class="file-actions">
       <button id="open-button" class="file-button" type="button" title="Open image (Ctrl+O)">${icon("open")}<span>Open</span></button>
@@ -327,7 +330,36 @@ let pyramidAdded = false;
 let dialogOpen = false;
 let loading = false;
 let tileError: string | null = null;
+let histogramLoad: AbortController | null = null;
+const downloads = new Set<OpenSeadragon.ImageJob>();
 const tileUrl = (id: string) => convertFileSrc(id, "aperture");
+
+function trackDownloads(
+  source: OpenSeadragon.TileSourceOptions & {
+    downloadTileStart?: (job: OpenSeadragon.ImageJob) => void;
+  },
+) {
+  const start =
+    source.downloadTileStart ||
+    OpenSeadragon.TileSource.prototype.downloadTileStart;
+  return {
+    ...source,
+    downloadTileStart(job: OpenSeadragon.ImageJob) {
+      downloads.add(job);
+      const finish = job.finish;
+      job.finish = (...args) => {
+        downloads.delete(job);
+        finish.apply(job, args);
+      };
+      const fail = job.fail;
+      job.fail = (...args) => {
+        downloads.delete(job);
+        fail.apply(job, args);
+      };
+      start.call(this, job);
+    },
+  };
+}
 
 function setLoading(active: boolean, progress: number | null = null) {
   loading = active;
@@ -351,6 +383,8 @@ function setLoading(active: boolean, progress: number | null = null) {
 }
 
 function resetViewer() {
+  histogramLoad?.abort();
+  histogramLoad = null;
   currentId = null;
   currentImage = null;
   savedPath = null;
@@ -367,6 +401,8 @@ function resetViewer() {
   pyramidAdded = false;
   tileError = null;
   viewer.close();
+  for (const job of downloads) job.abort();
+  downloads.clear();
   colorImageId = null;
   colorPanel.setChannels([]);
   colorPanel.setEnabled(false);
@@ -386,6 +422,10 @@ function showError(message: string) {
 }
 
 function showImage(state: ImageState) {
+  if (!selectedPath && state.path) {
+    selectedPath = state.path;
+    folder.select(state.path);
+  }
   if (currentId !== state.id) {
     resetViewer();
     currentId = state.id;
@@ -401,7 +441,11 @@ function showImage(state: ImageState) {
         updatePointTool();
       },
       (error) => {
-        if (currentId !== state.id) return;
+        if (
+          currentId !== state.id ||
+          String(error) === "Image replaced or cancelled."
+        )
+          return;
         annotationError = `Annotations could not load: ${String(error)}`;
         $("status").textContent = annotationError;
         $("status").classList.add("error");
@@ -463,9 +507,11 @@ function showImage(state: ImageState) {
 
   if (state.previewReady && !previewAdded) {
     previewAdded = true;
+    histogramLoad = new AbortController();
     void loadHistogram(
       `${tileUrl(state.id)}/preview.jpg`,
       state.channelMode ? 0 : (state.channels?.length ?? 0),
+      histogramLoad.signal,
     ).then(
       (bins) => {
         if (currentId !== state.id) return;
@@ -477,11 +523,13 @@ function showImage(state: ImageState) {
       },
     );
     viewer.addTiledImage({
-      tileSource: colorRenderer!.wrapSource(
-        preview(state, tileUrl),
-        state,
-        true,
-        tileUrl(state.id),
+      tileSource: trackDownloads(
+        colorRenderer!.wrapSource(
+          preview(state, tileUrl),
+          state,
+          true,
+          tileUrl(state.id),
+        ),
       ),
       ...transform,
       width: 1,
@@ -516,11 +564,13 @@ function addPyramid(state: ImageState) {
   if (pyramidAdded || state.width <= 0 || state.height <= 0) return;
   pyramidAdded = true;
   viewer.addTiledImage({
-    tileSource: colorRenderer!.wrapSource(
-      pyramid(state, tileUrl),
-      state,
-      false,
-      tileUrl(state.id),
+    tileSource: trackDownloads(
+      colorRenderer!.wrapSource(
+        pyramid(state, tileUrl),
+        state,
+        false,
+        tileUrl(state.id),
+      ),
     ),
     ...orientation(state.orientation),
     width: 1,
@@ -552,8 +602,40 @@ const loader = new ImageLoader(
   showError,
 );
 
+let selectedPath: string | null = null;
+let folderError: string | null = null;
+const folder = new FolderNavigation(
+  (path) => invoke<string[]>("folder_images", { path }),
+  updateNavigation,
+  (message) => {
+    folderError = message;
+    updateNavigation();
+  },
+);
+
+function updateNavigation() {
+  for (const [id, direction, label] of [
+    ["previous-image-button", -1, "Previous image"],
+    ["next-image-button", 1, "Next image"],
+  ] as const) {
+    const button = $<HTMLButtonElement>(id);
+    button.disabled = !folder.adjacent(direction);
+    button.title = folderError ? `${label}: ${folderError}` : label;
+  }
+}
+
+async function navigateImage(direction: -1 | 1) {
+  if (!native || saving || dialogOpen) return;
+  if (dirty && !(await discardChanges())) return;
+  const path = folder.adjacent(direction);
+  if (path) await openPath(path, true);
+}
+
 async function openPath(path: string, checked = false) {
   if (!checked && !(await discardChanges())) return;
+  selectedPath = path;
+  folderError = null;
+  folder.select(path);
   resetViewer();
   $("viewer").dataset.phase = "loading";
   $("filename").textContent = path.split(/[\\/]/).pop() || path;
@@ -567,23 +649,24 @@ async function openPath(path: string, checked = false) {
 async function chooseImage() {
   if (!native || dialogOpen || !(await discardChanges())) return;
   dialogOpen = true;
+  let path: string | string[] | null = null;
   try {
-    const path = await open({
+    path = await open({
       multiple: false,
       directory: false,
       filters: [
         {
           name: "Images",
-          extensions: ["jpg", "jpeg", "png", "bmp", "tif", "tiff", "webp"],
+          extensions: await invoke<string[]>("image_extensions"),
         },
       ],
     });
-    if (typeof path === "string") await openPath(path, true);
   } catch (error) {
     showError(String(error));
   } finally {
     dialogOpen = false;
   }
+  if (typeof path === "string") await openPath(path, true);
 }
 
 async function cancelLoad() {
@@ -600,6 +683,11 @@ async function cancelLoad() {
 
 $("save-button").addEventListener("click", () => void saveAnnotations());
 $("open-button").addEventListener("click", () => void chooseImage());
+$("previous-image-button").addEventListener(
+  "click",
+  () => void navigateImage(-1),
+);
+$("next-image-button").addEventListener("click", () => void navigateImage(1));
 $("cancel-button").addEventListener("click", () => void cancelLoad());
 $("fit-button").addEventListener("click", () => viewer.viewport.goHome());
 $("pan-button").addEventListener("click", () => {

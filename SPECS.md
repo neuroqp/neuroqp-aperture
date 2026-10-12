@@ -58,7 +58,14 @@ Two thin horizontal header bars sit above the image viewer.
 1. **Image bar:** identify the currently loaded image by filename. Place Open
    and Save buttons on the right, alongside window controls including Close.
    Integrate window controls into this bar so the design does not need a third
-   title bar.
+   title bar. Fixed-position left/right chevrons surround the flexible,
+   ellipsized filename area and select the previous/next supported image in the
+   same folder. Sort filenames alphabetically, ignoring case with a deterministic
+   case-sensitive tie break; disable navigation at either end. Folder navigation
+   uses the same supported extensions as Open, excludes directories, and follows
+   the shared unsaved-annotation warning and progressive image-loading flow.
+   Repeated clicks advance from the latest selected file, even before its preview
+   arrives, cancelling the previous worker and outstanding image downloads.
 2. **Quick toolbar:** a compact row of icon buttons inspired by ImageJ. These
    use Lucide icons, with a matching custom multi-point icon. Display range and
    Color and multi-point toggles sit on the left; pan, zoom, and fit controls sit on the
@@ -77,7 +84,7 @@ the original unchanged; confirm before replacing an existing destination.
 Save as… opens a file picker and remembers the chosen path for subsequent saves.
 Enable Save when annotations are available or deletions need saving, including
 after removing the final point. Confirm before discarding unsaved annotations
-on Open or Close. Cancellation or save failure must retain unsaved edits.
+on Open, folder navigation or Close. Cancellation or save failure must retain unsaved edits.
 
 ## Tool option panels
 

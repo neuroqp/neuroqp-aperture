@@ -922,3 +922,47 @@ this a regression screen, not evidence that progress itself speeds loading.
 The screenshot-instrumented full-load trial took 20.562 s and emitted fifteen
 known loading percentages, followed by ready. No physical display-presentation
 claim is made. Source files were opened read-only and left unchanged.
+
+## Folder image navigation, October 12, 2026
+
+Previous/Next chevrons keep fixed positions around a flexible filename area.
+Folder entries use Open's shared extension list, with case-insensitive alphabetical
+ordering, excluded subdirectories and disabled end boundaries. Navigation uses the
+same discard warning and progressive loader as Open; rapid clicks advance from
+the latest selected target rather than waiting for its load reply.
+
+Validation passed 64 frontend tests and 55 Rust tests in both subprocess and
+production-worker modes, strict Clippy, Prettier, Rust formatting, and frontend
+and native debug builds. The native WebKit harness exercises all seven allowed
+extensions, unsupported entries/directories, corrupt-image recovery, both themes
+at actual 640 × 400 and 1200 × 800 CSS-pixel window sizes, and short/long filenames.
+It replaces a 1.58 GB TIFF before preview and during detail loading, checks worker
+reaping and stale replies, and holds ordinary/channel downloads to verify abort
+and immediate release of OpenSeadragon loading slots. Real native Cancel/Discard
+dialogs cover added points and deletion of the final point; saving/reopening
+retains annotations and navigation after saving needs no discard warning. All
+14 native checks passed, including pointer clicks within the title bar's drag
+region and a delayed annotation cancellation error after standalone Cancel.
+
+Repeat with `scripts/native-navigation.py`, a built debug binary and a dedicated
+`tauri-driver` session on port 4446. Supply `--large-image` for a local large TIFF;
+start the driver with `XDG_CACHE_HOME` under `artifacts/folder-navigation/cache`.
+Use an owned `TMPDIR` there too on systems with temporary-directory user quotas.
+Only the initial chooser result is supplied by the navigation harness; Rust IPC,
+image workers, assets, rendering and warning dialogs are native. The existing
+`native-smoke.py` separately exercises the real GTK Open picker. Owned test copies,
+read-only aliases, reports and screenshots remain ignored under
+`artifacts/folder-navigation/`; original fixture/source sizes and mtimes are checked.
+
+The real-picker trial initially aborted in GTK's icon helper with a theme-icon
+decode error reporting "Disk quota exceeded" before image selection. The `/tmp`
+mount has user quotas; standalone decoding and a small temporary write succeeded
+afterward, so the exact exhausted limit was not established. The picker passed
+with an owned temporary directory on the home filesystem. No system configuration
+or unrelated temporary files were changed. The native WebDriver harness also
+retries transient proxy disconnections for read-only observations only.
+
+Cancellation kills/reaps image workers and subprocesses, aborts active frontend
+downloads/histogram loading, and releases queued backend tile requests. A bounded
+annotation metadata read already inside its parser call finishes that call before
+its cancellation check; canceled work cannot publish annotations or restart loading.
