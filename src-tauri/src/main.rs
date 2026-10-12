@@ -18,6 +18,18 @@ fn open_image(path: String, backend: State<'_, Backend>) -> Result<ImageState, S
     backend.open(std::path::Path::new(&path))
 }
 #[tauri::command]
+fn image_extensions() -> &'static [&'static str] {
+    backend::IMAGE_EXTENSIONS
+}
+#[tauri::command]
+async fn folder_images(path: String) -> Result<Vec<String>, String> {
+    tauri::async_runtime::spawn_blocking(move || {
+        backend::folder_images(std::path::Path::new(&path))
+    })
+    .await
+    .map_err(|e| e.to_string())?
+}
+#[tauri::command]
 fn image_state(backend: State<'_, Backend>) -> Option<ImageState> {
     backend.snapshot()
 }
@@ -80,9 +92,22 @@ async fn load_annotations(
 ) -> Result<Vec<roi::PointRoi>, String> {
     let job = annotation_job(&backend, &id)?;
     tauri::async_runtime::spawn_blocking(move || {
+        if job.cancel.load(Ordering::Relaxed) {
+            return Err("Image replaced or cancelled.".into());
+        }
         let mut annotations = job.annotations.lock().unwrap();
+        if job.cancel.load(Ordering::Relaxed) {
+            return Err("Image replaced or cancelled.".into());
+        }
         if annotations.is_none() {
-            *annotations = Some(annotation_io::load_basis(&job.source)?);
+            let basis = annotation_io::load_basis(&job.source)?;
+            if job.cancel.load(Ordering::Relaxed) {
+                return Err("Image replaced or cancelled.".into());
+            }
+            *annotations = Some(basis);
+        }
+        if job.cancel.load(Ordering::Relaxed) {
+            return Err("Image replaced or cancelled.".into());
         }
         Ok(annotations.as_ref().unwrap().points.clone())
     })
@@ -146,6 +171,8 @@ fn main() {
         })
         .invoke_handler(tauri::generate_handler![
             open_image,
+            image_extensions,
+            folder_images,
             image_state,
             cancel_load,
             load_annotations,
@@ -196,21 +223,33 @@ fn main() {
                     &asset,
                     backend::Asset::Preview | backend::Asset::ChannelPreview { .. }
                 ) {
-                    None
+                    Ok(None)
                 } else {
-                    Some(slots.acquire_owned().await)
+                    job.tile_permit(slots).await.map(Some)
                 };
-                let result = if permit.as_ref().map(Result::is_ok).unwrap_or(true) {
-                    tauri::async_runtime::spawn_blocking(move || backend::read_asset(&job, asset))
+                let result = match permit.as_ref() {
+                    _ if job.cancel.load(Ordering::Relaxed) => {
+                        Err((410, "Image replaced or cancelled.".into()))
+                    }
+                    Ok(_) => {
+                        let active = job.clone();
+                        tauri::async_runtime::spawn_blocking(move || {
+                            backend::read_asset(&active, asset)
+                        })
                         .await
                         .unwrap_or_else(|e| Err((500, e.to_string())))
-                } else {
-                    Err((503, "Viewer shutting down.".into()))
+                    }
+                    Err(error) => Err(error.clone()),
                 };
                 drop(permit);
                 app.state::<Backend>()
                     .requests
                     .fetch_sub(1, Ordering::Relaxed);
+                let result = if job.cancel.load(Ordering::Relaxed) {
+                    Err((410, "Image replaced or cancelled.".into()))
+                } else {
+                    result
+                };
                 match result {
                     Ok(bytes) => responder.respond(response(200, bytes)),
                     Err((status, error)) => responder.respond(response(status, error.into_bytes())),

@@ -13,11 +13,25 @@ export function applyDisplay(settings: DisplaySettings) {
   viewer.classList.toggle("display-adjusted", !identity);
 }
 
-export async function loadHistogram(url: string, channels = 0) {
+export async function loadHistogram(
+  url: string,
+  channels = 0,
+  signal?: AbortSignal,
+) {
   const image = new Image();
   image.crossOrigin = "anonymous";
+  const abort = () => {
+    image.src = "";
+  };
+  signal?.throwIfAborted();
+  signal?.addEventListener("abort", abort, { once: true });
   image.src = url;
-  await image.decode();
+  try {
+    await image.decode();
+    signal?.throwIfAborted();
+  } finally {
+    signal?.removeEventListener("abort", abort);
+  }
   const scale = Math.min(
     1,
     256 / Math.max(image.naturalWidth, image.naturalHeight),

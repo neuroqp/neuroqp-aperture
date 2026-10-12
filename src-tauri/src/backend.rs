@@ -8,21 +8,54 @@ use std::{
     collections::{hash_map::DefaultHasher, HashMap},
     ffi::OsString,
     fs::{self, File},
+    future::Future,
     hash::{Hash, Hasher},
     io::{Read, Seek, SeekFrom},
     path::{Path, PathBuf},
-    process::{Command, Stdio},
+    process::{Child, Command, Stdio},
     sync::{
         atomic::{AtomicBool, AtomicU64, Ordering},
         Arc, Mutex,
     },
+    task::Poll,
     thread,
     time::{Duration, Instant, SystemTime, UNIX_EPOCH},
 };
 
 pub const CACHE_LIMIT: u64 = 2 * 1024 * 1024 * 1024;
+pub const IMAGE_EXTENSIONS: &[&str] = &["jpg", "jpeg", "png", "bmp", "tif", "tiff", "webp"];
 const TILE_SIZE: u32 = 256;
 static NEXT_ID: AtomicU64 = AtomicU64::new(1);
+
+fn supported_image(path: &Path) -> bool {
+    path.extension()
+        .and_then(|extension| extension.to_str())
+        .is_some_and(|extension| {
+            IMAGE_EXTENSIONS
+                .iter()
+                .any(|allowed| extension.eq_ignore_ascii_case(allowed))
+        })
+}
+
+pub fn folder_images(path: &Path) -> Result<Vec<String>, String> {
+    let path = std::path::absolute(path).map_err(|e| e.to_string())?;
+    let directory = path.parent().ok_or("Image has no containing folder.")?;
+    let mut images = Vec::new();
+    for entry in fs::read_dir(directory).map_err(|e| format!("Cannot read image folder: {e}"))? {
+        let entry = entry.map_err(|e| e.to_string())?;
+        let path = entry.path();
+        if supported_image(&path) && path.is_file() {
+            if let Some(path) = path.to_str() {
+                images.push(path.to_owned());
+            }
+        }
+    }
+    images.sort_by_cached_key(|path| {
+        let name = Path::new(path).file_name().unwrap().to_str().unwrap();
+        (name.to_lowercase(), name.to_owned())
+    });
+    Ok(images)
+}
 
 #[derive(Clone, Debug, Serialize)]
 #[serde(rename_all = "camelCase")]
@@ -30,6 +63,7 @@ pub struct ImageState {
     pub id: String,
     pub revision: u64,
     pub name: String,
+    pub path: String,
     pub width: u32,
     pub height: u32,
     pub orientation: u8,
@@ -48,6 +82,7 @@ type Notifier = Arc<dyn Fn(&ImageState) + Send + Sync>;
 pub struct Job {
     pub state: Mutex<ImageState>,
     pub cancel: AtomicBool,
+    pub cancelled: tokio::sync::Notify,
     pub dir: Mutex<PathBuf>,
     pub input: PathBuf,
     pub source: PathBuf,
@@ -60,6 +95,7 @@ pub struct Job {
     cache_key: String,
     process_number: AtomicU64,
     decoder: Mutex<Option<Arc<crate::decoder::Decoder>>>,
+    processes: Mutex<HashMap<u64, Arc<Mutex<Child>>>>,
     notifier: Option<Notifier>,
     budget_check: Mutex<Instant>,
     housekeeping: AtomicBool,
@@ -75,6 +111,7 @@ pub struct Backend {
     pub tile_slots: Arc<tokio::sync::Semaphore>,
     notifier: Option<Notifier>,
     cache_access: Arc<Mutex<()>>,
+    open_lock: Mutex<()>,
 }
 
 impl Backend {
@@ -105,6 +142,7 @@ impl Backend {
             tile_slots: Arc::new(tokio::sync::Semaphore::new(2)),
             notifier: None,
             cache_access: Arc::new(Mutex::new(())),
+            open_lock: Mutex::new(()),
         })
     }
 
@@ -113,6 +151,8 @@ impl Backend {
     }
 
     pub fn open(&self, path: &Path) -> Result<ImageState, String> {
+        let _opening = self.open_lock.lock().unwrap();
+        self.cancel();
         if self.closing.load(Ordering::Relaxed) {
             return Err("Viewer shutting down.".into());
         }
@@ -121,15 +161,12 @@ impl Backend {
         if !metadata.is_file() {
             return Err("Choose a regular image file.".into());
         }
-        let extension = source
+        let extension = path
             .extension()
             .and_then(|s| s.to_str())
             .unwrap_or("")
             .to_ascii_lowercase();
-        if !matches!(
-            extension.as_str(),
-            "jpg" | "jpeg" | "png" | "bmp" | "tif" | "tiff" | "webp"
-        ) {
+        if !supported_image(path) {
             return Err("Supported formats: JPEG, PNG, BMP, WebP, TIFF and BigTIFF.".into());
         }
         let mut hasher = DefaultHasher::new();
@@ -177,6 +214,11 @@ impl Backend {
                 .unwrap_or(source.file_name().unwrap())
                 .to_string_lossy()
                 .into_owned(),
+            path: std::path::absolute(path)
+                .map_err(|e| e.to_string())?
+                .to_str()
+                .ok_or("Image path is not UTF-8")?
+                .to_owned(),
             width: 0,
             height: 0,
             orientation: 1,
@@ -192,6 +234,7 @@ impl Backend {
         let job = Arc::new(Job {
             state: Mutex::new(initial.clone()),
             cancel: AtomicBool::new(false),
+            cancelled: tokio::sync::Notify::new(),
             dir: Mutex::new(dir.clone()),
             input,
             source,
@@ -203,6 +246,7 @@ impl Backend {
             cache_key,
             process_number: AtomicU64::new(0),
             decoder: Mutex::new(None),
+            processes: Mutex::new(HashMap::new()),
             notifier: self.notifier.clone(),
             budget_check: Mutex::new(Instant::now()),
             housekeeping: AtomicBool::new(false),
@@ -274,6 +318,30 @@ impl Backend {
 }
 
 impl Job {
+    pub async fn tile_permit(
+        &self,
+        slots: Arc<tokio::sync::Semaphore>,
+    ) -> Result<tokio::sync::OwnedSemaphorePermit, (u16, String)> {
+        // notify_waiters also wakes futures created before their first poll.
+        let cancelled = self.cancelled.notified();
+        if self.cancel.load(Ordering::Relaxed) {
+            return Err((410, "Image replaced or cancelled.".into()));
+        }
+        let mut cancelled = std::pin::pin!(cancelled);
+        let mut acquire = std::pin::pin!(slots.acquire_owned());
+        std::future::poll_fn(|cx| {
+            if cancelled.as_mut().poll(cx).is_ready() {
+                Poll::Ready(Err((410, "Image replaced or cancelled.".into())))
+            } else {
+                acquire
+                    .as_mut()
+                    .poll(cx)
+                    .map(|result| result.map_err(|_| (503, "Viewer shutting down.".into())))
+            }
+        })
+        .await
+    }
+
     fn cancel(&self) {
         let snapshot = {
             let mut state = self.state.lock().unwrap();
@@ -286,10 +354,16 @@ impl Job {
             state.revision += 1;
             state.clone()
         };
+        self.cancelled.notify_waiters();
         self.notify(&snapshot);
         let decoder = self.decoder.lock().unwrap().clone();
         if let Some(decoder) = decoder {
             decoder.stop();
+        }
+        for (_, process) in self.processes.lock().unwrap().drain() {
+            let mut child = process.lock().unwrap();
+            let _ = child.kill();
+            let _ = child.wait();
         }
     }
     fn update(&self, action: impl FnOnce(&mut ImageState)) {
@@ -1246,6 +1320,9 @@ fn native_channel_tile(
             &partial,
             field(&header, "format") == Some("ushort"),
         )?;
+        if job.cancel.load(Ordering::Relaxed) {
+            return Err("Loading cancelled.".into());
+        }
         fs::rename(&partial, &destination).map_err(|e| e.to_string())?;
         fs::read(&destination).map_err(|e| e.to_string())
     })();
@@ -1325,33 +1402,58 @@ fn run_with_progress(
             "--vips-disc-threshold=32m",
         ]);
     }
-    let mut child = command.stdout(Stdio::from(stdout)).stderr(Stdio::from(stderr)).spawn().map_err(|e| format!("Cannot run {program}: {e}. Install libvips tools (and libtiff tools for existing page pyramids)."))?;
+    let process = {
+        // Serialize spawning with cancellation so replacement cannot leave a
+        // decoder process starting after its job has been cancelled.
+        let mut processes = job.processes.lock().unwrap();
+        if job.cancel.load(Ordering::Relaxed) {
+            return Err("Loading cancelled.".into());
+        }
+        let child = command.stdout(Stdio::from(stdout)).stderr(Stdio::from(stderr)).spawn().map_err(|e| format!("Cannot run {program}: {e}. Install libvips tools (and libtiff tools for existing page pyramids)."))?;
+        let process = Arc::new(Mutex::new(child));
+        processes.insert(number, process.clone());
+        process
+    };
     let status = loop {
         if job.cancel.load(Ordering::Relaxed) {
+            let mut child = process.lock().unwrap();
             let _ = child.kill();
             let _ = child.wait();
+            drop(child);
+            job.processes.lock().unwrap().remove(&number);
             let _ = fs::remove_file(stdout_path);
             let _ = fs::remove_file(stderr_path);
             return Err("Loading cancelled.".into());
         }
-        match child.try_wait() {
+        let status = process.lock().unwrap().try_wait();
+        match status {
             Ok(Some(status)) => break status,
             Ok(None) => (),
             Err(error) => {
+                let mut child = process.lock().unwrap();
                 let _ = child.kill();
                 let _ = child.wait();
+                drop(child);
+                job.processes.lock().unwrap().remove(&number);
                 return Err(error.to_string());
             }
         }
         if budget_exceeded(job, false) {
+            let mut child = process.lock().unwrap();
             let _ = child.kill();
             let _ = child.wait();
+            drop(child);
+            job.processes.lock().unwrap().remove(&number);
             let _ = fs::remove_file(&stdout_path);
             let _ = fs::remove_file(&stderr_path);
             return Err("The 2 GiB display cache limit was reached. This image needs more temporary disk space than this proof of concept allows.".into());
         }
         thread::sleep(Duration::from_millis(2));
     };
+    job.processes.lock().unwrap().remove(&number);
+    if job.cancel.load(Ordering::Relaxed) {
+        return Err("Loading cancelled.".into());
+    }
     let mut output = String::new();
     File::open(&stdout_path)
         .map_err(|e| e.to_string())?
@@ -1659,6 +1761,145 @@ fn prune_except(root: &Path, limit: u64, protected: Option<&Path>) -> Result<(),
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn folder_navigation_matches_open_formats_and_preserves_aliases() {
+        let root = std::env::temp_dir().join(format!(
+            "aperture-folder-{}-{}",
+            std::process::id(),
+            NEXT_ID.fetch_add(1, Ordering::Relaxed)
+        ));
+        fs::create_dir(&root).unwrap();
+        for name in [
+            "z.JPG",
+            "a.png",
+            "A.PNG",
+            "b.JPEG",
+            "c.bmp",
+            "d.tif",
+            "e.TIFF",
+            "f.webp",
+            "notes.txt",
+            "g.gif",
+            "source.data",
+        ] {
+            fs::write(root.join(name), []).unwrap();
+        }
+        fs::create_dir(root.join("folder.png")).unwrap();
+        std::os::unix::fs::symlink(root.join("source.data"), root.join("alias.png")).unwrap();
+        std::os::unix::fs::symlink(root.join("missing.png"), root.join("broken.png")).unwrap();
+        let paths = folder_images(&root.join("a.png")).unwrap();
+        let names: Vec<_> = paths
+            .iter()
+            .map(|path| Path::new(path).file_name().unwrap().to_str().unwrap())
+            .collect();
+        assert_eq!(
+            names,
+            [
+                "A.PNG",
+                "a.png",
+                "alias.png",
+                "b.JPEG",
+                "c.bmp",
+                "d.tif",
+                "e.TIFF",
+                "f.webp",
+                "z.JPG"
+            ]
+        );
+        assert!(paths.iter().all(|path| Path::new(path).is_absolute()));
+        assert_eq!(folder_images(&root.join("deleted.tif")).unwrap(), paths);
+        let backend = Backend::new(root.join("cache")).unwrap();
+        let state = backend.open(&root.join("alias.png")).unwrap();
+        assert_eq!(state.path, root.join("alias.png").to_str().unwrap());
+        backend.shutdown();
+        let empty = root.join("empty");
+        fs::create_dir(&empty).unwrap();
+        assert!(folder_images(&empty.join("absent.tif")).unwrap().is_empty());
+        assert!(folder_images(&root.join("missing/absent.tif")).is_err());
+        fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn invalid_replacement_reaps_subprocess_and_stops_waiting_tiles() {
+        let root = std::env::temp_dir().join(format!(
+            "aperture-replace-{}-{}",
+            std::process::id(),
+            NEXT_ID.fetch_add(1, Ordering::Relaxed)
+        ));
+        fs::create_dir(&root).unwrap();
+        let source = root.join("source.tif");
+        channel_fixture(&source, 1, 1, "");
+        let backend = Backend::new(root.join("cache")).unwrap();
+        backend.open(&source).unwrap();
+        wait_ready(&backend);
+        let job = backend.current.lock().unwrap().clone().unwrap();
+        job.state.lock().unwrap().phase = "loading".into();
+        fs::remove_file(job.dir.lock().unwrap().join("preview.jpg")).unwrap();
+        let waiting = {
+            let job = job.clone();
+            thread::spawn(move || read_asset(&job, Asset::Preview))
+        };
+        let sleeper = {
+            let job = job.clone();
+            thread::spawn(move || run(&job, "sleep", &["30".into()]))
+        };
+        let deadline = Instant::now() + Duration::from_secs(5);
+        let pid = loop {
+            if let Some(child) = job.processes.lock().unwrap().values().next() {
+                break child.lock().unwrap().id();
+            }
+            assert!(Instant::now() < deadline, "subprocess did not start");
+            thread::sleep(Duration::from_millis(2));
+        };
+        let began = Instant::now();
+        assert!(backend.open(&root.join("deleted.tif")).is_err());
+        assert!(began.elapsed() < Duration::from_secs(1));
+        assert!(!Path::new(&format!("/proc/{pid}")).exists());
+        assert!(job.processes.lock().unwrap().is_empty());
+        assert!(sleeper.join().unwrap().unwrap_err().contains("cancelled"));
+        assert_eq!(waiting.join().unwrap().unwrap_err().0, 410);
+        assert_eq!(backend.snapshot().unwrap().phase, "cancelled");
+        backend.shutdown();
+        fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn queued_tile_permits_cancel_before_and_after_first_poll() {
+        let root = std::env::temp_dir().join(format!(
+            "aperture-tile-queue-{}-{}",
+            std::process::id(),
+            NEXT_ID.fetch_add(1, Ordering::Relaxed)
+        ));
+        fs::create_dir(&root).unwrap();
+        let source = root.join("source.png");
+        fs::write(&source, []).unwrap();
+        let backend = Backend::new(root.join("cache")).unwrap();
+        for poll_first in [false, true] {
+            backend.open(&source).unwrap();
+            let job = backend.current.lock().unwrap().clone().unwrap();
+            tauri::async_runtime::block_on(async {
+                // No permit can become available; cancellation must wake it.
+                let slots = Arc::new(tokio::sync::Semaphore::new(0));
+                let mut waiting = std::pin::pin!(job.tile_permit(slots));
+                if poll_first {
+                    std::future::poll_fn(|cx| {
+                        assert!(waiting.as_mut().poll(cx).is_pending());
+                        Poll::Ready(())
+                    })
+                    .await;
+                }
+                job.cancel();
+                let result = tokio::time::timeout(Duration::from_millis(100), waiting)
+                    .await
+                    .expect("cancelled tile remained queued");
+                assert_eq!(result.unwrap_err().0, 410);
+            });
+        }
+        backend.shutdown();
+        fs::remove_dir_all(root).unwrap();
+    }
+
     fn wait_ready(backend: &Backend) -> ImageState {
         let deadline = Instant::now() + Duration::from_secs(20);
         loop {
