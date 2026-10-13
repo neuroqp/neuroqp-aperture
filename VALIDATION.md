@@ -1079,3 +1079,11 @@ mount paths and extraction ctimes no longer invalidate persistent caches. The
 regression checks two mount locations, an inherited environment on a development
 binary, and a same-size package replacement with restored mtime. All 60 Linux
 Rust tests, strict Clippy, rustfmt and independent review passed.
+
+Windows TIFF inspection now supplies reduced top-level IFD and tile metadata
+required by native preview/pyramid discovery. It bounds directory count, SubIFD
+heads, aggregate metadata bytes and worker response size; malformed graphs keep
+base channel metadata and disable partial native reuse. Tests cover existing
+levels without rebuilt tiles, classic/BigTIFF byte orders, offsets, cycles and
+budgets. All 62 Linux Rust tests, strict Clippy, rustfmt and independent review
+passed. The final Windows package workflow will verify the worker path.

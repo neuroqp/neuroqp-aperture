@@ -2585,6 +2585,48 @@ mod tests {
         fs::remove_dir_all(root).unwrap();
     }
     #[test]
+    fn native_reduced_ifd_pyramid_uses_existing_levels_without_building_tiles() {
+        if !cfg!(windows) && Command::new("vips").arg("--version").output().is_err() {
+            return;
+        }
+        let root = std::env::temp_dir().join(format!(
+            "aperture-page-pyramid-{}-{}",
+            std::process::id(),
+            NEXT_ID.fetch_add(1, Ordering::Relaxed)
+        ));
+        fs::create_dir(&root).unwrap();
+        let fixture = Path::new(env!("CARGO_MANIFEST_DIR"))
+            .join("../tests/fixtures/rgb-odd-subifd-pyramid.tif");
+        let source = root.join("reduced pages [pyramid] 日本語.tif");
+        crate::tiff_annotations::pyramid_fixture_as_pages(&fixture, &source).unwrap();
+        let backend = Backend::new(root.join("cache")).unwrap();
+        backend.open(&source).unwrap();
+        let state = wait_ready(&backend);
+        assert!(state.detail.contains("existing TIFF pyramid"), "{state:?}");
+        let job = backend.current.lock().unwrap().clone().unwrap();
+        let levels = job.native.lock().unwrap();
+        assert!(levels.len() > 1);
+        assert!(levels
+            .iter()
+            .skip(1)
+            .all(|level| level.options.contains("page=") && !level.options.contains("subifd=")));
+        drop(levels);
+        assert!(!job.dir.lock().unwrap().join("tiles_files").exists());
+        assert!(read_asset(
+            &job,
+            Asset::Tile {
+                level: 12,
+                x: 8,
+                y: 4
+            }
+        )
+        .is_ok());
+        backend.shutdown();
+        drop(job);
+        fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
     fn native_pyramid_reuse_and_odd_edge_geometry() {
         if Command::new("vips").arg("--version").output().is_err() {
             return;
