@@ -119,10 +119,12 @@ completed corresponding-source distribution.
 The reviewed first-release archive is published under
 [`source-v0.1.0`](https://github.com/neuroqp/neuroqp-aperture/releases/tag/source-v0.1.0),
 separate from application releases and excluded from latest.
-`scripts/release/corresponding-source.json` pins its checksum and both native
-dependency identities. [SOURCE-MATERIAL.md](scripts/release/SOURCE-MATERIAL.md)
+`scripts/release/corresponding-source.json` pins its checksum, both native
+dependency identities, exact Cargo/pnpm lock hashes and the archived application
+source-inventory hash. [SOURCE-MATERIAL.md](scripts/release/SOURCE-MATERIAL.md)
 records the review and historical build-environment limits. The workflow downloads
 and verifies the archive, then compares its identities against actual BUILDINFO.
+Checkout lock changes block source preflight before downloading.
 An identity mismatch blocks binary uploads and requires refreshed material.
 
 Unsigned native builds and package smoke tests remain available. Immediately
@@ -135,7 +137,8 @@ be retained. Public binary CI downloads require source material too; signing or
 calling a build validation does not establish redistribution compliance.
 
 Unsigned package sets include the verified source archive and its review record
-in `SHA256SUMS`, and aggregate metadata checks both native identities.
+in `SHA256SUMS`, and aggregate metadata checks both native identities and each
+build's application lock hashes.
 The gate does not assemble sources or certify their distribution.
 
 To refresh the source artifact when dependencies change:
@@ -155,9 +158,19 @@ To refresh the source artifact when dependencies change:
 3. Publish the reviewed archive under a fixed source-material tag in this source
    repository, outside latest, then update `corresponding-source.json` through a
    PR with `status: "ready"`, its version-tag asset URL, the archive's SHA-256,
-   and both identity hashes. Use a new source-material tag and preserve published
+   both native identity hashes, `application_lockfiles_sha256` for `pnpm-lock.yaml`
+   and `src-tauri/Cargo.lock`, and `application_source_inventory_sha256`. Verify
+   those exact lock bytes against the archived application source inventory,
+   which the first manifest must pin under `inventory_sha256`. Use a new
+   source-material tag and preserve published
    bytes. The workflow downloads actual bytes, checks their pinned hash and identity
-   record, then compares identities against both completed binary builds.
+   record, then compares native identities and lock hashes against both completed
+   binary builds.
+
+The separate unsigned prior-version fixture must use `source-material --platform
+windows --upgrade-fixture`. Its preserved `test-deltas/src-tauri/Cargo.lock` may
+change only the aperture root version from `0.1.0` to `0.0.9`; its actual BUILDINFO must hash
+that exact file. Production upload and metadata gates have no fixture exception.
 
 The gate checks reviewed byte/dependency identities. It does not determine
 license obligations or prove that the archive's contents are complete or

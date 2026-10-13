@@ -25,9 +25,14 @@ def verify(directory, dependencies=None):
         paths[item["path"]] = item
         if path.stat().st_size != item["size"] or digest(path) != item["sha256"]:
             raise ValueError(f"Source/build material differs: {item['path']}")
+    verified_archives = set()
+
     def archive_verified(item):
-        return (item["verified"] and item["archive"] in paths
-                and item["sha256"] == paths[item["archive"]]["sha256"])
+        verified = (item["verified"] is True and item["archive"] in paths
+                    and item["sha256"] == paths[item["archive"]]["sha256"])
+        if verified:
+            verified_archives.add(item["archive"])
+        return verified
 
     sources = inventory["sourceArchives"]
     if not all(archive_verified(item) for item in sources):
@@ -52,7 +57,9 @@ def verify(directory, dependencies=None):
             or patch["sha256"] != paths[patch["path"]]["sha256"]
             for patch in item["patches"]) for item in inventory["patchApplication"]):
         raise ValueError("A vendor patch did not apply to its pinned source archive")
-    if any(not item["sourceArchives"] or any(path not in paths for path in item["sourceArchives"])
+    if any(not isinstance(item["sourceArchives"], list) or not item["sourceArchives"]
+           or any(not isinstance(path, str) or path not in verified_archives
+                  for path in item["sourceArchives"])
            for item in inventory["nativePeFiles"]):
         raise ValueError("A bundled native executable has no preserved source mapping")
     if dependencies:

@@ -241,7 +241,7 @@ jobs:
         run: pwsh scripts/release/build-windows-upgrade-fixture.ps1
       - name: Verify fixture corresponding source before upload
         if: ${{ inputs.build_upgrade_fixture && !inputs.signed }}
-        run: python scripts/release/release.py source-material build/upgrade-fixture --platform windows
+        run: python scripts/release/release.py source-material build/upgrade-fixture --platform windows --upgrade-fixture
       - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
         if: ${{ inputs.build_upgrade_fixture && !inputs.signed }}
         with:

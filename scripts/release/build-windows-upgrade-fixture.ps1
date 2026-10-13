@@ -70,7 +70,7 @@ foreach ($name in @('Aperture-Corresponding-Source.tar.xz', 'Aperture-Correspond
     Copy-Item "build/release/$name" "$Output/$name"
 }
 Copy-Item build/windows/dependencies.json "$Output/native-dependencies.json"
-Run-Python -Arguments @('scripts/release/release.py', 'source-material', $Output, '--platform', 'windows')
+Run-Python -Arguments @('scripts/release/release.py', 'source-material', $Output, '--platform', 'windows', '--upgrade-fixture')
 $files = [ordered]@{}
 Get-ChildItem $Output -File -Recurse | Sort-Object FullName | ForEach-Object { $files[$_.FullName.Substring($Output.Length + 1).Replace('\','/')] = (Get-FileHash $_.FullName -Algorithm SHA256).Hash.ToLowerInvariant() }
 Json-File "$Output/FIXTURE.json" ([ordered]@{

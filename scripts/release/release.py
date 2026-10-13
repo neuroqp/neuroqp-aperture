@@ -24,6 +24,8 @@ ASSETS = {
 VERSION = re.compile(r"(?:0|[1-9]\d*)\.(?:0|[1-9]\d*)\.(?:0|[1-9]\d*)\Z")
 SOURCE_ASSET = "Aperture-Corresponding-Source.tar.xz"
 SOURCE_REVIEW = "Aperture-Corresponding-Source.json"
+LOCKFILES = ("pnpm-lock.yaml", "src-tauri/Cargo.lock")
+SOURCE_INVENTORY = "application/source-inventory.json"
 
 
 def digest(path):
@@ -38,6 +40,15 @@ def native_identity(dependencies):
     return hashlib.sha256(json.dumps(dependencies, sort_keys=True, separators=(",", ":"), ensure_ascii=True).encode("utf-8")).hexdigest()
 
 
+def lockfile_hashes(root):
+    return {name: digest(root / name) for name in LOCKFILES}
+
+
+def verify_application_locks(root, plan):
+    if lockfile_hashes(root) != plan["application_lockfiles_sha256"]:
+        raise ValueError("Corresponding source does not match the checkout application lockfiles; review refreshed material")
+
+
 def source_plan(path):
     plan = json.loads(path.read_text(encoding="utf-8"))
     if plan.get("schema") != 1 or plan.get("status") != "ready":
@@ -45,33 +56,73 @@ def source_plan(path):
     hashes = plan.get("native_dependencies_sha256", {})
     if plan.get("asset") != SOURCE_ASSET or not re.fullmatch(r"[0-9a-f]{64}", plan.get("sha256") or "") or set(hashes) != {"linux", "windows"} or any(not re.fullmatch(r"[0-9a-f]{64}", value or "") for value in hashes.values()):
         raise ValueError("Corresponding-source review must pin archive bytes and both native dependency identities")
+    locks = plan.get("application_lockfiles_sha256", {})
+    if set(locks) != set(LOCKFILES) or any(not re.fullmatch(r"[0-9a-f]{64}", value or "") for value in locks.values()) or not re.fullmatch(r"[0-9a-f]{64}", plan.get("application_source_inventory_sha256") or ""):
+        raise ValueError("Corresponding-source review must pin both application lockfiles and their archived source inventory")
     if not re.fullmatch(r"https://github.com/neuroqp/neuroqp-aperture/releases/download/[A-Za-z0-9._-]+/Aperture-Corresponding-Source\.tar\.xz", plan.get("url") or ""):
         raise ValueError("Source archive must have a versioned source-repository release URL; its downloaded bytes are verified")
     return plan
 
 
-def verify_source_material(directory, plan, builds=False, platform=None):
+def verify_source_material(directory, plan, builds=False, platform=None, fixture_locks=None):
     archive = directory / SOURCE_ASSET
     if not archive.is_file() or digest(archive) != plan["sha256"]:
         raise ValueError("Corresponding-source archive missing or different from the reviewed bytes")
-    # Read one bounded identity record, never extract or execute archive content.
-    with tarfile.open(archive, "r:xz") as source:
+    # Read bounded identity records in place, never extract or execute content.
+    inventory_bytes = None
+    with tarfile.open(archive, "r|xz") as source:
         first = source.next()
         if not first or not first.isfile() or first.name != "SOURCE-MANIFEST.json" or first.size > 65536:
             raise ValueError("Source archive must start with a bounded SOURCE-MANIFEST.json identity record")
         record = json.load(source.extractfile(first))
+        for member in source:
+            if member.name == SOURCE_INVENTORY:
+                if not member.isfile() or member.size > 65536:
+                    raise ValueError("Source archive must contain a bounded application source inventory")
+                inventory_bytes = source.extractfile(member).read()
+                break
     if record.get("schema") != 1 or record.get("native_dependencies_sha256") != plan["native_dependencies_sha256"]:
         raise ValueError("Source archive identity differs from its reviewed dependency identities")
+    if record.get("inventory_sha256", {}).get(SOURCE_INVENTORY) != plan["application_source_inventory_sha256"]:
+        raise ValueError("Source archive application inventory differs from its reviewed identity")
+    if inventory_bytes is None or hashlib.sha256(inventory_bytes).hexdigest() != plan["application_source_inventory_sha256"]:
+        raise ValueError("Source archive application inventory bytes differ from their reviewed hash")
+    inventory = json.loads(inventory_bytes)
+    lock_entries = [entry for entry in inventory.get("files", []) if entry.get("path") in LOCKFILES]
+    if inventory.get("schema") != 1 or len(lock_entries) != len(LOCKFILES) or {entry["path"]: entry.get("sha256") for entry in lock_entries} != plan["application_lockfiles_sha256"]:
+        raise ValueError("Source archive application lockfiles differ from the reviewed plan")
     platforms = ("linux", "windows") if builds else ((platform,) if platform else ())
     for platform in platforms:
         info = json.loads((directory / f"BUILDINFO-{platform}.json").read_text(encoding="utf-8"))
         if native_identity(info["native_dependencies"]) != plan["native_dependencies_sha256"][platform]:
             raise ValueError(f"Corresponding source does not match the shipped {platform} native dependency identity")
+        expected_locks = fixture_locks if fixture_locks is not None else plan["application_lockfiles_sha256"]
+        if info.get("lockfiles") != expected_locks:
+            raise ValueError(f"Corresponding source does not match the shipped {platform} application lockfiles")
 
 
-def source_material(directory, fetch=False, root=ROOT, platform=None):
+def upgrade_fixture_locks(directory, root, plan):
+    # Only this separate, unsigned acceptance fixture may change the root version.
+    info = json.loads((directory / "BUILDINFO-windows.json").read_text(encoding="utf-8"))
+    if info["version"] != "0.0.9" or current_version(root) != "0.1.0":
+        raise ValueError("Upgrade fixture must be the separate 0.1.0 to 0.0.9 Windows acceptance build")
+    production = (root / "src-tauri/Cargo.lock").read_bytes()
+    replacement, count = re.subn(rb'(?m)^name = "aperture"\nversion = "[^"\n]+"$', b'name = "aperture"\nversion = "0.0.9"', production)
+    delta = directory / "test-deltas/src-tauri/Cargo.lock"
+    if count != 1 or not delta.is_file() or delta.read_bytes() != replacement:
+        raise ValueError("Upgrade fixture Cargo.lock must differ only in the aperture root version")
+    return {**plan["application_lockfiles_sha256"], "src-tauri/Cargo.lock": digest(delta)}
+
+
+def source_material(directory, fetch=False, root=ROOT, platform=None, upgrade_fixture=False):
     review = root / "scripts/release/corresponding-source.json"
     plan = source_plan(review)
+    verify_application_locks(root, plan)
+    fixture_locks = None
+    if upgrade_fixture:
+        if platform != "windows":
+            raise ValueError("Upgrade fixture source verification requires --platform windows")
+        fixture_locks = upgrade_fixture_locks(directory, root, plan)
     directory.mkdir(parents=True, exist_ok=True)
     archive = directory / SOURCE_ASSET
     if fetch:
@@ -86,7 +137,7 @@ def source_material(directory, fetch=False, root=ROOT, platform=None):
             temporary.replace(archive)
         finally:
             temporary.unlink(missing_ok=True)
-    verify_source_material(directory, plan, platform=platform)
+    verify_source_material(directory, plan, platform=platform, fixture_locks=fixture_locks)
     shutil.copyfile(review, directory / SOURCE_REVIEW)
 
 
@@ -132,6 +183,7 @@ def manifest(directory, version, repository, source_sha, published_at, signed=Tr
     if repository != "neuroqp/neuroqp-aperture":
         raise ValueError("Release assets belong in neuroqp/neuroqp-aperture")
     plan = source_plan(root / "scripts/release/corresponding-source.json")
+    verify_application_locks(root, plan)
     verify_source_material(directory, plan, builds=True)
     if json.loads((directory / SOURCE_REVIEW).read_text(encoding="utf-8")) != plan:
         raise ValueError("Source material review differs from the release commit's reviewed plan")
@@ -201,7 +253,7 @@ def buildinfo(platform, directory, dependency_file, root=ROOT):
         return subprocess.check_output(args, cwd=root, text=True, encoding="utf-8").strip()
     info = {"version": current_version(root), "source_sha": run("git", "-c", f"safe.directory={root}", "rev-parse", "HEAD"), "platform": platform,
             "toolchains": {"rust": run("rustc", "--version"), "cargo": run("cargo", "--version"), "node": run("node", "--version"), "pnpm": run("pnpm", "--version")},
-            "lockfiles": {name: digest(root / name) for name in ("pnpm-lock.yaml", "src-tauri/Cargo.lock")},
+            "lockfiles": lockfile_hashes(root),
             "native_dependencies": json.loads(dependency_file.read_text(encoding="utf-8")), "desktop_acceptance": "Required before promotion; automated worker/package checks are not GUI acceptance."}
     info["runner"] = {name: os.environ[name] for name in ("ImageOS", "ImageVersion", "RUNNER_OS", "RUNNER_ARCH") if name in os.environ}
     if platform == "windows":
@@ -231,6 +283,7 @@ def main():
     sources.add_argument("directory", type=Path)
     sources.add_argument("--fetch", action="store_true")
     sources.add_argument("--platform", choices=("linux", "windows"))
+    sources.add_argument("--upgrade-fixture", action="store_true", help="Verify the separate unsigned 0.0.9 Windows fixture root-version delta")
     version = commands.add_parser("version")
     version.add_argument("version")
     release_notes = commands.add_parser("notes")
@@ -255,7 +308,7 @@ def main():
         print(current_version())
         notes(current_version())
     elif args.command == "source-material":
-        source_material(args.directory, args.fetch, platform=args.platform)
+        source_material(args.directory, args.fetch, platform=args.platform, upgrade_fixture=args.upgrade_fixture)
     elif args.command == "version":
         set_version(args.version)
     elif args.command == "notes":

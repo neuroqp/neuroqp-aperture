@@ -72,6 +72,31 @@ class SourceInventoryTest(unittest.TestCase):
         with self.assertRaisesRegex(ValueError, "source mapping"):
             source_windows.verify(self.root)
 
+    def test_native_mapping_requires_verified_source_archive(self):
+        for name in ("vendor.patch", "LICENSE"):
+            with self.subTest(path=name):
+                data = b"inventoried build material"
+                (self.root / name).write_bytes(data)
+                self.inventory["files"].append({
+                    "path": name, "size": len(data), "sha256": hashlib.sha256(data).hexdigest()})
+                self.inventory["nativePeFiles"][0]["sourceArchives"] = [name]
+                self.save()
+                with self.assertRaisesRegex(ValueError, "source mapping"):
+                    source_windows.verify(self.root)
+
+        for mapping in ({"source.tar": True}, [["source.tar"]]):
+            with self.subTest(mapping=mapping):
+                self.inventory["nativePeFiles"][0]["sourceArchives"] = mapping
+                self.save()
+                with self.assertRaisesRegex(ValueError, "source mapping"):
+                    source_windows.verify(self.root)
+
+        self.inventory["nativePeFiles"][0]["sourceArchives"] = ["source.tar"]
+        self.inventory["sourceArchives"][0]["verified"] = "true"
+        self.save()
+        with self.assertRaisesRegex(ValueError, "recipe source"):
+            source_windows.verify(self.root)
+
 
 if __name__ == "__main__":
     unittest.main()
