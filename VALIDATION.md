@@ -1055,3 +1055,13 @@ install/uninstall smoke, and combined artifact metadata/checksums. The Windows
 log confirms both the restored-mtime/file-replacement identity regression and
 two/four-band TIFF loading regression passed. Native desktop acceptance and a
 real signed upgrade remain separate first-release requirements.
+
+A subsequent review found that unsigned CI uploads also needed the source gate.
+Both platform artifact uploads now require the reviewed source archive and the
+matching platform BUILDINFO identity; unsigned aggregate verification requires
+the source assets too. Failure-debug binary uploads were removed. While the plan
+is `unassembled`, a native-validation run can build and smoke-test packages but
+will fail at the publication gate without uploading them. Seven temporary binary
+artifacts from this branch's three earlier runs were deleted; run logs and
+Windows screenshot/diagnostic evidence were retained. The native code and packages
+are unchanged from the successful run above.

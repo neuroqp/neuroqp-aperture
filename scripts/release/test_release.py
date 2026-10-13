@@ -42,8 +42,9 @@ class ReleaseTests(unittest.TestCase):
             root = Path(folder) / "repository"
             (root / "scripts/release").mkdir(parents=True)
             (root / "scripts/release/corresponding-source.json").write_text('{"schema":1,"status":"unassembled"}')
-            with self.assertRaisesRegex(ValueError, "publication blocked"):
-                release.manifest(directory, "0.1.0", "neuroqp/neuroqp-aperture", "a" * 40, "2026-10-13T00:00:00Z", root=root)
+            for signed in (True, False):
+                with self.subTest(signed=signed), self.assertRaisesRegex(ValueError, "publication blocked"):
+                    release.manifest(directory, "0.1.0", "neuroqp/neuroqp-aperture", "a" * 40, "2026-10-13T00:00:00Z", signed=signed, root=root)
             self.assertFalse((directory / "latest.json").exists())
             self.assertFalse((directory / "SHA256SUMS").exists())
 
@@ -79,6 +80,26 @@ class ReleaseTests(unittest.TestCase):
             (directory / release.SOURCE_ASSET).write_bytes(original)
             with self.assertRaisesRegex(ValueError, "native dependency identity"):
                 release.verify_source_material(directory, reviewed, builds=True)
+
+    def test_platform_source_gate_checks_that_platform_build(self):
+        with tempfile.TemporaryDirectory() as folder:
+            directory = Path(folder) / "assets"
+            directory.mkdir()
+            root = Path(folder) / "repository"
+            for platform in ("linux", "windows"):
+                (directory / f"BUILDINFO-{platform}.json").write_text(json.dumps({"version": "0.1.0", "source_sha": "a" * 40}))
+            reviewed_source(directory, root)
+            release.source_material(directory, root=root, platform="linux")
+            release.source_material(directory, root=root, platform="windows")
+            for platform in ("linux", "windows"):
+                path = directory / f"BUILDINFO-{platform}.json"
+                original = path.read_text()
+                info = json.loads(original)
+                info["native_dependencies"]["libvips"] = "mismatched"
+                path.write_text(json.dumps(info))
+                with self.subTest(platform=platform), self.assertRaisesRegex(ValueError, f"{platform} native dependency identity"):
+                    release.source_material(directory, root=root, platform=platform)
+                path.write_text(original)
 
     def test_windows_pnpm_shim_uses_command_interpreter(self):
         with tempfile.TemporaryDirectory() as folder:
@@ -137,16 +158,26 @@ class ReleaseTests(unittest.TestCase):
 
     def test_unsigned_has_no_feed(self):
         with tempfile.TemporaryDirectory() as folder:
-            directory = Path(folder)
+            directory = Path(folder) / "assets"
+            directory.mkdir()
+            root = Path(folder) / "repository"
             for name in release.ASSETS.values():
                 (directory / name).write_bytes(b"unsigned validation")
             for platform in ("linux", "windows"):
                 (directory / f"BUILDINFO-{platform}.json").write_text(json.dumps({"version": "0.1.0", "source_sha": "a" * 40}))
                 (directory / f"THIRD-PARTY-NOTICES-{platform}.txt").write_text("notices")
-            release.manifest(directory, "0.1.0", "neuroqp/neuroqp-aperture", "a" * 40, "2026-10-13T00:00:00Z", signed=False)
+            reviewed_source(directory, root)
+            release.manifest(directory, "0.1.0", "neuroqp/neuroqp-aperture", "a" * 40, "2026-10-13T00:00:00Z", signed=False, root=root)
             self.assertFalse((directory / "latest.json").exists())
+            sums = (directory / "SHA256SUMS").read_text()
+            self.assertIn(release.SOURCE_ASSET, sums)
+            self.assertIn(release.SOURCE_REVIEW, sums)
+            release.verify(directory, "0.1.0", "a" * 40, signed=False)
             with self.assertRaises(ValueError):
                 release.verify(directory, "0.1.0", "a" * 40)
+            (directory / release.SOURCE_ASSET).unlink()
+            with self.assertRaisesRegex(ValueError, "archive missing"):
+                release.manifest(directory, "0.1.0", "neuroqp/neuroqp-aperture", "a" * 40, "2026-10-13T00:00:00Z", signed=False, root=root)
 
 
 if __name__ == "__main__":

@@ -50,7 +50,7 @@ def source_plan(path):
     return plan
 
 
-def verify_source_material(directory, plan, builds=False):
+def verify_source_material(directory, plan, builds=False, platform=None):
     archive = directory / SOURCE_ASSET
     if not archive.is_file() or digest(archive) != plan["sha256"]:
         raise ValueError("Corresponding-source archive missing or different from the reviewed bytes")
@@ -62,14 +62,14 @@ def verify_source_material(directory, plan, builds=False):
         record = json.load(source.extractfile(first))
     if record.get("schema") != 1 or record.get("native_dependencies_sha256") != plan["native_dependencies_sha256"]:
         raise ValueError("Source archive identity differs from its reviewed dependency identities")
-    if builds:
-        for platform in ("linux", "windows"):
-            info = json.loads((directory / f"BUILDINFO-{platform}.json").read_text(encoding="utf-8"))
-            if native_identity(info["native_dependencies"]) != plan["native_dependencies_sha256"][platform]:
-                raise ValueError(f"Corresponding source does not match the shipped {platform} native dependency identity")
+    platforms = ("linux", "windows") if builds else ((platform,) if platform else ())
+    for platform in platforms:
+        info = json.loads((directory / f"BUILDINFO-{platform}.json").read_text(encoding="utf-8"))
+        if native_identity(info["native_dependencies"]) != plan["native_dependencies_sha256"][platform]:
+            raise ValueError(f"Corresponding source does not match the shipped {platform} native dependency identity")
 
 
-def source_material(directory, fetch=False, root=ROOT):
+def source_material(directory, fetch=False, root=ROOT, platform=None):
     review = root / "scripts/release/corresponding-source.json"
     plan = source_plan(review)
     directory.mkdir(parents=True, exist_ok=True)
@@ -86,7 +86,7 @@ def source_material(directory, fetch=False, root=ROOT):
             temporary.replace(archive)
         finally:
             temporary.unlink(missing_ok=True)
-    verify_source_material(directory, plan)
+    verify_source_material(directory, plan, platform=platform)
     shutil.copyfile(review, directory / SOURCE_REVIEW)
 
 
@@ -131,11 +131,10 @@ def manifest(directory, version, repository, source_sha, published_at, signed=Tr
         raise ValueError("Source SHA must be a full Git commit ID")
     if repository != "neuroqp/neuroqp-aperture":
         raise ValueError("Release assets belong in neuroqp/neuroqp-aperture")
-    if signed:
-        plan = source_plan(root / "scripts/release/corresponding-source.json")
-        verify_source_material(directory, plan, builds=True)
-        if json.loads((directory / SOURCE_REVIEW).read_text(encoding="utf-8")) != plan:
-            raise ValueError("Source material review differs from the release commit's reviewed plan")
+    plan = source_plan(root / "scripts/release/corresponding-source.json")
+    verify_source_material(directory, plan, builds=True)
+    if json.loads((directory / SOURCE_REVIEW).read_text(encoding="utf-8")) != plan:
+        raise ValueError("Source material review differs from the release commit's reviewed plan")
     platforms = {}
     for target, name in ASSETS.items():
         artifact = directory / name
@@ -162,9 +161,9 @@ def manifest(directory, version, repository, source_sha, published_at, signed=Tr
 
 
 def verify(directory, version, source_sha, signed=True):
-    expected = set(ASSETS.values()) | {"BUILDINFO-linux.json", "BUILDINFO-windows.json", "THIRD-PARTY-NOTICES-linux.txt", "THIRD-PARTY-NOTICES-windows.txt"}
+    expected = set(ASSETS.values()) | {"BUILDINFO-linux.json", "BUILDINFO-windows.json", "THIRD-PARTY-NOTICES-linux.txt", "THIRD-PARTY-NOTICES-windows.txt", SOURCE_ASSET, SOURCE_REVIEW}
     if signed:
-        expected |= {name + ".sig" for name in ASSETS.values()} | {"latest.json", SOURCE_ASSET, SOURCE_REVIEW}
+        expected |= {name + ".sig" for name in ASSETS.values()} | {"latest.json"}
     rows = {}
     for line in (directory / "SHA256SUMS").read_text(encoding="utf-8").splitlines():
         match = re.fullmatch(r"([0-9a-f]{64})  ([A-Za-z0-9_.-]+)", line)
@@ -180,8 +179,8 @@ def verify(directory, version, source_sha, signed=True):
         info = json.loads((directory / f"BUILDINFO-{platform}.json").read_text(encoding="utf-8"))
         if info["version"] != version or info["source_sha"] != source_sha:
             raise ValueError("Build identity mismatch")
+    verify_source_material(directory, source_plan(directory / SOURCE_REVIEW), builds=True)
     if signed:
-        verify_source_material(directory, source_plan(directory / SOURCE_REVIEW), builds=True)
         feed = json.loads((directory / "latest.json").read_text(encoding="utf-8"))
         if feed["version"] != version or set(feed["platforms"]) != set(ASSETS):
             raise ValueError("Updater feed identity mismatch")
@@ -231,6 +230,7 @@ def main():
     sources = commands.add_parser("source-material")
     sources.add_argument("directory", type=Path)
     sources.add_argument("--fetch", action="store_true")
+    sources.add_argument("--platform", choices=("linux", "windows"))
     version = commands.add_parser("version")
     version.add_argument("version")
     release_notes = commands.add_parser("notes")
@@ -255,7 +255,7 @@ def main():
         print(current_version())
         notes(current_version())
     elif args.command == "source-material":
-        source_material(args.directory, args.fetch)
+        source_material(args.directory, args.fetch, platform=args.platform)
     elif args.command == "version":
         set_version(args.version)
     elif args.command == "notes":

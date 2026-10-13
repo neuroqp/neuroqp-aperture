@@ -26,15 +26,17 @@ open a PR; merge only after review. The first version is `0.1.0`.
 
 ## Build locations and checks
 
-| Check              | Where                                                 | Purpose                                                                                                            |
-| ------------------ | ----------------------------------------------------- | ------------------------------------------------------------------------------------------------------------------ |
-| Ordinary PR checks | GitHub Linux runner                                   | Formatting, TypeScript, frontend tests; keep these fast.                                                           |
-| Native validation  | Local Linux or manual GitHub workflow                 | Rust tests/Clippy, production worker behavior, frontend build.                                                     |
-| Package validation | GitHub Windows runner and Debian 12 container         | Compile the actual Windows/MSVC and Linux packages, exercise bundled native tools, retain unsigned test artifacts. |
-| Desktop acceptance | Real Windows standard-user session and Linux desktops | Verify installation, image viewing, saving, and updating in the packaged applications.                             |
+| Check              | Where                                                 | Purpose                                                                                                   |
+| ------------------ | ----------------------------------------------------- | --------------------------------------------------------------------------------------------------------- |
+| Ordinary PR checks | GitHub Linux runner                                   | Formatting, TypeScript, frontend tests; keep these fast.                                                  |
+| Native validation  | Local Linux or manual GitHub workflow                 | Rust tests/Clippy, production worker behavior, frontend build.                                            |
+| Package validation | GitHub Windows runner and Debian 12 container         | Compile and smoke-test actual packages; upload binaries only with verified corresponding source material. |
+| Desktop acceptance | Real Windows standard-user session and Linux desktops | Verify installation, image viewing, saving, and updating in the packaged applications.                    |
 
 The package workflow shares its build implementation with release candidates.
-Validation builds omit updater signatures and cannot be promoted. Release builds
+Validation builds omit updater signatures and cannot be promoted. Their downloads
+require the same reviewed corresponding-source archive and native dependency
+identity checks as release downloads. Release builds
 use the repository's updater signing secret. Build Linux against Debian 12;
 building only on the developer's newer Arch system would raise the minimum
 runtime requirements unnoticed. Windows builds bundle pinned image libraries
@@ -112,10 +114,18 @@ material, its review record, and matching native dependency identities. This
 first-release preparation remains unfinished; changing a checkbox or adding
 source URLs cannot satisfy the gate.
 
-Unsigned validation remains available. Its public CI artifacts are downloads
-too; being unsigned or called validation does not establish redistribution
-compliance. Source assembly and review must also address those artifacts. The
-candidate gate does not assemble their sources or certify their distribution.
+Unsigned native builds and package smoke tests remain available. Immediately
+before either platform uploads binary artifacts, the workflow downloads and
+verifies reviewed source material against that platform's actual BUILDINFO.
+While source is `unassembled`, the job deliberately fails at this upload gate
+after builds and smoke checks; no binary artifacts, including failed packages,
+are uploaded. Windows screenshots, process JSON, and text diagnostics can still
+be retained. Public binary CI downloads require source material too; signing or
+calling a build validation does not establish redistribution compliance.
+
+When material is ready, unsigned package sets include the source archive and its
+review record in `SHA256SUMS`, and aggregate metadata checks both native identities.
+The gate does not assemble sources or certify their distribution.
 
 To prepare the source artifact in a reviewed follow-up:
 
