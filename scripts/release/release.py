@@ -10,7 +10,9 @@ import os
 import re
 import shutil
 import subprocess
+import tarfile
 import tempfile
+import urllib.request
 from pathlib import Path
 
 ROOT = Path(__file__).resolve().parents[2]
@@ -20,6 +22,8 @@ ASSETS = {
     "linux-x86_64": "Aperture-x86_64.AppImage",
 }
 VERSION = re.compile(r"(?:0|[1-9]\d*)\.(?:0|[1-9]\d*)\.(?:0|[1-9]\d*)\Z")
+SOURCE_ASSET = "Aperture-Corresponding-Source.tar.xz"
+SOURCE_REVIEW = "Aperture-Corresponding-Source.json"
 
 
 def digest(path):
@@ -28,6 +32,62 @@ def digest(path):
         for block in iter(lambda: source.read(1024 * 1024), b""):
             result.update(block)
     return result.hexdigest()
+
+
+def native_identity(dependencies):
+    return hashlib.sha256(json.dumps(dependencies, sort_keys=True, separators=(",", ":"), ensure_ascii=True).encode("utf-8")).hexdigest()
+
+
+def source_plan(path):
+    plan = json.loads(path.read_text(encoding="utf-8"))
+    if plan.get("schema") != 1 or plan.get("status") != "ready":
+        raise ValueError("Corresponding-source publication blocked: assemble and review the actual source/build material first")
+    hashes = plan.get("native_dependencies_sha256", {})
+    if plan.get("asset") != SOURCE_ASSET or not re.fullmatch(r"[0-9a-f]{64}", plan.get("sha256") or "") or set(hashes) != {"linux", "windows"} or any(not re.fullmatch(r"[0-9a-f]{64}", value or "") for value in hashes.values()):
+        raise ValueError("Corresponding-source review must pin archive bytes and both native dependency identities")
+    if not re.fullmatch(r"https://github.com/neuroqp/neuroqp-aperture/releases/download/[A-Za-z0-9._-]+/Aperture-Corresponding-Source\.tar\.xz", plan.get("url") or ""):
+        raise ValueError("Source archive must have a versioned source-repository release URL; its downloaded bytes are verified")
+    return plan
+
+
+def verify_source_material(directory, plan, builds=False):
+    archive = directory / SOURCE_ASSET
+    if not archive.is_file() or digest(archive) != plan["sha256"]:
+        raise ValueError("Corresponding-source archive missing or different from the reviewed bytes")
+    # Read one bounded identity record, never extract or execute archive content.
+    with tarfile.open(archive, "r:xz") as source:
+        first = source.next()
+        if not first or not first.isfile() or first.name != "SOURCE-MANIFEST.json" or first.size > 65536:
+            raise ValueError("Source archive must start with a bounded SOURCE-MANIFEST.json identity record")
+        record = json.load(source.extractfile(first))
+    if record.get("schema") != 1 or record.get("native_dependencies_sha256") != plan["native_dependencies_sha256"]:
+        raise ValueError("Source archive identity differs from its reviewed dependency identities")
+    if builds:
+        for platform in ("linux", "windows"):
+            info = json.loads((directory / f"BUILDINFO-{platform}.json").read_text(encoding="utf-8"))
+            if native_identity(info["native_dependencies"]) != plan["native_dependencies_sha256"][platform]:
+                raise ValueError(f"Corresponding source does not match the shipped {platform} native dependency identity")
+
+
+def source_material(directory, fetch=False, root=ROOT):
+    review = root / "scripts/release/corresponding-source.json"
+    plan = source_plan(review)
+    directory.mkdir(parents=True, exist_ok=True)
+    archive = directory / SOURCE_ASSET
+    if fetch:
+        temporary = archive.with_suffix(".partial")
+        try:
+            with urllib.request.urlopen(plan["url"], timeout=60) as source, temporary.open("wb") as output:
+                if not source.geturl().startswith("https://"):
+                    raise ValueError("Source material download redirected away from HTTPS")
+                shutil.copyfileobj(source, output, length=1024 * 1024)
+            if digest(temporary) != plan["sha256"]:
+                raise ValueError("Downloaded corresponding source differs from its reviewed checksum")
+            temporary.replace(archive)
+        finally:
+            temporary.unlink(missing_ok=True)
+    verify_source_material(directory, plan)
+    shutil.copyfile(review, directory / SOURCE_REVIEW)
 
 
 def current_version(root=ROOT):
@@ -71,6 +131,11 @@ def manifest(directory, version, repository, source_sha, published_at, signed=Tr
         raise ValueError("Source SHA must be a full Git commit ID")
     if repository != "neuroqp/neuroqp-aperture":
         raise ValueError("Release assets belong in neuroqp/neuroqp-aperture")
+    if signed:
+        plan = source_plan(root / "scripts/release/corresponding-source.json")
+        verify_source_material(directory, plan, builds=True)
+        if json.loads((directory / SOURCE_REVIEW).read_text(encoding="utf-8")) != plan:
+            raise ValueError("Source material review differs from the release commit's reviewed plan")
     platforms = {}
     for target, name in ASSETS.items():
         artifact = directory / name
@@ -99,7 +164,7 @@ def manifest(directory, version, repository, source_sha, published_at, signed=Tr
 def verify(directory, version, source_sha, signed=True):
     expected = set(ASSETS.values()) | {"BUILDINFO-linux.json", "BUILDINFO-windows.json", "THIRD-PARTY-NOTICES-linux.txt", "THIRD-PARTY-NOTICES-windows.txt"}
     if signed:
-        expected |= {name + ".sig" for name in ASSETS.values()} | {"latest.json"}
+        expected |= {name + ".sig" for name in ASSETS.values()} | {"latest.json", SOURCE_ASSET, SOURCE_REVIEW}
     rows = {}
     for line in (directory / "SHA256SUMS").read_text(encoding="utf-8").splitlines():
         match = re.fullmatch(r"([0-9a-f]{64})  ([A-Za-z0-9_.-]+)", line)
@@ -116,6 +181,7 @@ def verify(directory, version, source_sha, signed=True):
         if info["version"] != version or info["source_sha"] != source_sha:
             raise ValueError("Build identity mismatch")
     if signed:
+        verify_source_material(directory, source_plan(directory / SOURCE_REVIEW), builds=True)
         feed = json.loads((directory / "latest.json").read_text(encoding="utf-8"))
         if feed["version"] != version or set(feed["platforms"]) != set(ASSETS):
             raise ValueError("Updater feed identity mismatch")
@@ -162,6 +228,9 @@ def main():
     parser = argparse.ArgumentParser(description=__doc__)
     commands = parser.add_subparsers(dest="command", required=True)
     commands.add_parser("check")
+    sources = commands.add_parser("source-material")
+    sources.add_argument("directory", type=Path)
+    sources.add_argument("--fetch", action="store_true")
     version = commands.add_parser("version")
     version.add_argument("version")
     release_notes = commands.add_parser("notes")
@@ -185,6 +254,8 @@ def main():
     if args.command == "check":
         print(current_version())
         notes(current_version())
+    elif args.command == "source-material":
+        source_material(args.directory, args.fetch)
     elif args.command == "version":
         set_version(args.version)
     elif args.command == "notes":

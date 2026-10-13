@@ -272,8 +272,8 @@ async function prepareUpdate() {
     if (choice === "save") {
       await saveAnnotations();
       if (dirty) return false;
-    } else if (choice === "discard") dirty = false;
-    else return false;
+    } else if (choice !== "discard") return false;
+    // Keep discarded edits marked unsaved until exit; installation can still fail.
   }
   // Freeze edits before stopping image requests and joining native workers.
   saving = true;

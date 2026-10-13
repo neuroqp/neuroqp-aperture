@@ -1,8 +1,10 @@
 """Checks version synchronization and fail-closed candidate verification."""
 
 import importlib.util
+import io
 import json
 from pathlib import Path
+import tarfile
 import tempfile
 import unittest
 from unittest import mock
@@ -12,7 +14,72 @@ release = importlib.util.module_from_spec(spec)
 spec.loader.exec_module(release)
 
 
+def reviewed_source(directory, root):
+    (root / "scripts/release").mkdir(parents=True)
+    (root / "CHANGELOG.md").write_text((release.ROOT / "CHANGELOG.md").read_text(encoding="utf-8"), encoding="utf-8")
+    identities = {}
+    for platform in ("linux", "windows"):
+        path = directory / f"BUILDINFO-{platform}.json"
+        info = json.loads(path.read_text(encoding="utf-8"))
+        info["native_dependencies"] = {"libvips": "8.18.0" if platform == "linux" else "8.18.7"}
+        path.write_text(json.dumps(info), encoding="utf-8")
+        identities[platform] = release.native_identity(info["native_dependencies"])
+    with tarfile.open(directory / release.SOURCE_ASSET, "w:xz") as source:
+        for name, data in (("SOURCE-MANIFEST.json", json.dumps({"schema": 1, "native_dependencies_sha256": identities}).encode()), ("fixture/source.c", b"/* Synthetic source material for the gate test. */\n")):
+            member = tarfile.TarInfo(name)
+            member.size = len(data)
+            source.addfile(member, io.BytesIO(data))
+    plan = {"schema": 1, "status": "ready", "asset": release.SOURCE_ASSET, "url": "https://github.com/neuroqp/neuroqp-aperture/releases/download/source-fixture/Aperture-Corresponding-Source.tar.xz", "sha256": release.digest(directory / release.SOURCE_ASSET), "native_dependencies_sha256": identities}
+    (root / "scripts/release/corresponding-source.json").write_text(json.dumps(plan), encoding="utf-8")
+    release.source_material(directory, root=root)
+
+
 class ReleaseTests(unittest.TestCase):
+    def test_unassembled_material_blocks_candidate_before_feed_generation(self):
+        with tempfile.TemporaryDirectory() as folder:
+            directory = Path(folder) / "assets"
+            directory.mkdir()
+            root = Path(folder) / "repository"
+            (root / "scripts/release").mkdir(parents=True)
+            (root / "scripts/release/corresponding-source.json").write_text('{"schema":1,"status":"unassembled"}')
+            with self.assertRaisesRegex(ValueError, "publication blocked"):
+                release.manifest(directory, "0.1.0", "neuroqp/neuroqp-aperture", "a" * 40, "2026-10-13T00:00:00Z", root=root)
+            self.assertFalse((directory / "latest.json").exists())
+            self.assertFalse((directory / "SHA256SUMS").exists())
+
+    def test_source_archive_and_dependency_identity_are_verified(self):
+        with tempfile.TemporaryDirectory() as folder:
+            directory = Path(folder) / "assets"
+            directory.mkdir()
+            root = Path(folder) / "repository"
+            for name in release.ASSETS.values():
+                (directory / name).write_bytes(b"artifact")
+                (directory / (name + ".sig")).write_text("signature")
+            for platform in ("linux", "windows"):
+                (directory / f"BUILDINFO-{platform}.json").write_text(json.dumps({"version": "0.1.0", "source_sha": "a" * 40}))
+                (directory / f"THIRD-PARTY-NOTICES-{platform}.txt").write_text("notice")
+            reviewed_source(directory, root)
+            release.manifest(directory, "0.1.0", "neuroqp/neuroqp-aperture", "a" * 40, "2026-10-13T00:00:00Z", root=root)
+            sums = (directory / "SHA256SUMS").read_text()
+            self.assertIn(release.SOURCE_ASSET, sums)
+            self.assertIn(release.SOURCE_REVIEW, sums)
+            release.verify(directory, "0.1.0", "a" * 40)
+            original = (directory / release.SOURCE_ASSET).read_bytes()
+            (directory / release.SOURCE_ASSET).write_bytes(b"altered material")
+            with self.assertRaisesRegex(ValueError, "Checksum mismatch"):
+                release.verify(directory, "0.1.0", "a" * 40)
+            with self.assertRaisesRegex(ValueError, "reviewed bytes"):
+                release.manifest(directory, "0.1.0", "neuroqp/neuroqp-aperture", "a" * 40, "2026-10-13T00:00:00Z", root=root)
+            # A modified binary dependency record cannot use old reviewed material.
+            reviewed = json.loads((root / "scripts/release/corresponding-source.json").read_text())
+            info_path = directory / "BUILDINFO-linux.json"
+            info = json.loads(info_path.read_text())
+            info["native_dependencies"]["libvips"] = "different"
+            info_path.write_text(json.dumps(info))
+            (directory / release.SOURCE_ASSET).write_bytes(original)
+            with self.assertRaisesRegex(ValueError, "native dependency identity"):
+                release.verify_source_material(directory, reviewed, builds=True)
+
     def test_windows_pnpm_shim_uses_command_interpreter(self):
         with tempfile.TemporaryDirectory() as folder:
             directory = Path(folder)
@@ -43,7 +110,9 @@ class ReleaseTests(unittest.TestCase):
 
     def test_candidate_rejects_changed_bytes_and_feed(self):
         with tempfile.TemporaryDirectory() as folder:
-            directory = Path(folder)
+            directory = Path(folder) / "assets"
+            directory.mkdir()
+            root = Path(folder) / "repository"
             sha = "a" * 40
             for name in release.ASSETS.values():
                 (directory / name).write_bytes(b"artifact")
@@ -51,7 +120,8 @@ class ReleaseTests(unittest.TestCase):
             for platform in ("linux", "windows"):
                 (directory / f"BUILDINFO-{platform}.json").write_text(json.dumps({"version": "0.1.0", "source_sha": sha}))
                 (directory / f"THIRD-PARTY-NOTICES-{platform}.txt").write_text("License notice")
-            release.manifest(directory, "0.1.0", "neuroqp/neuroqp-aperture", sha, "2026-10-13T00:00:00Z")
+            reviewed_source(directory, root)
+            release.manifest(directory, "0.1.0", "neuroqp/neuroqp-aperture", sha, "2026-10-13T00:00:00Z", root=root)
             release.verify(directory, "0.1.0", sha)
             (directory / "Aperture-Setup-x64.exe").write_bytes(b"edited")
             with self.assertRaisesRegex(ValueError, "Checksum mismatch"):

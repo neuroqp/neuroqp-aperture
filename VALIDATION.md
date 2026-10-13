@@ -1029,3 +1029,20 @@ The final documentation/CI-trigger cleanup does not change these tested binaries
 The temporary feature-branch push workflow was removed; manual Native validation
 continues to invoke the same reusable package build. No release tag or public
 release was created.
+
+## PR review fixes, 2026-10-13
+
+`scripts/native-update-recovery.py` reproduced the discarded-update dirty-state
+bug in the previous native binary, then passed after the fix. Real pointer edits,
+TIFF annotation saving, and the backend's development-mode install rejection
+verified Cancel, failed Discard-install recovery, the subsequent Open warning,
+restored edit controls, and Save-before-install. The check supplies chooser and
+confirmation responses plus update metadata/download responses. It does not
+exercise a real signed upgrade or native dialog rendering. The source fixture was
+unchanged; only an owned copy was saved. Results are ignored under
+`artifacts/update-recovery/`.
+
+The source-material gate has six release-helper tests, including unfinished-source
+blocking, accepted source bytes, archive tampering, and dependency identity
+mismatch. The checked-in source plan remains `unassembled`, so signed candidate
+creation is blocked until source/build material is assembled and reviewed.

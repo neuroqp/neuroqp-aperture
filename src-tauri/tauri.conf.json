@@ -41,6 +41,7 @@
   },
   "plugins": {
     "updater": {
+      "requireSignedVersion": true,
       "pubkey": "dW50cnVzdGVkIGNvbW1lbnQ6IG1pbmlzaWduIHB1YmxpYyBrZXk6IDhFMTIxNjU5OUU4OEQ2NEYKUldSUDFvaWVXUllTam1PTnFod2o4Q0FlS0N1TkNXVGJIZ3lSQ1d0L1B6Y0pRTHc5VW9ZNDJnbGsK",
       "endpoints": [
         "https://github.com/neuroqp/neuroqp-aperture/releases/latest/download/latest.json"

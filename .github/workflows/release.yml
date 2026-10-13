@@ -34,8 +34,15 @@ jobs:
             echo 'Release already exists. Never rebuild or overwrite release assets.' >&2
             exit 1
           fi
+          python3 scripts/release/release.py source-material build/corresponding-source --fetch
           echo "source_sha=$(git rev-parse HEAD)" >> "$GITHUB_OUTPUT"
           echo "version=$version" >> "$GITHUB_OUTPUT"
+      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
+        with:
+          name: corresponding-source
+          path: build/corresponding-source/*
+          if-no-files-found: error
+          retention-days: 14
   packages:
     needs: identity
     uses: ./.github/workflows/package-build.yml
@@ -60,6 +67,10 @@ jobs:
           pattern: packages-*
           path: build/release
           merge-multiple: true
+      - uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4
+        with:
+          name: corresponding-source
+          path: build/release
       - run: sudo apt-get update && sudo apt-get install -y minisign
       - name: Assemble and verify candidate
         env:

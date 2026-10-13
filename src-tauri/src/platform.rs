@@ -7,6 +7,45 @@ use std::{
     process::Command,
 };
 
+/// The file handle preserves identity across renames; ChangeTime also covers
+/// writes/metadata changes when a caller restores LastWriteTime afterward.
+#[cfg(windows)]
+pub fn file_identity(file: &fs::File) -> Option<(u64, [u8; 16], i64)> {
+    use std::{
+        mem::{size_of, MaybeUninit},
+        os::windows::io::AsRawHandle,
+    };
+    use windows_sys::Win32::Storage::FileSystem::{
+        FileBasicInfo, FileIdInfo, GetFileInformationByHandleEx, FILE_BASIC_INFO, FILE_ID_INFO,
+    };
+    let mut identity = MaybeUninit::<FILE_ID_INFO>::uninit();
+    let mut basic = MaybeUninit::<FILE_BASIC_INFO>::uninit();
+    unsafe {
+        if GetFileInformationByHandleEx(
+            file.as_raw_handle(),
+            FileIdInfo,
+            identity.as_mut_ptr().cast(),
+            size_of::<FILE_ID_INFO>() as u32,
+        ) == 0
+            || GetFileInformationByHandleEx(
+                file.as_raw_handle(),
+                FileBasicInfo,
+                basic.as_mut_ptr().cast(),
+                size_of::<FILE_BASIC_INFO>() as u32,
+            ) == 0
+        {
+            return None;
+        }
+        let identity = identity.assume_init();
+        let basic = basic.assume_init();
+        (identity.FileId.Identifier != [0; 16] && basic.ChangeTime > 0).then_some((
+            identity.VolumeSerialNumber,
+            identity.FileId.Identifier,
+            basic.ChangeTime,
+        ))
+    }
+}
+
 pub fn source_alias(source: &Path, alias: &Path) -> io::Result<()> {
     #[cfg(unix)]
     {
@@ -154,6 +193,61 @@ mod tests {
         assert_eq!(fs::read(source_path(&alias).unwrap()).unwrap(), b"pixels");
         fs::write(&original, b"updated").unwrap();
         assert_eq!(fs::read(source_path(&alias).unwrap()).unwrap(), b"updated");
+        fs::remove_dir_all(root).unwrap();
+    }
+    #[cfg(windows)]
+    #[test]
+    fn windows_identity_changes_with_restored_mtime_and_file_replacement() {
+        let root = std::env::temp_dir().join(format!(
+            "aperture-file-identity-{}-{}",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ));
+        fs::create_dir(&root).unwrap();
+        let path = root.join("source [pixels] 日本語.tif");
+        fs::write(&path, b"AAAA").unwrap();
+        let metadata = fs::metadata(&path).unwrap();
+        let modified = metadata.modified().unwrap();
+        let identity = || {
+            file_identity(&fs::File::open(&path).unwrap())
+                .expect("NTFS identity and change time must be available on the Windows runner")
+        };
+        let original = identity();
+        std::thread::sleep(std::time::Duration::from_millis(20));
+        fs::write(&path, b"BBBB").unwrap();
+        fs::OpenOptions::new()
+            .write(true)
+            .open(&path)
+            .unwrap()
+            .set_times(fs::FileTimes::new().set_modified(modified))
+            .unwrap();
+        assert_eq!(fs::metadata(&path).unwrap().len(), metadata.len());
+        assert_eq!(fs::metadata(&path).unwrap().modified().unwrap(), modified);
+        let edited = identity();
+        assert_eq!(original.0, edited.0);
+        assert_eq!(original.1, edited.1);
+        assert_ne!(
+            original.2, edited.2,
+            "Restoring mtime must not hide the change time"
+        );
+        let replacement = root.join("replacement.tif");
+        fs::write(&replacement, b"CCCC").unwrap();
+        fs::OpenOptions::new()
+            .write(true)
+            .open(&replacement)
+            .unwrap()
+            .set_times(fs::FileTimes::new().set_modified(modified))
+            .unwrap();
+        fs::rename(replacement, &path).unwrap();
+        assert_eq!(fs::metadata(&path).unwrap().modified().unwrap(), modified);
+        assert_ne!(
+            edited.1,
+            identity().1,
+            "Replacing the file must change its file ID"
+        );
         fs::remove_dir_all(root).unwrap();
     }
 }

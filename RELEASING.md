@@ -103,9 +103,44 @@ library sources and build material. Windows inventory and exact upstream version
 are in `scripts/release/windows-lgpl-sources.json`; the build checks them against
 the bundled library versions. Linux BUILDINFO records the Debian package versions
 and libvips source hash. Notices and source links alone are not presented as a
-completed corresponding-source distribution. Preserve and publish the applicable
-sources/patches alongside downloads, or establish a suitable source-offer process.
-This preparation remains a first-publication requirement.
+completed corresponding-source distribution.
+
+`scripts/release/corresponding-source.json` currently records `unassembled`.
+The tag workflow stops before signed builds until it can download and verify the
+reviewed source material. Candidate metadata and promotion also require that
+material, its review record, and matching native dependency identities. This
+first-release preparation remains unfinished; changing a checkbox or adding
+source URLs cannot satisfy the gate.
+
+Unsigned validation remains available. Its public CI artifacts are downloads
+too; being unsigned or called validation does not establish redistribution
+compliance. Source assembly and review must also address those artifacts. The
+candidate gate does not assemble their sources or certify their distribution.
+
+To prepare the source artifact in a reviewed follow-up:
+
+1. Assemble `Aperture-Corresponding-Source.tar.xz` with the applicable exact-version
+   sources, build recipes/configuration, patches, and license material for the
+   libraries actually bundled on both platforms, including relevant statically
+   incorporated dependencies. The Windows inventory is a starting point, not a
+   complete source archive. Check Linux's actual bundled libraries against the
+   Debian versions in BUILDINFO. This completeness review remains human work.
+2. Put `SOURCE-MANIFEST.json` first in the tar archive. It must be a regular file
+   of at most 64 KiB with `schema: 1` and `native_dependencies_sha256` containing
+   `linux` and `windows` identity hashes. Each hash is SHA-256 of that platform's
+   BUILDINFO `native_dependencies` serialized with Python
+   `json.dumps(value, sort_keys=True, separators=(",", ":"), ensure_ascii=True)`
+   and encoded as UTF-8. Dependency changes require fresh material and review.
+3. Publish the reviewed archive under a fixed source-material tag in this source
+   repository, outside latest, then update `corresponding-source.json` through a
+   PR with `status: "ready"`, its version-tag asset URL, the archive's SHA-256,
+   and both identity hashes. This preparation does not publish anything today.
+   The workflow downloads actual bytes, checks their pinned hash and identity
+   record, then compares identities against both completed binary builds.
+
+The gate checks reviewed byte/dependency identities. It does not determine
+license obligations or prove that the archive's contents are complete or
+rebuildable; those claims require the source/material review above.
 
 ## Candidate and stable releases
 
@@ -126,6 +161,8 @@ clients do not see it. The candidate includes:
 - The three fixed-name downloads and their detached updater signatures.
 - `latest.json`, with immutable version-tag download URLs for all three editions.
 - `SHA256SUMS`, platform `BUILDINFO` files, and third-party notices.
+- `Aperture-Corresponding-Source.tar.xz` and its reviewed JSON record, both included
+  in `SHA256SUMS` and preserved without rebuilding during promotion.
 
 Download and test those exact candidate assets. Record the tested tag, source
 commit, `SHA256SUMS` hash, operating systems, and acceptance results in the release

@@ -274,6 +274,32 @@ pub fn read(path: &Path) -> Result<TiffAnnotations, String> {
     Ok(annotations)
 }
 
+/// First-IFD channel tags only, using bounded Rust I/O rather than a filename
+/// passed to the libtiff CLI. The worker makes network reads cancellable.
+pub fn channel_info(path: &Path) -> Result<String, String> {
+    let mut t = Tiff::open(path)?;
+    let mut report = String::from("=== TIFF directory 0 ===\n");
+    if let Some(extras) = t.value(338, 3, 2, 64)? {
+        for value in extras.chunks_exact(2).map(|bytes| t.number(bytes)) {
+            let kind = match value {
+                0 => "unspecified",
+                1 => "associated-alpha",
+                2 => "unassociated-alpha",
+                _ => return Err("Unsupported TIFF ExtraSamples value".into()),
+            };
+            report.push_str(&format!("Extra Samples: {kind}\n"));
+        }
+    }
+    if let Some(planar) = t.value(284, 3, 2, 2)? {
+        match t.number(&planar) {
+            1 => {}
+            2 => report.push_str("Planar Configuration: separate image planes\n"),
+            _ => return Err("Unsupported TIFF PlanarConfiguration value".into()),
+        }
+    }
+    Ok(report)
+}
+
 /// Writes a TIFF atomically, including replacement of the source when authorized.
 /// The caller supplies all overlays to retain.
 pub fn save_copy(
@@ -518,6 +544,60 @@ mod tests {
         b.extend(b"unchanged-pixel-block");
         fs::write(path, b).unwrap();
     }
+    #[test]
+    fn bounded_channel_tags_distinguish_channels_alpha_and_planar_layouts() {
+        let root = std::env::temp_dir().join(format!(
+            "aperture-channel-tags-{}-{}",
+            std::process::id(),
+            SystemTime::now()
+                .duration_since(UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ));
+        fs::create_dir(&root).unwrap();
+        let path = root.join("metadata [source] 日本語.tif");
+        for little in [false, true] {
+            for big in [false, true] {
+                for (bands, interpretation, extra, planar, expected) in [
+                    (2, "grey16", 0, 1, Some(2)),
+                    (4, "srgb", 0, 1, Some(4)),
+                    (2, "grey16", 1, 1, None),
+                    (4, "srgb", 1, 1, Some(3)),
+                    (4, "srgb", 2, 1, Some(3)),
+                    (4, "multiband", 0, 2, None),
+                ] {
+                    fixture(&path, little, big);
+                    let t = Tiff::open(&path).unwrap();
+                    let mut bytes = fs::read(&path).unwrap()[..if big { 16 } else { 8 }].to_vec();
+                    bytes.extend(t.bytes(2, if big { 8 } else { 2 }).unwrap());
+                    bytes.extend(t.entry(284, 3, 1, &t.bytes(planar, 2).unwrap()).unwrap());
+                    bytes.extend(t.entry(338, 3, 1, &t.bytes(extra, 2).unwrap()).unwrap());
+                    bytes.extend(t.bytes(0, if big { 8 } else { 4 }).unwrap());
+                    let oversized_count = t.bytes(33, if big { 8 } else { 4 }).unwrap();
+                    drop(t);
+                    fs::write(&path, bytes).unwrap();
+                    let info = channel_info(&path).unwrap();
+                    let header = format!("width: 7\nheight: 9\nbands: {bands}\nformat: ushort\ninterpretation: {interpretation}\nvips-loader: tiffload\n");
+                    let layout =
+                        crate::channels::discover(&header, &|_| unreachable!(), Some(&info));
+                    match expected {
+                        Some(count) => assert_eq!(layout.unwrap().channels.len(), count),
+                        None => assert!(layout.is_err()),
+                    }
+                    // An untrusted ExtraSamples count cannot make us read/allocate
+                    // a large payload; fail before following its offset.
+                    let mut bytes = fs::read(&path).unwrap();
+                    let entry = if big { 16 + 8 + 20 } else { 8 + 2 + 12 };
+                    bytes[entry + 4..entry + if big { 12 } else { 8 }]
+                        .copy_from_slice(&oversized_count);
+                    fs::write(&path, bytes).unwrap();
+                    assert!(channel_info(&path).is_err());
+                }
+            }
+        }
+        fs::remove_dir_all(root).unwrap();
+    }
+
     #[test]
     fn copy_roundtrip_preserves_bytes_and_unrelated_blocks_in_all_layouts() {
         let stamp = SystemTime::now()

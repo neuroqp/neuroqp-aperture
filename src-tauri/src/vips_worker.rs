@@ -17,6 +17,9 @@ pub const MAX_MESSAGE: usize = 64 * 1024;
 
 #[derive(Debug, Serialize, Deserialize)]
 pub enum Request {
+    TiffChannelInfo {
+        input: String,
+    },
     Command {
         program: String,
         args: Vec<String>,
@@ -244,6 +247,11 @@ impl Worker {
         progress: &Progress,
     ) -> Result<String, String> {
         match request {
+            Request::TiffChannelInfo { input } => {
+                let path =
+                    crate::platform::source_path(Path::new(&input)).map_err(|e| e.to_string())?;
+                crate::tiff_annotations::channel_info(&path)
+            }
             Request::Command { program, args } => {
                 self.command_with_progress(&program, &args, progress)
             }

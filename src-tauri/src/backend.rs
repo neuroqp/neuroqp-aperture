@@ -159,6 +159,11 @@ impl Backend {
             return Err("Viewer shutting down.".into());
         }
         let source = fs::canonicalize(path).map_err(|e| format!("Cannot open image: {e}"))?;
+        #[cfg(windows)]
+        let source_file = File::open(&source).map_err(|e| e.to_string())?;
+        #[cfg(windows)]
+        let metadata = source_file.metadata().map_err(|e| e.to_string())?;
+        #[cfg(unix)]
         let metadata = fs::metadata(&source).map_err(|e| e.to_string())?;
         if !metadata.is_file() {
             return Err("Choose a regular image file.".into());
@@ -171,6 +176,14 @@ impl Backend {
         if !supported_image(path) {
             return Err("Supported formats: JPEG, PNG, BMP, WebP, TIFF and BigTIFF.".into());
         }
+        let id = format!(
+            "{}-{}",
+            SystemTime::now()
+                .duration_since(UNIX_EPOCH)
+                .unwrap_or_default()
+                .as_nanos(),
+            NEXT_ID.fetch_add(1, Ordering::Relaxed)
+        );
         let mut hasher = DefaultHasher::new();
         "aperture-display-v5-area-preview".hash(&mut hasher);
         source.hash(&mut hasher);
@@ -186,19 +199,18 @@ impl Backend {
             )
                 .hash(&mut hasher);
         }
+        #[cfg(windows)]
+        match crate::platform::file_identity(&source_file) {
+            Some(identity) => identity.hash(&mut hasher),
+            // Unknown filesystem identity must never authorize old pixel reuse.
+            // The existing per-open ID remains unique across process launches.
+            None => id.hash(&mut hasher),
+        }
         metadata
             .modified()
             .map_err(|e| e.to_string())?
             .hash(&mut hasher);
         let cache_key = format!("{:016x}", hasher.finish());
-        let id = format!(
-            "{}-{}",
-            SystemTime::now()
-                .duration_since(UNIX_EPOCH)
-                .unwrap_or_default()
-                .as_nanos(),
-            NEXT_ID.fetch_add(1, Ordering::Relaxed)
-        );
         let dir = self.root.join(format!("work-{id}"));
         fs::create_dir(&dir).map_err(|e| e.to_string())?;
         fs::create_dir(dir.join("tmp")).map_err(|e| e.to_string())?;
@@ -685,8 +697,22 @@ fn load(job: &Arc<Job>) -> Result<(), String> {
     }
     let header = run(job, "vipsheader", &["-a".into(), input(job, "")])?;
     let (width, height) = validate_header(&header)?;
-    let tiffinfo = if cfg!(unix) && field(&header, "vips-loader") == Some("tiffload") {
-        run(job, "tiffinfo", &[job.input.clone().into_os_string()]).ok()
+    let tiffinfo = if field(&header, "vips-loader") == Some("tiffload") {
+        #[cfg(unix)]
+        let info = run(job, "tiffinfo", &[job.input.clone().into_os_string()]).ok();
+        #[cfg(windows)]
+        let info = Some(worker_call(
+            job,
+            &crate::vips_worker::Request::TiffChannelInfo {
+                input: job
+                    .input
+                    .to_str()
+                    .ok_or("Image decoder path is not UTF-8")?
+                    .into(),
+            },
+            None,
+        )?);
+        info
     } else {
         None
     };
@@ -2118,6 +2144,13 @@ mod tests {
             let payload = directory + 2 + count as u32 * 12 + 4;
             let description_offset = payload;
             let bits_offset = description_offset + description.len() as u32 + 1;
+            let description_value = if description.len() < 4 {
+                let mut inline = [0_u8; 4];
+                inline[..description.len()].copy_from_slice(description.as_bytes());
+                u32::from_le_bytes(inline)
+            } else {
+                description_offset
+            };
             let pixels_offset = bits_offset + 2 * bands as u32;
             let pixel_bytes = 12 * 9 * bands as u32 * 2;
             let next = if page + 1 == pages {
@@ -2133,11 +2166,17 @@ mod tests {
                     258,
                     3,
                     bands as u32,
-                    if bands == 1 { 16 } else { bits_offset },
+                    if bands == 1 {
+                        16
+                    } else if bands == 2 {
+                        16 | (16 << 16)
+                    } else {
+                        bits_offset
+                    },
                 ),
                 (259, 3, 1, 1),
                 (262, 3, 1, 1),
-                (270, 2, description.len() as u32 + 1, description_offset),
+                (270, 2, description.len() as u32 + 1, description_value),
                 (273, 4, 1, pixels_offset),
                 (274, 3, 1, 1),
                 (277, 3, 1, bands as u32),
@@ -2163,6 +2202,30 @@ mod tests {
             }
         }
         fs::write(path, bytes).unwrap();
+    }
+
+    #[test]
+    fn two_and_four_band_tiffs_keep_all_interleaved_channels() {
+        if !cfg!(windows) && Command::new("vips").arg("--version").output().is_err() {
+            return;
+        }
+        let root = std::env::temp_dir().join(format!(
+            "aperture-small-channels-{}-{}",
+            std::process::id(),
+            NEXT_ID.fetch_add(1, Ordering::Relaxed)
+        ));
+        fs::create_dir(&root).unwrap();
+        let backend = Backend::new(root.join("cache")).unwrap();
+        for bands in [2, 4] {
+            let source = root.join(format!("channels [{bands}] 日本語.tif"));
+            channel_fixture(&source, bands, 1, "");
+            backend.open(&source).unwrap();
+            let state = wait_ready(&backend);
+            assert!(state.channel_mode);
+            assert_eq!(state.channels.len(), bands as usize);
+        }
+        backend.shutdown();
+        fs::remove_dir_all(root).unwrap();
     }
 
     #[test]
