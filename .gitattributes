@@ -1,2 +1,2 @@
-# Preserve verbatim third-party license snapshots and their recorded hashes.
-scripts/release/windows-native-licenses.txt -whitespace
+# Preserve verbatim upstream license bytes and their recorded hash on Windows.
+scripts/release/windows-native-licenses.txt -text -whitespace

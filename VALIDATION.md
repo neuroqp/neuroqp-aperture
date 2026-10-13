@@ -979,7 +979,11 @@ callbacks with TIFF/BigTIFF decoding and exercise BMP decoding and TIFF conversi
 
 A real Linux Tauri/WebKit session verified the update dialog, displayed package
 version, development-build update restriction, preference toggle/persistence,
-and dialog dismissal. Native IPC opened the BMP fixture and produced its 65 × 49
+and dialog dismissal. A further native session supplied only test release metadata,
+a completed-download response, and the initial chooser result; annotation editing
+and saving used the real backend. Cancel kept unsaved edits, Save persisted them,
+and the native development-mode installation rejection restored editing. This
+checks the UI guard and recovery, not a real download or upgrade. Native IPC opened the BMP fixture and produced its 65 × 49
 preview and tiles without errors. Reports and a rendered dialog screenshot are
 ignored under `artifacts/native-validation/`. A separate picker/window-controls
 smoke attempt was stopped when desktop focus changed; it is not counted as a
