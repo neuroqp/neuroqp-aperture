@@ -140,6 +140,8 @@ jobs:
           arch: x64
       - name: Install pinned portable packager
         run: choco install nsis --version=3.11 --yes --no-progress --allow-downgrade
+      - name: Check portable extraction and locking
+        run: pwsh scripts/release/test-portable.ps1
       - uses: pnpm/action-setup@f40ffcd9367d9f12939873eb1018b921a783ffaa # v4
         with:
           version: 9.15.9
@@ -212,6 +214,15 @@ jobs:
         with:
           name: windows-package-evidence
           path: build/evidence/windows/*
+          if-no-files-found: ignore
+          retention-days: 14
+      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
+        if: ${{ failure() && !inputs.signed }}
+        with:
+          name: windows-failed-packages
+          path: |
+            build/release/*
+            build/windows/portable-payload/PAYLOAD-SHA256.txt
           if-no-files-found: ignore
           retention-days: 14
       - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4

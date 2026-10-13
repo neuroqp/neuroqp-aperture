@@ -11,11 +11,45 @@ $Setup = (Resolve-Path $Setup).Path
 $Evidence = [IO.Path]::GetFullPath($Evidence)
 $python = (Get-Command python).Source
 New-Item -ItemType Directory -Force $Evidence | Out-Null
+$payloadRoot = $null
+
+function Save-Diagnostics($Name) {
+    Get-CimInstance Win32_Process | Where-Object { $_.Name -match '^(aperture|Aperture-Portable-x64|Aperture-Setup-x64|icacls|uninstall|msedgewebview2)\.exe$' } |
+        Select-Object ProcessId, ParentProcessId, Name, ExecutablePath, CommandLine |
+        ConvertTo-Json -Depth 4 | Set-Content "$Evidence/$Name-processes.json" -Encoding utf8
+    if ($payloadRoot) {
+        Get-ChildItem "$payloadRoot.*.trace.txt" -ErrorAction SilentlyContinue | ForEach-Object {
+            Copy-Item $_.FullName $Evidence -Force
+            Write-Output $_.Name
+            Get-Content $_.FullName
+        }
+        Get-ChildItem "$payloadRoot.incomplete" -Recurse -File -ErrorAction SilentlyContinue | Select-Object -First 100 FullName, Length |
+            ConvertTo-Json | Set-Content "$Evidence/$Name-staging.json" -Encoding utf8
+    }
+    try {
+        Add-Type -AssemblyName System.Drawing
+        Add-Type -AssemblyName System.Windows.Forms
+        $bounds = [Windows.Forms.Screen]::PrimaryScreen.Bounds
+        $bitmap = [Drawing.Bitmap]::new($bounds.Width, $bounds.Height)
+        $graphics = [Drawing.Graphics]::FromImage($bitmap)
+        try {
+            $graphics.CopyFromScreen($bounds.Location, [Drawing.Point]::Empty, $bounds.Size)
+            $bitmap.Save("$Evidence/$Name-desktop.png", [Drawing.Imaging.ImageFormat]::Png)
+        } finally { $graphics.Dispose(); $bitmap.Dispose() }
+    } catch { $_.ToString() | Set-Content "$Evidence/$Name-screenshot-error.txt" -Encoding utf8 }
+}
+
+trap {
+    try { Save-Diagnostics 'failure' } catch { Write-Warning "Could not save failure diagnostics: $_" }
+    throw
+}
 
 function Wait-Success($Process) {
-    if (-not $Process.WaitForExit(300000)) { $Process.Kill(); throw 'Package preparation timed out.' }
+    Write-Output "Waiting for package process $($Process.Id): $($Process.StartInfo.FileName)"
+    if (-not $Process.WaitForExit(300000)) { Save-Diagnostics 'timeout'; $Process.Kill(); throw 'Package preparation timed out.' }
     $Process.Refresh()
     if ($Process.ExitCode -ne 0) { throw "Package preparation failed: $($Process.ExitCode)" }
+    Write-Output "Package process $($Process.Id) completed successfully."
 }
 
 function Assert-Payload($Directory) {
@@ -82,6 +116,7 @@ $hash = [Convert]::ToHexString([Security.Cryptography.SHA256]::HashData([Text.En
 $payloadRoot = "$env:LOCALAPPDATA/NeuroQP/Aperture/portable/$Version-$hash"
 if (Test-Path $payloadRoot) { throw 'First-launch smoke needs a fresh version/hash payload directory.' }
 # Simulate a killed first extraction, then race two real launchers.
+Write-Output "Testing concurrent portable extraction: $payloadRoot"
 New-Item -ItemType Directory -Force "$payloadRoot.incomplete" | Out-Null
 Set-Content "$payloadRoot.incomplete/stale.txt" 'Interrupted extraction'
 $first = Start-Process $Portable '--aperture-extract-only' -PassThru
@@ -97,12 +132,14 @@ $before = (Get-Item "$payloadRoot/aperture.exe").LastWriteTimeUtc
 Wait-Success (Start-Process $Portable '--aperture-extract-only' -PassThru)
 if ((Get-Item "$payloadRoot/aperture.exe").LastWriteTimeUtc -ne $before) { throw 'Portable reused launch re-extracted the application.' }
 if (Test-Path "$payloadRoot/.aperture-installed") { throw 'Portable mode contains an installed marker.' }
+Write-Output 'Portable extraction integrity and reuse passed. Checking native worker and window.'
 Assert-Payload $payloadRoot
 Assert-NativeWindow $payloadRoot 'portable' $Portable
 
 $installed = Join-Path $env:LOCALAPPDATA 'Aperture packaging smoke µ'
 if (Test-Path $installed) { throw 'Install smoke directory must be fresh.' }
 try {
+    Write-Output "Testing per-user installer: $installed"
     Wait-Success (Start-Process $Setup "/S /D=$installed" -PassThru)
     if (-not (Test-Path "$installed/.aperture-installed")) { throw 'Per-user NSIS installation marker is missing.' }
     Assert-Payload $installed
