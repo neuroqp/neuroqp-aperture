@@ -23,8 +23,8 @@ def reviewed_source(directory, root):
     (root / "scripts/release").mkdir(parents=True)
     (root / "CHANGELOG.md").write_text((release.ROOT / "CHANGELOG.md").read_text(encoding="utf-8"), encoding="utf-8")
     (root / "src-tauri").mkdir()
-    (root / "src-tauri/Cargo.lock").write_text('[[package]]\nname = "aperture"\nversion = "0.1.0"\n\n[[package]]\nname = "dep"\nversion = "1.0.0"\n')
-    (root / "pnpm-lock.yaml").write_text("lockfileVersion: '9.0'\n")
+    (root / "src-tauri/Cargo.lock").write_bytes(b'[[package]]\nname = "aperture"\nversion = "0.1.0"\n\n[[package]]\nname = "dep"\nversion = "1.0.0"\n')
+    (root / "pnpm-lock.yaml").write_bytes(b"lockfileVersion: '9.0'\n")
     locks = release.lockfile_hashes(root)
     inventory = json.dumps({"schema": 1, "files": [{"path": name, "sha256": checksum} for name, checksum in locks.items()]}).encode()
     inventory_hash = release.hashlib.sha256(inventory).hexdigest()
@@ -286,8 +286,8 @@ class ReleaseTests(unittest.TestCase):
             for name in ("package.json", "src-tauri/tauri.conf.json"):
                 (root / name).write_text('{"version":"0.1.0"}')
             (root / "src-tauri/Cargo.toml").write_text('[package]\nname = "aperture"\nversion = "0.1.0"\n')
-            (root / "src-tauri/Cargo.lock").write_text('[[package]]\nname = "aperture"\nversion = "0.1.0"\n')
-            (root / "pnpm-lock.yaml").write_text("lockfileVersion: '9.0'\n")
+            (root / "src-tauri/Cargo.lock").write_bytes(b'[[package]]\nname = "aperture"\nversion = "0.1.0"\n')
+            (root / "pnpm-lock.yaml").write_bytes(b"lockfileVersion: '9.0'\n")
             (root / "CHANGELOG.md").write_text("# Changelog\n\n## [Unreleased]\n\n## [0.2.0] - 2026-10-13\n\n- A change.\n\n## [0.1.0]\n\n- Old.\n")
             release.set_version("0.2.0", root)
             self.assertEqual(release.current_version(root), "0.2.0")
@@ -295,6 +295,26 @@ class ReleaseTests(unittest.TestCase):
             self.assertEqual((root / "pnpm-lock.yaml").read_text(), "lockfileVersion: '9.0'\n")
             with self.assertRaises(ValueError):
                 release.set_version("0.2.0-rc.1", root)
+
+    def test_version_change_preserves_exact_non_root_lock_bytes(self):
+        lock = b'# Cargo lock, preserve comments and dependencies\nversion = 4\n\n[[package]]\nname = "aperture"\nversion = "0.1.0"\ndependencies = ["dep"]\n\n[[package]]\nname = "dep"\nversion = "0.1.0"\nchecksum = "unchanged"\n'
+        for newline in (b"\n", b"\r\n"):
+            with self.subTest(newline=newline), tempfile.TemporaryDirectory() as folder:
+                root = Path(folder)
+                (root / "src-tauri").mkdir()
+                for name in ("package.json", "src-tauri/tauri.conf.json"):
+                    (root / name).write_text('{"version":"0.1.0"}')
+                (root / "src-tauri/Cargo.toml").write_text('[package]\nname = "aperture"\nversion = "0.1.0"\n')
+                original = lock.replace(b"\n", newline)
+                (root / "src-tauri/Cargo.lock").write_bytes(original)
+                pnpm = b"lockfileVersion: '9.0'\n"
+                (root / "pnpm-lock.yaml").write_bytes(pnpm)
+                release.set_version("0.0.9", root)
+                expected = original.replace(b'name = "aperture"' + newline + b'version = "0.1.0"', b'name = "aperture"' + newline + b'version = "0.0.9"', 1)
+                self.assertEqual((root / "src-tauri/Cargo.lock").read_bytes(), expected)
+                self.assertNotEqual(expected, original)
+                self.assertEqual((root / "pnpm-lock.yaml").read_bytes(), pnpm)
+                self.assertEqual(release.current_version(root), "0.0.9")
 
     def test_candidate_rejects_changed_bytes_and_feed(self):
         with tempfile.TemporaryDirectory() as folder:

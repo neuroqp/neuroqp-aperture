@@ -172,7 +172,9 @@ def set_version(version, root=ROOT):
     path = root / "src-tauri/Cargo.toml"
     path.write_text(path.read_text(encoding="utf-8").replace(f'version = "{old}"', f'version = "{version}"', 1), encoding="utf-8")
     path = root / "src-tauri/Cargo.lock"
-    path.write_text(path.read_text(encoding="utf-8").replace(f'name = "aperture"\nversion = "{old}"', f'name = "aperture"\nversion = "{version}"', 1), encoding="utf-8")
+    # Keep lock bytes and line endings intact; Windows text writes translate LF.
+    pattern = rb'(?m)(^name = "aperture"\r?\nversion = ")' + re.escape(old.encode()) + rb'(")'
+    path.write_bytes(re.sub(pattern, lambda match: match[1] + version.encode() + match[2], path.read_bytes(), count=1))
     # pnpm-lock.yaml has no root version field; its importer resolves dependencies only.
     current_version(root)
 

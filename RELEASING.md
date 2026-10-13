@@ -57,6 +57,13 @@ deltas, build identity, notices and verified source material. It receives no
 signing secrets and cannot be enabled in a signed release build. Use it only in
 an isolated desktop VM with the actual candidate installer and signature.
 
+For the first-release Linux upgrade test, follow the
+[local prior-AppImage recipe](scripts/release/LINUX-UPGRADE-FIXTURE.md). It builds
+an unsigned `0.0.9` fixture in a separate QA checkout with the production public
+key and a test-only loopback feed, records its provenance and version deltas,
+then runs the native updater harness against the exact signed candidate.
+Keep this fixture local; it is not a release or CI download asset.
+
 ## Package behavior
 
 - **Setup:** `Aperture-Setup-x64.exe` installs under the current user's local
@@ -223,7 +230,10 @@ Use disposable copies of generated fixtures for saving. Never modify source
 microscopy datasets. Record actual results rather than marking an untested item
 as passed.
 
-1. **Windows 10/11 x64 standard user:** install without elevation, launch from
+For `0.1.0`, Windows acceptance covers Windows 11. Windows 10 remains unverified
+and does not block the first release; do not describe it as validated.
+
+1. **Windows 11 x64 standard user:** install without elevation, launch from
    shortcut, open PNG/JPEG/BMP/TIFF/BigTIFF, and save/reopen point annotations.
    Test on a clean machine without libvips, Rust, Node, or an installed WebView2.
    Check non-ASCII names, spaces/brackets, paths on another drive, and an allowed
