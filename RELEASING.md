@@ -124,7 +124,7 @@ and libvips source hash. Notices and source links alone are not presented as a
 completed corresponding-source distribution.
 
 The reviewed first-release archive is published under
-[`source-v0.1.0`](https://github.com/neuroqp/neuroqp-aperture/releases/tag/source-v0.1.0),
+[`source-v0.1.1`](https://github.com/neuroqp/neuroqp-aperture/releases/tag/source-v0.1.1),
 separate from application releases and excluded from latest.
 `scripts/release/corresponding-source.json` pins its checksum, both native
 dependency identities, exact Cargo/pnpm lock hashes and the archived application
@@ -235,7 +235,9 @@ and does not block the first release; do not describe it as validated.
 
 1. **Windows 11 x64 standard user:** install without elevation, launch from
    shortcut, open PNG/JPEG/BMP/TIFF/BigTIFF, and save/reopen point annotations.
-   Test on a clean machine without libvips, Rust, Node, or an installed WebView2.
+   Test on a clean machine without libvips, Rust, or Node. Verify its WebView2
+   processes use the bundled Fixed runtime, including offline launch, and record
+   any system Evergreen runtime; stock Windows 11 can include a protected runtime.
    Check non-ASCII names, spaces/brackets, paths on another drive, and an allowed
    network share. Verify worker processes exit on close and cancellation.
 2. **Portable:** run offline as a standard user, check first extraction and warm
