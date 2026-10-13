@@ -46,6 +46,7 @@ struct Tiff {
     big: bool,
     entries: Vec<Vec<u8>>,
     next: Vec<u8>,
+    directory: u64,
 }
 
 impl Tiff {
@@ -94,6 +95,7 @@ impl Tiff {
             big: false,
             entries: vec![],
             next: vec![],
+            directory: 0,
         };
         let h = t.at(0, 8)?;
         t.little = match &h[..2] {
@@ -113,25 +115,80 @@ impl Tiff {
             }
             _ => return Err("Unsupported TIFF header".into()),
         };
-        let size = if t.big { 8 } else { 2 };
-        if first < if t.big { 16 } else { 8 } {
-            return Err("Invalid first TIFF directory".into());
+        t.load_directory(first, LIMIT)?;
+        Ok(t)
+    }
+    fn load_directory(&mut self, offset: u64, budget: u64) -> Result<u64, String> {
+        let size = if self.big { 8 } else { 2 };
+        if budget < size {
+            return Err("TIFF directory metadata budget exceeded".into());
         }
-        let n = t.at(first, size)?;
-        let n = t.number(&n);
+        if offset < if self.big { 16 } else { 8 } {
+            return Err("Invalid TIFF directory offset".into());
+        }
+        let n = self.at(offset, size)?;
+        let n = self.number(&n);
         // TIFF has uint16 directory counts; apply that ceiling to BigTIFF too.
         if n > 65535 {
             return Err("Too many TIFF directory entries".into());
         }
-        let width = if t.big { 20 } else { 12 };
-        let offset_size = if t.big { 8 } else { 4 };
-        let data = t.at(first + size, n * width + offset_size)?;
-        t.entries = data[..(n * width) as usize]
+        let width = if self.big { 20 } else { 12 };
+        let offset_size = if self.big { 8 } else { 4 };
+        let bytes = n
+            .checked_mul(width)
+            .and_then(|bytes| bytes.checked_add(offset_size))
+            .ok_or("TIFF directory size overflow")?;
+        let total = bytes
+            .checked_add(size)
+            .filter(|total| *total <= budget)
+            .ok_or("TIFF directory metadata budget exceeded")?;
+        let data = self.at(
+            offset
+                .checked_add(size)
+                .ok_or("TIFF directory offset overflow")?,
+            bytes,
+        )?;
+        self.entries = data[..(n * width) as usize]
             .chunks_exact(width as usize)
             .map(|b| b.to_vec())
             .collect();
-        t.next = data[(n * width) as usize..].to_vec();
-        Ok(t)
+        self.next = data[(n * width) as usize..].to_vec();
+        self.directory = offset;
+        Ok(total)
+    }
+    fn unsigned_values(&mut self, tag: u64, count_limit: u64) -> Result<Vec<u64>, String> {
+        let Some(entry) = self.entries.iter().find(|entry| self.tag(entry) == tag) else {
+            return Ok(Vec::new());
+        };
+        let kind = self.number(&entry[2..4]);
+        let unit = match kind {
+            3 => 2,
+            4 | 13 => 4,
+            16 | 18 if self.big => 8,
+            _ => return Err("Unsupported TIFF layout field type".into()),
+        };
+        let bytes = self
+            .value(tag, kind, unit, count_limit * unit)?
+            .ok_or("Missing TIFF layout tag")?;
+        Ok(bytes
+            .chunks_exact(unit as usize)
+            .map(|bytes| self.number(bytes))
+            .collect())
+    }
+    fn append_pyramid_tags(&mut self, report: &mut String) -> Result<(), String> {
+        if self
+            .unsigned_values(254, 1)?
+            .first()
+            .is_some_and(|flags| flags & 1 != 0)
+        {
+            report.push_str("Subfile Type: reduced-resolution image\n");
+        }
+        let width = self.unsigned_values(322, 1)?.first().copied().unwrap_or(0);
+        let height = self.unsigned_values(323, 1)?.first().copied().unwrap_or(0);
+        if width > 0 && height > 0 && width <= u32::MAX as u64 && height <= u32::MAX as u64 {
+            report.push_str(&format!("Tile Width: {width} Tile Length: {height}\n"));
+        }
+        Ok(())
     }
     fn tag(&self, entry: &[u8]) -> u64 {
         self.number(&entry[..2])
@@ -272,6 +329,93 @@ pub fn read(path: &Path) -> Result<TiffAnnotations, String> {
         }
     }
     Ok(annotations)
+}
+
+/// Channel tags plus the bounded directory layout used by native pyramid probes.
+/// Rust file I/O keeps Windows filenames literal; the worker makes reads cancellable.
+pub fn channel_info(path: &Path) -> Result<String, String> {
+    let mut t = Tiff::open(path)?;
+    let mut report = String::from("=== TIFF directory 0 ===\n");
+    if let Some(extras) = t.value(338, 3, 2, 64)? {
+        for bytes in extras.as_chunks::<2>().0 {
+            let kind = match t.number(bytes) {
+                0 => "unspecified",
+                1 => "associated-alpha",
+                2 => "unassociated-alpha",
+                _ => return Err("Unsupported TIFF ExtraSamples value".into()),
+            };
+            report.push_str(&format!("Extra Samples: {kind}\n"));
+        }
+    }
+    if let Some(planar) = t.value(284, 3, 2, 2)? {
+        match t.number(&planar) {
+            1 => {}
+            2 => report.push_str("Planar Configuration: separate image planes\n"),
+            _ => return Err("Unsupported TIFF PlanarConfiguration value".into()),
+        }
+    }
+    let mut pyramid = String::new();
+    let layout = (|| {
+        // Match native discovery: <=256 ordinary pages and the first descriptor
+        // of <=28 direct SubIFD chains on page zero. Never recurse into scenes.
+        let first_bytes =
+            t.entries.len() as u64 * if t.big { 20 } else { 12 } + if t.big { 16 } else { 6 };
+        let mut budget = 4 * 1024 * 1024_u64 - first_bytes;
+        let mut seen = std::collections::HashSet::new();
+        let first = t.directory;
+        for page in 0..256 {
+            let offset = if page == 0 { first } else { t.number(&t.next) };
+            if offset == 0 {
+                return Ok::<_, String>(());
+            }
+            if !seen.insert(offset) {
+                return Err("Cyclic TIFF directory chain".into());
+            }
+            if page != 0 {
+                budget -= t.load_directory(offset, budget)?;
+                pyramid.push_str(&format!("=== TIFF directory {page} ===\n"));
+            }
+            t.append_pyramid_tags(&mut pyramid)?;
+            if page == 0 {
+                let next = t.number(&t.next);
+                for (chain, subifd) in t.unsigned_values(330, 28)?.into_iter().enumerate() {
+                    if !seen.insert(subifd) {
+                        return Err("Cyclic TIFF SubIFD reference".into());
+                    }
+                    budget -= t.load_directory(subifd, budget)?;
+                    pyramid.push_str(&format!(
+                        "--- SubIFD 0 of chain {chain} at offset {subifd}:\n"
+                    ));
+                    t.append_pyramid_tags(&mut pyramid)?;
+                }
+                // SubIFD loads change the parser's current directory; restore the
+                // ordinary next-page link without rereading the base directory.
+                t.next = t.bytes(next, if t.big { 8 } else { 4 })?;
+            }
+            if pyramid.len() > 48 * 1024 {
+                return Err("TIFF directory report budget exceeded".into());
+            }
+        }
+        (t.number(&t.next) == 0)
+            .then_some(())
+            .ok_or_else(|| "Too many TIFF directories to inspect".into())
+    })();
+    if layout.is_ok() {
+        // Channel tags stay before directory one; child alpha/planar tags never
+        // contaminate first-page channel interpretation.
+        let complete = format!("{report}{pyramid}");
+        // Include JSON escaping and reserve space for the worker result envelope.
+        if serde_json::to_vec(&complete)
+            .map_err(|e| e.to_string())?
+            .len()
+            <= crate::vips_worker::MAX_MESSAGE - 128
+        {
+            return Ok(complete);
+        }
+    }
+    // An incomplete graph cannot authorize reuse of any partial pyramid.
+    report.push_str("aperture-native-pyramid: unavailable\n");
+    Ok(report)
 }
 
 /// Writes a TIFF atomically, including replacement of the source when authorized.
@@ -461,6 +605,9 @@ pub fn save_copy(
                 .map_err(|e| e.to_string())?;
         }
         out.sync_all().map_err(|e| e.to_string())?;
+        drop(out);
+        // Windows cannot replace an open source handle without delete sharing.
+        drop(t.file);
         if overwrite {
             fs::rename(&temp, target).map_err(|e| e.to_string())?;
         } else {
@@ -483,6 +630,45 @@ pub fn save_copy(
 }
 
 #[cfg(test)]
+pub(crate) fn pyramid_fixture_as_pages(source: &Path, target: &Path) -> Result<(), String> {
+    // Relink a copied fixture's existing pixel/tile blocks; never edit the source.
+    let mut t = Tiff::open(source)?;
+    let children = t.unsigned_values(330, 28)?;
+    if children.is_empty() {
+        return Err("Fixture has no SubIFD pyramid".into());
+    }
+    let entries = t
+        .entries
+        .iter()
+        .filter(|entry| t.tag(entry) != 330)
+        .cloned()
+        .collect::<Vec<_>>();
+    let word = if t.big { 8 } else { 4 };
+    let count_size = if t.big { 8 } else { 2 };
+    let entry_size = if t.big { 20 } else { 12 };
+    let mut bytes = fs::read(source).map_err(|e| e.to_string())?;
+    for (index, child) in children.iter().enumerate() {
+        t.load_directory(*child, LIMIT)?;
+        let position = t.directory as usize + count_size + t.entries.len() * entry_size;
+        bytes[position..position + word]
+            .copy_from_slice(&t.bytes(children.get(index + 1).copied().unwrap_or(0), word)?);
+    }
+    let alignment = if t.big { 8 } else { 2 };
+    while bytes.len() % alignment != 0 {
+        bytes.push(0);
+    }
+    let directory = bytes.len() as u64;
+    bytes.extend(t.bytes(entries.len() as u64, count_size)?);
+    for entry in entries {
+        bytes.extend(entry);
+    }
+    bytes.extend(t.bytes(children[0], word)?);
+    let first = if t.big { 8 } else { 4 };
+    bytes[first..first + word].copy_from_slice(&t.bytes(directory, word)?);
+    fs::write(target, bytes).map_err(|e| e.to_string())
+}
+
+#[cfg(test)]
 mod tests {
     use super::*;
     fn fixture(path: &Path, little: bool, big: bool) {
@@ -494,6 +680,7 @@ mod tests {
             big,
             entries: vec![],
             next: vec![],
+            directory: 0,
         };
         let mut b = if little {
             b"II".to_vec()
@@ -515,6 +702,218 @@ mod tests {
         b.extend(b"unchanged-pixel-block");
         fs::write(path, b).unwrap();
     }
+    #[test]
+    fn directory_report_selects_only_reduced_tiled_pages_and_rejects_incomplete_graphs() {
+        let root = std::env::temp_dir().join(format!(
+            "aperture-directory-info-{}-{}",
+            std::process::id(),
+            SystemTime::now()
+                .duration_since(UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ));
+        fs::create_dir(&root).unwrap();
+        let path = root.join("pyramid [metadata] 日本語.tif");
+        let header = "width: 2048\nheight: 1536\nbands: 2\nformat: ushort\ninterpretation: grey16\nvips-loader: tiffload\nn-pages: 3\n";
+        let inspect = |options: &str| {
+            assert!(
+                options.contains("page=1,"),
+                "ordinary smaller pages cannot become pyramid levels"
+            );
+            Ok(header.replace("2048", "1024").replace("1536", "768"))
+        };
+        for little in [false, true] {
+            for big in [false, true] {
+                fixture(&path, little, big);
+                let t = Tiff::open(&path).unwrap();
+                let header_size = if big { 16 } else { 8 };
+                let count_size = if big { 8 } else { 2 };
+                let word = if big { 8 } else { 4 };
+                let directory_size = count_size + 5 * if big { 20 } else { 12 } + word;
+                let mut bytes = fs::read(&path).unwrap()[..header_size].to_vec();
+                for page in 0..3 {
+                    bytes.extend(t.bytes(5, count_size).unwrap());
+                    // Bit one remains reduced even with another NewSubfileType flag.
+                    for (tag, kind, value) in [
+                        (254, 4, if page == 1 { 3 } else { 0 }),
+                        (284, 3, if page == 1 { 2 } else { 1 }),
+                        (322, 3, 16),
+                        (323, 4, 16),
+                        (338, 3, if page == 1 { 1 } else { 0 }),
+                    ] {
+                        bytes.extend(
+                            t.entry(
+                                tag,
+                                kind,
+                                1,
+                                &t.bytes(value, if kind == 3 { 2 } else { 4 }).unwrap(),
+                            )
+                            .unwrap(),
+                        );
+                    }
+                    bytes.extend(
+                        t.bytes(
+                            if page == 2 {
+                                0
+                            } else {
+                                (header_size + (page + 1) * directory_size) as u64
+                            },
+                            word,
+                        )
+                        .unwrap(),
+                    );
+                }
+                let first_offset = t.bytes(header_size as u64, word).unwrap();
+                let bad_offset = t.bytes(u64::MAX >> if big { 0 } else { 32 }, word).unwrap();
+                drop(t);
+                fs::write(&path, &bytes).unwrap();
+                let info = channel_info(&path).unwrap();
+                assert!(
+                    !info.contains("associated-alpha"),
+                    "later-page alpha must not affect base channels"
+                );
+                assert_eq!(
+                    crate::channels::discover(header, &inspect, Some(&info))
+                        .unwrap()
+                        .channels
+                        .len(),
+                    2
+                );
+                assert_eq!(
+                    crate::native::discover(header, &inspect, Some(&info)).len(),
+                    2
+                );
+                assert_eq!(
+                    crate::native::discover_preview(header, &inspect, Some(&info)).len(),
+                    2
+                );
+                assert!(
+                    serde_json::to_vec(&crate::vips_worker::Response::Complete {
+                        result: Ok(info)
+                    })
+                    .unwrap()
+                    .len()
+                        < crate::vips_worker::MAX_MESSAGE
+                );
+                // Both a cycle and an invalid tail discard every reported level.
+                for tail in [first_offset, bad_offset] {
+                    let mut malformed = bytes.clone();
+                    let end = malformed.len();
+                    malformed[end - word..].copy_from_slice(&tail);
+                    fs::write(&path, malformed).unwrap();
+                    let info = channel_info(&path).unwrap();
+                    assert!(info.contains("aperture-native-pyramid: unavailable"));
+                    assert_eq!(
+                        crate::channels::discover(header, &inspect, Some(&info))
+                            .unwrap()
+                            .channels
+                            .len(),
+                        2
+                    );
+                    let no_probe = |_: &str| -> Result<String, String> {
+                        panic!("incomplete graph must not authorize probes")
+                    };
+                    assert!(crate::native::discover(header, &no_probe, Some(&info)).is_empty());
+                    assert!(
+                        crate::native::discover_preview(header, &no_probe, Some(&info)).is_empty()
+                    );
+                }
+            }
+        }
+        // Excess page counts also cannot leave a partially trusted native graph.
+        let mut bytes = b"II\x2a\0\x08\0\0\0".to_vec();
+        for page in 0..257 {
+            bytes.extend(0_u16.to_le_bytes());
+            bytes.extend(
+                if page == 256 {
+                    0_u32
+                } else {
+                    8 + (page + 1) * 6
+                }
+                .to_le_bytes(),
+            );
+        }
+        fs::write(&path, bytes).unwrap();
+        assert!(channel_info(&path)
+            .unwrap()
+            .contains("aperture-native-pyramid: unavailable"));
+        // Eleven individually legal directory tables exceed the shared 4 MiB
+        // budget, even though neither page count nor report size is excessive.
+        let mut bytes = b"II\x2a\0\x08\0\0\0".to_vec();
+        let size = 2 + 32768 * 12 + 4;
+        for page in 0..11 {
+            bytes.extend(32768_u16.to_le_bytes());
+            bytes.resize(bytes.len() + 32768 * 12, 0);
+            bytes.extend(
+                if page == 10 {
+                    0_u32
+                } else {
+                    8 + (page + 1) * size as u32
+                }
+                .to_le_bytes(),
+            );
+        }
+        fs::write(&path, bytes).unwrap();
+        assert!(channel_info(&path)
+            .unwrap()
+            .contains("aperture-native-pyramid: unavailable"));
+        fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn bounded_channel_tags_distinguish_channels_alpha_and_planar_layouts() {
+        let root = std::env::temp_dir().join(format!(
+            "aperture-channel-tags-{}-{}",
+            std::process::id(),
+            SystemTime::now()
+                .duration_since(UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ));
+        fs::create_dir(&root).unwrap();
+        let path = root.join("metadata [source] 日本語.tif");
+        for little in [false, true] {
+            for big in [false, true] {
+                for (bands, interpretation, extra, planar, expected) in [
+                    (2, "grey16", 0, 1, Some(2)),
+                    (4, "srgb", 0, 1, Some(4)),
+                    (2, "grey16", 1, 1, None),
+                    (4, "srgb", 1, 1, Some(3)),
+                    (4, "srgb", 2, 1, Some(3)),
+                    (4, "multiband", 0, 2, None),
+                ] {
+                    fixture(&path, little, big);
+                    let t = Tiff::open(&path).unwrap();
+                    let mut bytes = fs::read(&path).unwrap()[..if big { 16 } else { 8 }].to_vec();
+                    bytes.extend(t.bytes(2, if big { 8 } else { 2 }).unwrap());
+                    bytes.extend(t.entry(284, 3, 1, &t.bytes(planar, 2).unwrap()).unwrap());
+                    bytes.extend(t.entry(338, 3, 1, &t.bytes(extra, 2).unwrap()).unwrap());
+                    bytes.extend(t.bytes(0, if big { 8 } else { 4 }).unwrap());
+                    let oversized_count = t.bytes(33, if big { 8 } else { 4 }).unwrap();
+                    drop(t);
+                    fs::write(&path, bytes).unwrap();
+                    let info = channel_info(&path).unwrap();
+                    let header = format!("width: 7\nheight: 9\nbands: {bands}\nformat: ushort\ninterpretation: {interpretation}\nvips-loader: tiffload\n");
+                    let layout =
+                        crate::channels::discover(&header, &|_| unreachable!(), Some(&info));
+                    match expected {
+                        Some(count) => assert_eq!(layout.unwrap().channels.len(), count),
+                        None => assert!(layout.is_err()),
+                    }
+                    // An untrusted ExtraSamples count cannot make us read/allocate
+                    // a large payload; fail before following its offset.
+                    let mut bytes = fs::read(&path).unwrap();
+                    let entry = if big { 16 + 8 + 20 } else { 8 + 2 + 12 };
+                    bytes[entry + 4..entry + if big { 12 } else { 8 }]
+                        .copy_from_slice(&oversized_count);
+                    fs::write(&path, bytes).unwrap();
+                    assert!(channel_info(&path).is_err());
+                }
+            }
+        }
+        fs::remove_dir_all(root).unwrap();
+    }
+
     #[test]
     fn copy_roundtrip_preserves_bytes_and_unrelated_blocks_in_all_layouts() {
         let stamp = SystemTime::now()

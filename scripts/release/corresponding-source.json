@@ -1,0 +1,11 @@
+{
+  "schema": 1,
+  "status": "unassembled",
+  "asset": "Aperture-Corresponding-Source.tar.xz",
+  "url": null,
+  "sha256": null,
+  "native_dependencies_sha256": {
+    "linux": null,
+    "windows": null
+  }
+}

@@ -15,19 +15,22 @@ jobs:
     runs-on: ubuntu-24.04
     timeout-minutes: 5
     steps:
-      - uses: actions/checkout@v4
-      - uses: pnpm/action-setup@v4
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+      - uses: pnpm/action-setup@f40ffcd9367d9f12939873eb1018b921a783ffaa # v4
         with:
-          version: 9
-      - uses: actions/setup-node@v4
+          version: 9.15.9
+      - uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4
         with:
-          node-version: 22
+          node-version: 22.22.0
           cache: pnpm
-      - uses: dtolnay/rust-toolchain@stable
+      - uses: dtolnay/rust-toolchain@e2a55d2ffb04f378e9626c28d38b36d230d1e12f
         with:
+          toolchain: 1.98.0
           components: rustfmt
       - run: pnpm install --frozen-lockfile
       - run: pnpm format:check
       - run: cargo fmt --manifest-path src-tauri/Cargo.toml --all -- --check
       - run: pnpm exec tsc --noEmit
       - run: pnpm test
+      - run: python3 scripts/release/test_release.py
+      - run: python3 scripts/release/release.py check

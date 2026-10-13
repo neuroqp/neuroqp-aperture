@@ -1,0 +1,2 @@
+# Preserve verbatim upstream license bytes and their recorded hash on Windows.
+scripts/release/windows-native-licenses.txt -text -whitespace

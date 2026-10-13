@@ -5,8 +5,9 @@ preview as soon as possible, and stays responsive while loading large images.
 
 ## Initial scope
 
-- Develop and test on Linux first. Windows and macOS remain required future
-  targets; validation on those platforms is deferred until available.
+- Develop on Linux and ship Windows x64 and Linux x86_64 packages. Windows uses
+  a per-user NSIS installer and a single-file portable launcher; Linux uses
+  AppImage. Defer macOS, ARM, app stores, and distro-specific packages.
 - Display one image at a time.
 - Start with standard image formats, including JPEG/JPG, PNG, BMP, and TIFF/TIF.
 - Support ordinary images and large TIFFs, including BigTIFF. Exact compression,
@@ -35,8 +36,8 @@ preview as soon as possible, and stays responsive while loading large images.
   detail stays in libvips, using up to eight threads for pyramid sinks. RGB8
   pyramids use direct JPEG tile encoding; grayscale retains its existing
   conversion order. Channel pyramids fuse extraction and normalization into the
-  pyramid graph to avoid full-resolution intermediate files. Packaging image
-  readers for other operating systems remains future work.
+  pyramid graph to avoid full-resolution intermediate files. Windows packages bundle the native image readers and fixed WebView2 runtime;
+  AppImages bundle their native image readers against the Debian 12 baseline.
 
 ## Development principles
 
@@ -242,9 +243,33 @@ using representative Linux files, including tiled and strip-based TIFFs.
 - Add a richer overview of marked cells and counts.
 - Add specialist microscopy formats as needed, preserving the meaning of
   scenes, channels, Z slices, timepoints, and image metadata.
-- Validate and package the application for Windows and macOS.
+- Reconsider macOS and ARM packaging when there is demand and testing hardware.
 - Expand annotation export formats and conversion options when needed.
 - Define initial multi-page TIFF behavior and supported pixel types without
   silently interpreting pages as channels or flattening scientific dimensions.
 - Set numerical performance targets after measuring representative files on
   the available hardware.
+
+## Distribution and updates
+
+- Publish source and releases in the public `neuroqp/neuroqp-aperture` repository.
+  Reviewed feature branches merge into main; versioned tags identify release source.
+- Offer one Windows Setup executable, one Windows portable executable, and one
+  Linux AppImage. Windows packages work without administrator privileges and
+  include WebView2 and image-library dependencies; institutional execution
+  restrictions remain outside the application's control.
+- Extract portable payloads into version-specific local application-data folders
+  and reuse them. Keep image caches and settings separate from package payloads.
+  Portable updates offer a download and manual replacement, never installation.
+- Use signed Tauri updates for installed Windows and writable Linux AppImages.
+  Check after startup at most daily, with opt-out, manual checking, release notes,
+  download progress, and deferral. Development binaries do not auto-update.
+- Download and verify before asking to restart. Preserve unsaved-work warnings;
+  cancellation and save failure leave edits intact. Stop background image work
+  before replacement. Failed installation must leave a recoverable application.
+- Build candidates on native Windows runners and the Linux baseline container.
+  Verify packages, then perform desktop acceptance before stable promotion. Promote
+  the tested bytes; never rebuild or move tags to replace an existing release.
+- Keep PR checks fast. Full native builds and package validation are separate from
+  ordinary PR checks. Record source identity, dependency versions, checksums,
+  third-party notices, and release notes with each candidate.

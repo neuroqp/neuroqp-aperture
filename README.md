@@ -1,6 +1,6 @@
 # NeuroQP Aperture
 
-A minimal Linux desktop image viewer built with Tauri, Rust, and OpenSeadragon.
+A minimal desktop image viewer built with Tauri, Rust, and OpenSeadragon.
 Two compact toolbars leave the rest of the window to the image. Large images
 load through a preview and progressively available detail tiles.
 
@@ -15,6 +15,44 @@ separate from this rendering path.
 Point type, color, and size buttons preview the current combination. The header's
 sun/moon button switches light and dark modes and remembers your choice; the
 initial theme follows the system.
+
+## Downloads and updates
+
+Release packages are published on [GitHub Releases](https://github.com/neuroqp/neuroqp-aperture/releases).
+The first release is pending validation. Supported packages are:
+
+| Platform          | Download                    | Installation and updates                                                                                                                              |
+| ----------------- | --------------------------- | ----------------------------------------------------------------------------------------------------------------------------------------------------- |
+| Windows 10/11 x64 | `Aperture-Setup-x64.exe`    | Installs for your user without administrator access; updates from the app.                                                                            |
+| Windows 10/11 x64 | `Aperture-Portable-x64.exe` | Run the downloaded file; it extracts its bundled runtime into your local application-data directory. Download and replace the executable for updates. |
+| Linux x86_64      | `Aperture-x86_64.AppImage`  | Mark executable and run from a writable folder; updates from the app.                                                                                 |
+
+Both Windows editions include their image libraries and a fixed WebView2 runtime.
+No separate runtime download is needed. Publisher signing is pending, so Windows
+may display an unknown-publisher warning; institutional application policies can
+still prevent execution. The portable edition also needs writable local storage,
+and its first launch takes longer while it extracts its runtime.
+
+On Linux, download to a folder you own, then run:
+
+```sh
+chmod +x Aperture-x86_64.AppImage
+./Aperture-x86_64.AppImage
+```
+
+If FUSE is unavailable, use `./Aperture-x86_64.AppImage --appimage-extract-and-run`.
+Packages target a Debian 12 baseline. Desktop compatibility is checked separately
+on Ubuntu, Arch/Omarchy, and Fedora before promoting a release. macOS, ARM, distro
+packages, and app stores are outside the current release scope.
+
+The header's update button shows the installed version, release notes, and a
+manual check. Automatic checks run at most once a day and can be disabled. Updates
+are downloaded and signature-verified before you choose to install and restart;
+unsaved annotations can be saved, discarded, or kept by cancelling. Portable
+updates open the new portable download in your browser. Settings and image caches
+live outside the downloaded executable and survive replacement.
+
+See [RELEASING.md](RELEASING.md) for build, testing, signing, and publication steps.
 
 ## Run locally
 
@@ -119,8 +157,8 @@ No microscopy source files are modified.
 
 ## Proof-of-concept boundaries
 
-- Linux is the current development and validation target. Windows and macOS
-  packaging and testing are pending.
+- Linux is the primary development target. Windows and Linux release packages
+  require the platform acceptance checks in [RELEASING.md](RELEASING.md).
 - Save/Ctrl+S offers Overwrite, Save as…, or Cancel for TIFFs. Overwrite updates
   ImageJ-compatible annotations at the current path while preserving pixels and
   unrelated metadata. Other formats default to a sibling file with the same
@@ -153,6 +191,8 @@ No microscopy source files are modified.
   channel stacks (first Z/time position). OME-TIFF mapping and contiguous
   single-directory ImageJ hyperstacks are not supported. Ambiguous grayscale
   alpha layouts are rejected rather than interpreted as scientific channels.
+- BMP decoding uses a 512 MiB decoded-allocation limit; the large-image streaming
+  paths apply to TIFF, not BMP.
 - Supported display pixels are unsigned 8/16-bit grayscale, RGB, and RGBA in
   grayscale/RGB/sRGB color spaces. Signed, floating-point, CMYK, and other
   unsupported channel layouts report an unsupported-image error.
@@ -176,3 +216,8 @@ No microscopy source files are modified.
   SubIFD pyramids do not require it.
 - Hundreds-of-GB images remain a future scale target. Initial validation uses
   locally available images, including multi-GB TIFFs.
+
+## License
+
+Aperture is [MIT licensed](LICENSE). Bundled third-party components retain their
+own licenses; release downloads include their notices.

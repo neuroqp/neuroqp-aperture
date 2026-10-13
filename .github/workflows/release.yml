@@ -1,0 +1,92 @@
+name: Release candidate
+
+on:
+  push:
+    tags: ["v*"]
+
+permissions:
+  contents: read
+
+concurrency:
+  group: release-${{ github.ref }}
+  cancel-in-progress: false
+
+jobs:
+  identity:
+    runs-on: ubuntu-24.04
+    outputs:
+      source_sha: ${{ steps.identity.outputs.source_sha }}
+      version: ${{ steps.identity.outputs.version }}
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+        with:
+          fetch-depth: 0
+          persist-credentials: false
+      - id: identity
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          test "$GITHUB_REPOSITORY" = neuroqp/neuroqp-aperture
+          version=$(python3 scripts/release/release.py check)
+          test "$GITHUB_REF_NAME" = "v$version"
+          git merge-base --is-ancestor HEAD origin/main
+          if gh release view "$GITHUB_REF_NAME" >/dev/null 2>&1; then
+            echo 'Release already exists. Never rebuild or overwrite release assets.' >&2
+            exit 1
+          fi
+          python3 scripts/release/release.py source-material build/corresponding-source --fetch
+          echo "source_sha=$(git rev-parse HEAD)" >> "$GITHUB_OUTPUT"
+          echo "version=$version" >> "$GITHUB_OUTPUT"
+      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
+        with:
+          name: corresponding-source
+          path: build/corresponding-source/*
+          if-no-files-found: error
+          retention-days: 14
+  packages:
+    needs: identity
+    uses: ./.github/workflows/package-build.yml
+    with:
+      source_sha: ${{ needs.identity.outputs.source_sha }}
+      signed: true
+    secrets:
+      TAURI_SIGNING_PRIVATE_KEY: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY }}
+      TAURI_SIGNING_PRIVATE_KEY_PASSWORD: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY_PASSWORD }}
+  candidate:
+    needs: [identity, packages]
+    runs-on: ubuntu-24.04
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+        with:
+          ref: ${{ needs.identity.outputs.source_sha }}
+          persist-credentials: false
+      - uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4
+        with:
+          pattern: packages-*
+          path: build/release
+          merge-multiple: true
+      - uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4
+        with:
+          name: corresponding-source
+          path: build/release
+      - run: sudo apt-get update && sudo apt-get install -y minisign
+      - name: Assemble and verify candidate
+        env:
+          VERSION: ${{ needs.identity.outputs.version }}
+          SOURCE_SHA: ${{ needs.identity.outputs.source_sha }}
+        run: |
+          python3 scripts/release/release.py metadata build/release --version "$VERSION" --source-sha "$SOURCE_SHA"
+          python3 scripts/release/release.py verify build/release --version "$VERSION" --source-sha "$SOURCE_SHA" --cryptographic
+          remote_sha=$(git ls-remote origin "refs/tags/v$VERSION" "refs/tags/v$VERSION^{}" | sort -k2 | tail -n1 | cut -f1)
+          test "$remote_sha" = "$SOURCE_SHA"
+          python3 scripts/release/release.py notes "$VERSION" > build/release-notes.md
+          printf '\nCandidate. Desktop acceptance is required before promotion.\n\nSource commit: `%s`\nSHA256SUMS digest: `%s`\n' "$SOURCE_SHA" "$(sha256sum build/release/SHA256SUMS | cut -d ' ' -f1)" >> build/release-notes.md
+      - name: Publish candidate outside latest
+        env:
+          GH_TOKEN: ${{ github.token }}
+          VERSION: ${{ needs.identity.outputs.version }}
+          SOURCE_SHA: ${{ needs.identity.outputs.source_sha }}
+        run: |
+          gh release create "v$VERSION" build/release/* --verify-tag --target "$SOURCE_SHA" --title "Aperture $VERSION candidate" --notes-file build/release-notes.md --prerelease --latest=false

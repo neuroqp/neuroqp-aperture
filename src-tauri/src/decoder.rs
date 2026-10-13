@@ -4,7 +4,7 @@ use std::{
     fs::File,
     io::{BufRead, BufReader, Read, Write},
     path::Path,
-    process::{Child, ChildStdin, Command, Stdio},
+    process::{Child, ChildStdin, Stdio},
     sync::{
         atomic::{AtomicBool, Ordering},
         mpsc, Mutex,
@@ -29,7 +29,7 @@ impl Decoder {
     }
 
     fn spawn(executable: &std::ffi::OsStr, work: &Path) -> Result<Self, String> {
-        let mut child = Command::new(executable)
+        let mut child = crate::platform::command(executable)
             .arg("--image-worker")
             .env("TMPDIR", work.join("tmp"))
             .env("VIPS_CONCURRENCY", "2")
@@ -148,7 +148,7 @@ impl Drop for Decoder {
     }
 }
 
-#[cfg(test)]
+#[cfg(all(test, unix))]
 mod tests {
     use super::*;
     use std::{

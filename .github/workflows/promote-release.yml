@@ -1,0 +1,44 @@
+name: Promote release
+
+on:
+  workflow_dispatch:
+    inputs:
+      tag:
+        description: Existing candidate tag, for example v0.1.0
+        required: true
+      source_sha:
+        description: Candidate source commit copied from release notes
+        required: true
+      checksums_sha256:
+        description: SHA256SUMS digest copied from release notes
+        required: true
+      desktop_acceptance:
+        description: Type accepted after Windows installed/portable and Linux desktop checks
+        required: true
+
+permissions:
+  contents: read
+
+concurrency:
+  group: promote-release
+  cancel-in-progress: false
+
+jobs:
+  promote:
+    if: github.ref == 'refs/heads/main'
+    runs-on: ubuntu-24.04
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+        with:
+          persist-credentials: false
+      - run: sudo apt-get update && sudo apt-get install -y minisign
+      - name: Verify exact candidate bytes and promote without rebuilding
+        env:
+          GH_TOKEN: ${{ github.token }}
+          RELEASE_TAG: ${{ inputs.tag }}
+          SOURCE_SHA: ${{ inputs.source_sha }}
+          CHECKSUMS_SHA256: ${{ inputs.checksums_sha256 }}
+          DESKTOP_ACCEPTANCE: ${{ inputs.desktop_acceptance }}
+        run: python3 scripts/release/promote.py

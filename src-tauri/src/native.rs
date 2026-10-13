@@ -173,7 +173,10 @@ fn discover_levels(
     tiffinfo: Option<&str>,
     preview_only: bool,
 ) -> Vec<NativeLevel> {
-    if field(header, "vips-loader") != Some("tiffload") {
+    if field(header, "vips-loader") != Some("tiffload")
+        || tiffinfo
+            .is_some_and(|info| field(info, "aperture-native-pyramid") == Some("unavailable"))
+    {
         return Vec::new();
     }
     let tiled = tiled_directories(tiffinfo.unwrap_or(""));

@@ -3,6 +3,8 @@ use crate::{
     native::{self, NativeLevel},
 };
 use serde::{Deserialize, Serialize};
+#[cfg(test)]
+use std::process::Command;
 use std::{
     cell::RefCell,
     collections::{hash_map::DefaultHasher, HashMap},
@@ -12,7 +14,7 @@ use std::{
     hash::{Hash, Hasher},
     io::{Read, Seek, SeekFrom},
     path::{Path, PathBuf},
-    process::{Child, Command, Stdio},
+    process::{Child, Stdio},
     sync::{
         atomic::{AtomicBool, AtomicU64, Ordering},
         Arc, Mutex,
@@ -157,6 +159,11 @@ impl Backend {
             return Err("Viewer shutting down.".into());
         }
         let source = fs::canonicalize(path).map_err(|e| format!("Cannot open image: {e}"))?;
+        #[cfg(windows)]
+        let source_file = File::open(&source).map_err(|e| e.to_string())?;
+        #[cfg(windows)]
+        let metadata = source_file.metadata().map_err(|e| e.to_string())?;
+        #[cfg(unix)]
         let metadata = fs::metadata(&source).map_err(|e| e.to_string())?;
         if !metadata.is_file() {
             return Err("Choose a regular image file.".into());
@@ -169,6 +176,14 @@ impl Backend {
         if !supported_image(path) {
             return Err("Supported formats: JPEG, PNG, BMP, WebP, TIFF and BigTIFF.".into());
         }
+        let id = format!(
+            "{}-{}",
+            SystemTime::now()
+                .duration_since(UNIX_EPOCH)
+                .unwrap_or_default()
+                .as_nanos(),
+            NEXT_ID.fetch_add(1, Ordering::Relaxed)
+        );
         let mut hasher = DefaultHasher::new();
         "aperture-display-v5-area-preview".hash(&mut hasher);
         source.hash(&mut hasher);
@@ -184,28 +199,24 @@ impl Backend {
             )
                 .hash(&mut hasher);
         }
+        #[cfg(windows)]
+        match crate::platform::file_identity(&source_file) {
+            Some(identity) => identity.hash(&mut hasher),
+            // Unknown filesystem identity must never authorize old pixel reuse.
+            // The existing per-open ID remains unique across process launches.
+            None => id.hash(&mut hasher),
+        }
         metadata
             .modified()
             .map_err(|e| e.to_string())?
             .hash(&mut hasher);
         let cache_key = format!("{:016x}", hasher.finish());
-        let id = format!(
-            "{}-{}",
-            SystemTime::now()
-                .duration_since(UNIX_EPOCH)
-                .unwrap_or_default()
-                .as_nanos(),
-            NEXT_ID.fetch_add(1, Ordering::Relaxed)
-        );
         let dir = self.root.join(format!("work-{id}"));
         fs::create_dir(&dir).map_err(|e| e.to_string())?;
         fs::create_dir(dir.join("tmp")).map_err(|e| e.to_string())?;
         let input = dir.join(format!("source.{extension}"));
         // Loader options use brackets, so never pass a user filename to libvips.
-        #[cfg(unix)]
-        std::os::unix::fs::symlink(&source, &input).map_err(|e| e.to_string())?;
-        #[cfg(not(unix))]
-        return Err("This proof of concept currently supports Linux only.".into());
+        crate::platform::source_alias(&source, &input).map_err(|e| e.to_string())?;
         let initial = ImageState {
             id,
             revision: 0,
@@ -483,14 +494,90 @@ struct CacheManifest {
     native: Vec<NativeLevel>,
 }
 
+// AppImage readers live under a different mount path after each launch. The
+// containing package identifies that complete reader payload without scanning it.
+#[cfg(target_os = "linux")]
+fn appimage_tool_identity(executable: &Path, appdir: &Path, appimage: &Path) -> Option<u64> {
+    use std::os::unix::fs::MetadataExt;
+    if !appdir.is_absolute()
+        || !appdir.is_dir()
+        || !executable.starts_with(appdir)
+        || !appimage.is_absolute()
+    {
+        return None;
+    }
+    let image = fs::canonicalize(appimage).ok()?;
+    let metadata = fs::metadata(&image).ok()?;
+    if !metadata.is_file() {
+        return None;
+    }
+    let mut hasher = DefaultHasher::new();
+    "aperture-appimage-readers-v1".hash(&mut hasher);
+    image.hash(&mut hasher);
+    (
+        metadata.dev(),
+        metadata.ino(),
+        metadata.len(),
+        metadata.mtime(),
+        metadata.mtime_nsec(),
+        metadata.ctime(),
+        metadata.ctime_nsec(),
+    )
+        .hash(&mut hasher);
+    Some(hasher.finish())
+}
+
 // Metadata-only identity keeps a cache made with different decoder tools from
 // assuming that the installed reader still supports its native TIFF layout.
 fn tool_identity() -> u64 {
+    let executable = std::env::current_exe().ok();
+    #[cfg(target_os = "linux")]
+    if let (Some(executable), Some(appdir), Some(appimage)) = (
+        executable.as_deref(),
+        std::env::var_os("APPDIR"),
+        std::env::var_os("APPIMAGE"),
+    ) {
+        if let Some(identity) =
+            appimage_tool_identity(executable, Path::new(&appdir), Path::new(&appimage))
+        {
+            return identity;
+        }
+    }
     let mut hasher = DefaultHasher::new();
+    // The application contains the Rust BMP reader and native worker. Bundled
+    // DLLs can also change while CLI filenames remain unchanged across updates.
+    if let Some(executable) = executable {
+        let mut readers = vec![executable.clone()];
+        if cfg!(windows) {
+            readers.extend(
+                [
+                    "libvips-42.dll",
+                    "libtiff-6.dll",
+                    "libglib-2.0-0.dll",
+                    "libgobject-2.0-0.dll",
+                ]
+                .map(|name| executable.with_file_name(name)),
+            );
+        }
+        for reader in readers {
+            reader.hash(&mut hasher);
+            if let Ok(metadata) = fs::metadata(reader) {
+                metadata.len().hash(&mut hasher);
+                metadata.modified().ok().hash(&mut hasher);
+            }
+        }
+    }
     for program in ["vips", "vipsheader", "tiffinfo"] {
         program.hash(&mut hasher);
-        for directory in std::env::split_paths(&std::env::var_os("PATH").unwrap_or_default()) {
-            let path = directory.join(program);
+        let bundled = PathBuf::from(crate::platform::tool(program).get_program());
+        #[cfg(windows)]
+        let filename = format!("{program}.exe");
+        #[cfg(not(windows))]
+        let filename = program.to_owned();
+        let search_path = std::env::var_os("PATH").unwrap_or_default();
+        let paths = std::iter::once(bundled)
+            .chain(std::env::split_paths(&search_path).map(|directory| directory.join(&filename)));
+        for path in paths {
             if let Ok(metadata) = fs::metadata(&path) {
                 if metadata.is_file() {
                     path.hash(&mut hasher);
@@ -657,7 +744,21 @@ fn load(job: &Arc<Job>) -> Result<(), String> {
     let header = run(job, "vipsheader", &["-a".into(), input(job, "")])?;
     let (width, height) = validate_header(&header)?;
     let tiffinfo = if field(&header, "vips-loader") == Some("tiffload") {
-        run(job, "tiffinfo", &[job.input.clone().into_os_string()]).ok()
+        #[cfg(unix)]
+        let info = run(job, "tiffinfo", &[job.input.clone().into_os_string()]).ok();
+        #[cfg(windows)]
+        let info = Some(worker_call(
+            job,
+            &crate::vips_worker::Request::TiffChannelInfo {
+                input: job
+                    .input
+                    .to_str()
+                    .ok_or("Image decoder path is not UTF-8")?
+                    .into(),
+            },
+            None,
+        )?);
+        info
     } else {
         None
     };
@@ -1389,7 +1490,7 @@ fn run_with_progress(
     let stderr_path = dir.join(format!("stderr-{number}"));
     let stdout = File::create(&stdout_path).map_err(|e| e.to_string())?;
     let stderr = File::create(&stderr_path).map_err(|e| e.to_string())?;
-    let mut command = Command::new(program);
+    let mut command = crate::platform::tool(program);
     command
         .args(args)
         .env("TMPDIR", dir.join("tmp"))
@@ -1483,10 +1584,11 @@ fn uses_worker(job: &Job) -> bool {
     if std::env::var_os("APERTURE_WORKER_EXECUTABLE").is_none() {
         return false;
     }
-    matches!(
-        job.input.extension().and_then(|s| s.to_str()),
-        Some("tif" | "tiff")
-    )
+    cfg!(windows)
+        || matches!(
+            job.input.extension().and_then(|s| s.to_str()),
+            Some("tif" | "tiff" | "bmp")
+        )
 }
 
 fn worker_call(
@@ -1762,6 +1864,56 @@ fn prune_except(root: &Path, limit: u64, protected: Option<&Path>) -> Result<(),
 mod tests {
     use super::*;
 
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn appimage_reader_identity_survives_mount_changes_and_detects_package_changes() {
+        let root = std::env::temp_dir().join(format!(
+            "aperture-package-identity-{}-{}",
+            std::process::id(),
+            NEXT_ID.fetch_add(1, Ordering::Relaxed)
+        ));
+        fs::create_dir(&root).unwrap();
+        let image = root.join("Aperture.AppImage");
+        fs::write(&image, b"aperture vips-v1").unwrap();
+        let mounts = [root.join(".mount_first"), root.join(".mount_second")];
+        let identity = |mount: &Path| {
+            appimage_tool_identity(&mount.join("usr/bin/aperture"), mount, &image).unwrap()
+        };
+        for mount in &mounts {
+            fs::create_dir_all(mount.join("usr/bin")).unwrap();
+            fs::write(mount.join("usr/bin/aperture"), b"same application").unwrap();
+            fs::write(mount.join("usr/bin/vips"), b"same bundled reader").unwrap();
+        }
+        let original = identity(&mounts[0]);
+        assert_eq!(
+            original,
+            identity(&mounts[1]),
+            "Mount locations and reader ctimes must not invalidate a cache"
+        );
+        assert!(appimage_tool_identity(&root.join("development/aperture"), &mounts[0], &image).is_none(), "Inherited AppImage environment must leave ordinary binaries on their normal reader identity");
+        let metadata = fs::metadata(&image).unwrap();
+        let modified = metadata.modified().unwrap();
+        let replacement = root.join("replacement.AppImage");
+        fs::write(&replacement, b"aperture vips-v2").unwrap();
+        fs::File::options()
+            .write(true)
+            .open(&replacement)
+            .unwrap()
+            .set_times(fs::FileTimes::new().set_modified(modified))
+            .unwrap();
+        fs::rename(replacement, &image).unwrap();
+        assert_eq!(fs::metadata(&image).unwrap().len(), metadata.len());
+        assert_eq!(fs::metadata(&image).unwrap().modified().unwrap(), modified);
+        let changed = identity(&mounts[0]);
+        assert_ne!(
+            original, changed,
+            "Changed bundled readers must invalidate old caches even with preserved size and mtime"
+        );
+        assert_eq!(changed, identity(&mounts[1]));
+        fs::remove_dir_all(root).unwrap();
+    }
+
+    #[cfg(unix)]
     #[test]
     fn folder_navigation_matches_open_formats_and_preserves_aliases() {
         let root = std::env::temp_dir().join(format!(
@@ -1966,8 +2118,14 @@ mod tests {
         let job = backend.current.lock().unwrap().clone().unwrap();
         assert_eq!(
             job.process_number.load(Ordering::Relaxed),
-            if uses_worker(&job) { 1 } else { 2 },
-            "legacy cache migration uses only metadata; vipsheader shares the worker"
+            if cfg!(windows) {
+                0
+            } else if uses_worker(&job) {
+                1
+            } else {
+                2
+            },
+            "legacy cache migration starts only the CLI metadata readers (Windows omits tiffinfo)"
         );
         for corrupt in [b"{invalid".to_vec(), vec![b'x'; 65537]] {
             fs::write(dir.join("manifest.json"), corrupt).unwrap();
@@ -1983,6 +2141,10 @@ mod tests {
             job.process_number.load(Ordering::Relaxed),
             0,
             "cache hit must not spawn readers"
+        );
+        assert!(
+            job.decoder.lock().unwrap().is_none(),
+            "cache hit must not start the native worker"
         );
         // Reenter this same job's state mutex from its callback.
         *callback_job.lock().unwrap() = Some(Arc::downgrade(&job));
@@ -2077,6 +2239,13 @@ mod tests {
             let payload = directory + 2 + count as u32 * 12 + 4;
             let description_offset = payload;
             let bits_offset = description_offset + description.len() as u32 + 1;
+            let description_value = if description.len() < 4 {
+                let mut inline = [0_u8; 4];
+                inline[..description.len()].copy_from_slice(description.as_bytes());
+                u32::from_le_bytes(inline)
+            } else {
+                description_offset
+            };
             let pixels_offset = bits_offset + 2 * bands as u32;
             let pixel_bytes = 12 * 9 * bands as u32 * 2;
             let next = if page + 1 == pages {
@@ -2092,11 +2261,17 @@ mod tests {
                     258,
                     3,
                     bands as u32,
-                    if bands == 1 { 16 } else { bits_offset },
+                    if bands == 1 {
+                        16
+                    } else if bands == 2 {
+                        16 | (16 << 16)
+                    } else {
+                        bits_offset
+                    },
                 ),
                 (259, 3, 1, 1),
                 (262, 3, 1, 1),
-                (270, 2, description.len() as u32 + 1, description_offset),
+                (270, 2, description.len() as u32 + 1, description_value),
                 (273, 4, 1, pixels_offset),
                 (274, 3, 1, 1),
                 (277, 3, 1, bands as u32),
@@ -2122,6 +2297,30 @@ mod tests {
             }
         }
         fs::write(path, bytes).unwrap();
+    }
+
+    #[test]
+    fn two_and_four_band_tiffs_keep_all_interleaved_channels() {
+        if !cfg!(windows) && Command::new("vips").arg("--version").output().is_err() {
+            return;
+        }
+        let root = std::env::temp_dir().join(format!(
+            "aperture-small-channels-{}-{}",
+            std::process::id(),
+            NEXT_ID.fetch_add(1, Ordering::Relaxed)
+        ));
+        fs::create_dir(&root).unwrap();
+        let backend = Backend::new(root.join("cache")).unwrap();
+        for bands in [2, 4] {
+            let source = root.join(format!("channels [{bands}] 日本語.tif"));
+            channel_fixture(&source, bands, 1, "");
+            backend.open(&source).unwrap();
+            let state = wait_ready(&backend);
+            assert!(state.channel_mode);
+            assert_eq!(state.channels.len(), bands as usize);
+        }
+        backend.shutdown();
+        fs::remove_dir_all(root).unwrap();
     }
 
     #[test]
@@ -2385,6 +2584,48 @@ mod tests {
         backend.shutdown();
         fs::remove_dir_all(root).unwrap();
     }
+    #[test]
+    fn native_reduced_ifd_pyramid_uses_existing_levels_without_building_tiles() {
+        if !cfg!(windows) && Command::new("vips").arg("--version").output().is_err() {
+            return;
+        }
+        let root = std::env::temp_dir().join(format!(
+            "aperture-page-pyramid-{}-{}",
+            std::process::id(),
+            NEXT_ID.fetch_add(1, Ordering::Relaxed)
+        ));
+        fs::create_dir(&root).unwrap();
+        let fixture = Path::new(env!("CARGO_MANIFEST_DIR"))
+            .join("../tests/fixtures/rgb-odd-subifd-pyramid.tif");
+        let source = root.join("reduced pages [pyramid] 日本語.tif");
+        crate::tiff_annotations::pyramid_fixture_as_pages(&fixture, &source).unwrap();
+        let backend = Backend::new(root.join("cache")).unwrap();
+        backend.open(&source).unwrap();
+        let state = wait_ready(&backend);
+        assert!(state.detail.contains("existing TIFF pyramid"), "{state:?}");
+        let job = backend.current.lock().unwrap().clone().unwrap();
+        let levels = job.native.lock().unwrap();
+        assert!(levels.len() > 1);
+        assert!(levels
+            .iter()
+            .skip(1)
+            .all(|level| level.options.contains("page=") && !level.options.contains("subifd=")));
+        drop(levels);
+        assert!(!job.dir.lock().unwrap().join("tiles_files").exists());
+        assert!(read_asset(
+            &job,
+            Asset::Tile {
+                level: 12,
+                x: 8,
+                y: 4
+            }
+        )
+        .is_ok());
+        backend.shutdown();
+        drop(job);
+        fs::remove_dir_all(root).unwrap();
+    }
+
     #[test]
     fn native_pyramid_reuse_and_odd_edge_geometry() {
         if Command::new("vips").arg("--version").output().is_err() {

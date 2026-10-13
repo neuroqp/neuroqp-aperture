@@ -5,3 +5,6 @@ src-tauri/gen
 pnpm-lock.yaml
 test-data
 tests/fixtures
+src-tauri/vendor
+build
+artifacts

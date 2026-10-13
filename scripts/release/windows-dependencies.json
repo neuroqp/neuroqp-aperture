@@ -1,0 +1,12 @@
+{
+  "libvips": {
+    "version": "8.18.7",
+    "url": "https://github.com/libvips/build-win64-mxe/releases/download/v8.18.7/vips-dev-x64-web-8.18.7.zip",
+    "sha256": "3a122eb3d588690008216f786338e2f9329dba3c3c2768b5933cf7299d549241"
+  },
+  "webview2": {
+    "version": "154.0.4258.62",
+    "url": "https://msedge.sf.dl.delivery.mp.microsoft.com/filestreamingservice/files/b92cd7d9-6976-4f34-9708-47e80937c287/Microsoft.WebView2.FixedVersionRuntime.154.0.4258.62.x64.cab",
+    "sha256": "e8f55a4bde27c7f82512402b56a58539b5ec8928be4e500e077b6f66c9ef4668"
+  }
+}

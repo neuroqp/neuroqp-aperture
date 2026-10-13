@@ -966,3 +966,124 @@ Cancellation kills/reaps image workers and subprocesses, aborts active frontend
 downloads/histogram loading, and releases queued backend tile requests. A bounded
 annotation metadata read already inside its parser call finishes that call before
 its cancellation check; canceled work cannot publish annotations or restart loading.
+
+## Windows/Linux packaging and updates, October 13, 2026
+
+The release branch adds a Windows native-reader port, Windows per-user and
+portable packages, Linux AppImage packaging, and signed-update workflows.
+The final Linux debug build passed 57 Rust tests with the production worker,
+strict Clippy, 66 frontend tests, frontend build, and formatting. Release metadata
+checks pass four tests; signature verification separately accepted signed test
+assets and rejected modified bytes. Native reader tests compare custom file
+callbacks with TIFF/BigTIFF decoding and exercise BMP decoding and TIFF conversion.
+
+A real Linux Tauri/WebKit session verified the update dialog, displayed package
+version, development-build update restriction, preference toggle/persistence,
+and dialog dismissal. A further native session supplied only test release metadata,
+a completed-download response, and the initial chooser result; annotation editing
+and saving used the real backend. Cancel kept unsaved edits, Save persisted them,
+and the native development-mode installation rejection restored editing. This
+checks the UI guard and recovery, not a real download or upgrade. Native IPC opened the BMP fixture and produced its 65 × 49
+preview and tiles without errors. Reports and a rendered dialog screenshot are
+ignored under `artifacts/native-validation/`. A separate picker/window-controls
+smoke attempt was stopped when desktop focus changed; it is not counted as a
+passed picker check. No source microscopy images were modified.
+
+Windows/MSVC and Debian 12 package builds share the manual Native validation
+workflow and release build implementation. Their unsigned artifacts are validation
+builds, not public releases.
+Clean-machine desktop acceptance, the Linux distro matrix, and a complete signed
+upgrade from a prior package remain required before stable release promotion.
+See `RELEASING.md` for the checklist and the distinction between updater signing
+and pending Windows publisher signing.
+
+The Debian 12 AppImage from commit `cecb787` passed bundled vips, vipsheader,
+tiffinfo, PNG/BMP/TIFF conversion, raw-preview and DeepZoom worker checks in
+[package validation](https://github.com/neuroqp/neuroqp-aperture/actions/runs/38408565452).
+The downloaded 102.58 MiB artifact also launched and rendered its native window
+on Arch/Omarchy through `--appimage-extract-and-run`. This was a launch check,
+not the full distro or image-interaction acceptance matrix. The local screenshot
+is ignored at `artifacts/package-validation/appimage-native.png`.
+
+The complete [Windows/Linux package run](https://github.com/neuroqp/neuroqp-aperture/actions/runs/38413257615)
+passed at `cbc1acb`: both optimized packages, 53 Windows and 57 Linux Rust tests,
+strict Clippy, frontend checks, and combined artifact metadata/checksums. Windows
+produced Setup and portable executables. Its smoke checked interrupted extraction,
+forced/concurrent lock contention, payload reuse and file hashes, bundled worker
+conversion, per-user install/uninstall at a Unicode path, and native window handles
+using app-local fixed WebView2. The portable screenshot shows the rendered toolbar;
+the installed screenshot was captured before first paint, so installed rendering
+remains unverified. GitHub's runner account is not a clean university standard-user
+acceptance environment. The portable download is approximately 231.5 MiB and its
+uncompressed payload approximately 710.5 MiB.
+
+The real concurrency check exposed an invalid-handle/error-code handling defect
+in the first launcher. The corrected launcher compares the handle numerically and
+captures the Windows error in the same API call. A small production-template
+regression now forces contention before expensive builds; extraction-only failures
+exit without a blocking dialog and retain diagnostics. Full package smoke then
+passed. Evidence is retained as `windows-package-evidence` in that workflow run
+and locally under `artifacts/package-validation/windows-evidence/`.
+
+The final documentation/CI-trigger cleanup does not change these tested binaries.
+The temporary feature-branch push workflow was removed; manual Native validation
+continues to invoke the same reusable package build. No release tag or public
+release was created.
+
+## PR review fixes, 2026-10-13
+
+`scripts/native-update-recovery.py` reproduced the discarded-update dirty-state
+bug in the previous native binary, then passed after the fix. Real pointer edits,
+TIFF annotation saving, and the backend's development-mode install rejection
+verified Cancel, failed Discard-install recovery, the subsequent Open warning,
+restored edit controls, and Save-before-install. The check supplies chooser and
+confirmation responses plus update metadata/download responses. It does not
+exercise a real signed upgrade or native dialog rendering. The source fixture was
+unchanged; only an owned copy was saved. Results are ignored under
+`artifacts/update-recovery/`.
+
+The source-material gate has six release-helper tests, including unfinished-source
+blocking, accepted source bytes, archive tampering, and dependency identity
+mismatch. The checked-in source plan remains `unassembled`, so signed candidate
+creation is blocked until source/build material is assembled and reviewed.
+
+The complete [review-fix package run](https://github.com/neuroqp/neuroqp-aperture/actions/runs/38421253191)
+passed at `fc624ce`: 56 Windows and 59 Linux Rust tests, strict Clippy, six
+release-helper tests, frontend checks, optimized Setup/portable/AppImage builds,
+packaged-worker checks, Windows extraction/concurrency/reuse and per-user
+install/uninstall smoke, and combined artifact metadata/checksums. The Windows
+log confirms both the restored-mtime/file-replacement identity regression and
+two/four-band TIFF loading regression passed. Native desktop acceptance and a
+real signed upgrade remain separate first-release requirements.
+
+A subsequent review found that unsigned CI uploads also needed the source gate.
+Both platform artifact uploads now require the reviewed source archive and the
+matching platform BUILDINFO identity; unsigned aggregate verification requires
+the source assets too. Failure-debug binary uploads were removed. While the plan
+is `unassembled`, a native-validation run can build and smoke-test packages but
+will fail at the publication gate without uploading them. Seven temporary binary
+artifacts from this branch's three earlier runs were deleted; run logs and
+Windows screenshot/diagnostic evidence were retained. The native code and packages
+are unchanged from the successful run above.
+
+The final installer-retry correction retains pending metadata when no bytes are
+ready and restores metadata plus verified bytes when installation fails. It
+passed Cargo check, the targeted updater test, strict Clippy and rustfmt. The
+native recovery test above rejects development-mode installation before this
+branch, so it does not prove retry after a real installer failure. That case
+remains part of packaged signed-upgrade acceptance.
+
+The AppImage restart-cache correction identifies mounted readers through the
+actual package file after checking executable/APPDIR containment. Temporary
+mount paths and extraction ctimes no longer invalidate persistent caches. The
+regression checks two mount locations, an inherited environment on a development
+binary, and a same-size package replacement with restored mtime. All 60 Linux
+Rust tests, strict Clippy, rustfmt and independent review passed.
+
+Windows TIFF inspection now supplies reduced top-level IFD and tile metadata
+required by native preview/pyramid discovery. It bounds directory count, SubIFD
+heads, aggregate metadata bytes and worker response size; malformed graphs keep
+base channel metadata and disable partial native reuse. Tests cover existing
+levels without rebuilt tiles, classic/BigTIFF byte orders, offsets, cycles and
+budgets. All 62 Linux Rust tests, strict Clippy, rustfmt and independent review
+passed. The final Windows package workflow will verify the worker path.

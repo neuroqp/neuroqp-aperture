@@ -3,11 +3,12 @@ use crate::{
     roi::{self, PointRoi},
     tiff_annotations::{self, TiffAnnotations},
 };
+#[cfg(test)]
+use std::process::Command;
 use std::{
     fs::{self, File},
     io::Read,
     path::Path,
-    process::Command,
     time::{SystemTime, UNIX_EPOCH},
 };
 
@@ -150,15 +151,7 @@ fn check_target(
     if !tiff_extension(target) && !(source_is_tiff && same_path) {
         return Err("Save annotations with a .tif or .tiff extension".into());
     }
-    #[cfg(unix)]
-    let same_file = {
-        use std::os::unix::fs::MetadataExt;
-        let original = fs::metadata(source).map_err(|e| e.to_string())?;
-        fs::metadata(target)
-            .is_ok_and(|target| original.dev() == target.dev() && original.ino() == target.ino())
-    };
-    #[cfg(not(unix))]
-    let same_file = false;
+    let same_file = same_file::is_same_file(source, target).unwrap_or(false);
     if !source_is_tiff && (same_path || same_file) {
         return Err(
             "Save annotations to a TIFF; the original non-TIFF image cannot be overwritten".into(),
@@ -193,6 +186,7 @@ pub fn save(
     if !matches!(extension.as_str(), "jpg" | "jpeg" | "png" | "bmp" | "webp") {
         return Err("Unsupported image format for annotated TIFF conversion".into());
     }
+    #[cfg(unix)]
     let parent = target
         .parent()
         .filter(|p| !p.as_os_str().is_empty())
@@ -201,38 +195,58 @@ pub fn save(
         .duration_since(UNIX_EPOCH)
         .map_err(|e| e.to_string())?
         .as_nanos();
-    let temp = parent.join(format!(".aperture-convert-{}-{stamp}", std::process::id()));
+    #[cfg(unix)]
+    let temp_parent = parent.to_path_buf();
+    #[cfg(windows)]
+    let temp_parent = std::env::temp_dir();
+    let temp = temp_parent.join(format!(".aperture-convert-{}-{stamp}", std::process::id()));
     fs::create_dir(&temp).map_err(|e| e.to_string())?;
     let result = (|| {
         let alias = format!("source.{extension}");
         // libvips interprets filename brackets as loader options. Only pass our
         // fixed relative names, even when the source or destination contains them.
-        #[cfg(unix)]
-        std::os::unix::fs::symlink(&source, temp.join(&alias)).map_err(|e| e.to_string())?;
-        #[cfg(not(unix))]
-        fs::copy(&source, temp.join(&alias)).map_err(|e| e.to_string())?;
-        let output = Command::new("vips")
-            .current_dir(&temp)
-            .env("TMPDIR", ".")
-            .args([
-                "tiffsave",
-                &alias,
-                "converted.tif",
-                "--compression=lzw",
-                "--vips-concurrency=2",
-                "--vips-cache-max=0",
-                "--vips-cache-max-memory=67108864",
-                "--vips-disc-threshold=32m",
-            ])
-            .output()
-            .map_err(|e| {
-                format!("Cannot convert the image to TIFF: {e}. Install libvips tools.")
-            })?;
-        if !output.status.success() {
-            return Err(format!(
-                "Cannot convert the image to TIFF: {}",
-                String::from_utf8_lossy(&output.stderr).trim()
-            ));
+        crate::platform::source_alias(&source, &temp.join(&alias)).map_err(|e| e.to_string())?;
+        if cfg!(windows) || extension == "bmp" {
+            fs::create_dir_all(temp.join("tmp")).map_err(|e| e.to_string())?;
+            let decoder = crate::decoder::Decoder::start(&temp)?;
+            decoder.call(
+                &crate::vips_worker::Request::Command {
+                    program: "vips".into(),
+                    args: vec![
+                        "tiffsave".into(),
+                        temp.join(&alias).to_string_lossy().into_owned(),
+                        temp.join("converted.tif").to_string_lossy().into_owned(),
+                        "--compression=lzw".into(),
+                    ],
+                },
+                &std::sync::atomic::AtomicBool::new(false),
+                || false,
+                |_| {},
+            )?;
+        } else {
+            let output = crate::platform::tool("vips")
+                .current_dir(&temp)
+                .env("TMPDIR", ".")
+                .args([
+                    "tiffsave",
+                    &alias,
+                    "converted.tif",
+                    "--compression=lzw",
+                    "--vips-concurrency=2",
+                    "--vips-cache-max=0",
+                    "--vips-cache-max-memory=67108864",
+                    "--vips-disc-threshold=32m",
+                ])
+                .output()
+                .map_err(|e| {
+                    format!("Cannot convert the image to TIFF: {e}. Install libvips tools.")
+                })?;
+            if !output.status.success() {
+                return Err(format!(
+                    "Cannot convert the image to TIFF: {}",
+                    String::from_utf8_lossy(&output.stderr).trim()
+                ));
+            }
         }
         check_target(&source, target, false, overwrite)?;
         tiff_annotations::save_copy(
