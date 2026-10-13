@@ -280,8 +280,8 @@ pub fn channel_info(path: &Path) -> Result<String, String> {
     let mut t = Tiff::open(path)?;
     let mut report = String::from("=== TIFF directory 0 ===\n");
     if let Some(extras) = t.value(338, 3, 2, 64)? {
-        for value in extras.chunks_exact(2).map(|bytes| t.number(bytes)) {
-            let kind = match value {
+        for bytes in extras.as_chunks::<2>().0 {
+            let kind = match t.number(bytes) {
                 0 => "unspecified",
                 1 => "associated-alpha",
                 2 => "unassociated-alpha",
