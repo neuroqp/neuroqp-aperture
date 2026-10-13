@@ -1,23 +1,23 @@
 # First-release source material review
 
 The corresponding-source archive preserves original upstream sources, patches,
-build recipes, license material and application dependencies for Aperture 0.1.0.
+build recipes, license material and application dependencies for Aperture 0.1.1.
 Its first `SOURCE-MANIFEST.json` pins the platform inventories and native identities.
 The companion `corresponding-source.json` records publication readiness and the
 archive checksum, exact application lockfile hashes and the archived application
 source-inventory hash. Inventory assembly labels inside the archive are historical
 records; they do not replace that reviewed publication record.
 
-The first-release lock binding was checked against the actual archived lockfile
-bytes and their entries in `application/source-inventory.json`. The first manifest
-pins that inventory as
-`f2810834ef5f8b3973c5f396933f7d3613d52934f7c4a64f9b16e3aab2a36dc5`.
-The Cargo lock hash is
-`4a5bd85ee8786b2e23ba216b03d75e628de6b35cccbcb0304f74c5d9f62a8bc7`;
-the pnpm lock hash is
-`ce391502197571c39a3558c88de3d7c701c91f9175404e9718c84b3e62e53f84`.
-Both match the release checkout. The archive remains immutable; its original
-companion is historical, while candidates carry the current reviewed plan.
+The `0.1.1` material refreshes the application snapshot and Cargo root version
+after the native window-close permission fix. Native/vendor sources and npm
+dependency resolutions are unchanged. The `source-v0.1.0` archive and tag remain
+immutable; refreshed material uses the separate `source-v0.1.1` identity.
+
+The first manifest pins `application/source-inventory.json`. The reviewed plan
+records that inventory's hash and the hashes of its actual Cargo/pnpm lockfile
+bytes. Full archive readback compares the application snapshot with its committed
+Git tree and verifies the dependency inventories. Candidates carry the current
+reviewed plan, while the archived assembly labels remain historical records.
 Preflight rejects changed checkout locks before downloading; upload and metadata
 gates require each actual BUILDINFO's exact lock hashes as well as native identities.
 The gate also reads the bounded archived application source inventory, verifies
@@ -28,7 +28,7 @@ material still requires review of the actual archived lockfile bytes.
 
 The separate unsigned `0.0.9` Windows upgrade fixture uses an explicit fixture gate.
 It preserves its replacement Cargo lock under `test-deltas` and must match the
-reviewed `0.1.0` production lock byte for byte except the aperture root package
+reviewed `0.1.1` production lock byte for byte except the aperture root package
 version. Other candidate versions require a separately reviewed acceptance fixture.
 The fixture BUILDINFO must hash that exact replacement; pnpm and all dependency
 entries stay pinned. Ordinary uploads and aggregate release metadata accept only

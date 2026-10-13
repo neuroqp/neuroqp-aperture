@@ -2,7 +2,7 @@
 
 ## [Unreleased]
 
-## [0.1.0] - 2026-10-13
+## [0.1.1] - 2026-10-13
 
 - Initial Aperture desktop viewer release.
 - View ordinary images, TIFF and BigTIFF with progressive previews and tiled zoom.
@@ -11,3 +11,8 @@
 - Windows x64 installer and portable executable, and Linux x86_64 AppImage.
 - Windows 10 compatibility is unverified; desktop acceptance targets Windows 11.
 - Windows publisher signing is pending; downloads may show an unknown-publisher warning.
+- Fix window closing after checking for unsaved point annotations.
+
+## [0.1.0] - 2026-10-13
+
+- Candidate stopped before stable publication because its native Close handler could not complete.
