@@ -181,17 +181,20 @@ pub async fn install_update(
     state: State<'_, Updates>,
 ) -> Result<(), String> {
     require_installable()?;
-    let (update, bytes) = state
-        .pending
-        .lock()
-        .unwrap()
-        .take()
-        .ok_or("Download the update first.")?;
-    let bytes = bytes.ok_or("Download the update first.")?;
+    let (update, bytes) = {
+        let mut pending = state.pending.lock().unwrap();
+        pending
+            .as_ref()
+            .and_then(|(_, bytes)| bytes.as_ref())
+            .ok_or("Download the update first.")?;
+        pending.take().unwrap()
+    };
+    let bytes = bytes.unwrap();
     tauri::async_runtime::spawn_blocking(move || {
         let backend = app.state::<Backend>();
         backend.shutdown();
-        if let Err(error) = update.install(bytes) {
+        if let Err(error) = update.install(&bytes) {
+            *app.state::<Updates>().pending.lock().unwrap() = Some((update, Some(bytes)));
             backend
                 .closing
                 .store(false, std::sync::atomic::Ordering::Relaxed);

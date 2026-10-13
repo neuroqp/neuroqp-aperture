@@ -1065,3 +1065,10 @@ will fail at the publication gate without uploading them. Seven temporary binary
 artifacts from this branch's three earlier runs were deleted; run logs and
 Windows screenshot/diagnostic evidence were retained. The native code and packages
 are unchanged from the successful run above.
+
+The final installer-retry correction retains pending metadata when no bytes are
+ready and restores metadata plus verified bytes when installation fails. It
+passed Cargo check, the targeted updater test, strict Clippy and rustfmt. The
+native recovery test above rejects development-mode installation before this
+branch, so it does not prove retry after a real installer failure. That case
+remains part of packaged signed-upgrade acceptance.
