@@ -20,6 +20,7 @@ import appIcon from "../src-tauri/icons/icon.png";
 import { icon, type IconName } from "./icons";
 import { bindTools, toolPanels } from "./tools";
 import { bindTheme } from "./theme";
+import { bindUpdates, updatePanel } from "./updates";
 import { applyDisplay, loadHistogram } from "./display";
 import { channelHistograms } from "./display-settings";
 import { bindColorPanel } from "./color-panel";
@@ -54,6 +55,7 @@ document.querySelector<HTMLDivElement>("#app")!.innerHTML = `
       <button id="open-button" class="file-button" type="button" title="Open image (Ctrl+O)">${icon("open")}<span>Open</span></button>
       <button id="save-button" class="file-button" type="button" title="Save annotated TIFF (Ctrl+S)" disabled>${icon("save")}<span>Save</span></button>
     </div>
+    <button id="update-button" class="tool" type="button" title="Aperture updates" aria-label="Aperture updates">${icon("update")}</button>
     <button id="theme-button" class="tool theme-button" type="button" aria-label="Switch theme"></button>
     <div class="window-actions">
       <button id="minimize-button" class="window-button" type="button" title="Minimize" aria-label="Minimize">${icon("minimize")}</button>
@@ -83,6 +85,7 @@ document.querySelector<HTMLDivElement>("#app")!.innerHTML = `
     <section id="viewer" aria-label="Image viewer"></section>
     ${toolPanels}
   </div>
+  ${updatePanel}
   <dialog id="save-dialog" aria-labelledby="save-dialog-title" aria-describedby="save-dialog-description save-dialog-path">
     <form method="dialog">
       <h2 id="save-dialog-title">Save annotated TIFF</h2>
@@ -234,7 +237,8 @@ function updatePointTool(key?: keyof AnnotationSettings) {
 }
 
 async function discardChanges() {
-  if (saving || dialogOpen) return false;
+  if (saving || dialogOpen || $<HTMLDialogElement>("update-dialog").open)
+    return false;
   if (!dirty) return true;
   dialogOpen = true;
   try {
@@ -252,11 +256,41 @@ async function discardChanges() {
   }
 }
 
+async function prepareUpdate() {
+  if (saving || dialogOpen) return false;
+  if (dirty) {
+    dialogOpen = true;
+    const dialog = $<HTMLDialogElement>("update-unsaved-dialog");
+    dialog.returnValue = "cancel";
+    const choice = await new Promise<string>((resolve) => {
+      dialog.addEventListener("close", () => resolve(dialog.returnValue), {
+        once: true,
+      });
+      dialog.showModal();
+    });
+    dialogOpen = false;
+    if (choice === "save") {
+      await saveAnnotations();
+      if (dirty) return false;
+    } else if (choice === "discard") dirty = false;
+    else return false;
+  }
+  // Freeze edits before stopping image requests and joining native workers.
+  saving = true;
+  dialogOpen = true;
+  histogramLoad?.abort();
+  for (const job of downloads) job.abort();
+  downloads.clear();
+  updatePointTool();
+  return true;
+}
+
 async function saveAnnotations() {
   if (
     !native ||
     saving ||
     dialogOpen ||
+    $<HTMLDialogElement>("update-dialog").open ||
     !currentId ||
     $<HTMLButtonElement>("save-button").disabled
   )
@@ -721,7 +755,8 @@ $("zoom-out-button").addEventListener("click", () => {
   viewer.viewport.applyConstraints();
 });
 document.addEventListener("keydown", (event) => {
-  if (dialogOpen || saving) return;
+  if (dialogOpen || saving || $<HTMLDialogElement>("update-dialog").open)
+    return;
   if ((event.ctrlKey || event.metaKey) && event.key.toLowerCase() === "o") {
     event.preventDefault();
     void chooseImage();
@@ -809,6 +844,12 @@ if (windowHandle) {
     .querySelectorAll<HTMLButtonElement>(".window-button")
     .forEach((button) => (button.disabled = true));
 }
+
+bindUpdates(prepareUpdate, () => {
+  saving = false;
+  dialogOpen = false;
+  updatePointTool();
+});
 
 window.addEventListener("beforeunload", () => {
   loader.dispose();

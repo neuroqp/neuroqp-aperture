@@ -210,7 +210,7 @@ impl Worker {
         if let Some(image) = self.images.get(input) {
             return Ok(Rc::clone(image));
         }
-        let image = Rc::new(VipsImage::new_from_file(input).map_err(|e| e.to_string())?);
+        let image = Rc::new(crate::platform::open_image(input)?);
         // Parent supplies a safe job-local source alias. Scratch outputs must
         // never stay open after their individual operation has finished.
         let path = input.split('[').next().unwrap_or(input);
@@ -310,7 +310,7 @@ impl Worker {
                     return Err("Invalid raw TIFF preview limits.".into());
                 }
                 let Some(preview) = crate::raw_tiff::preview_with_progress(
-                    Path::new(&input),
+                    &crate::platform::source_path(Path::new(&input)).map_err(|e| e.to_string())?,
                     max_edge,
                     threads,
                     &|fraction| progress.update(fraction * 0.98),
@@ -409,6 +409,17 @@ impl Worker {
                 )
                 .map_err(|e| e.to_string())?;
                 save_image(&pixels, output, progress, 0.0, 1.0)
+            }
+            "tiffsave" if args.len() == 4 && args[3] == "--compression=lzw" => {
+                ops::tiffsave_with_opts(
+                    &image,
+                    output,
+                    &ops::TiffsaveOptions {
+                        compression: ops::ForeignTiffCompression::Lzw,
+                        ..Default::default()
+                    },
+                )
+                .map_err(|e| e.to_string())
             }
             "copy" if args.len() == 3 => save_image(&image, output, progress, 0.0, 1.0),
             "copy" if args.len() == 4 && args[3] == "--interpretation=b-w" => {
@@ -621,6 +632,7 @@ fn header(image: &VipsImage) -> Result<String, String> {
         "interpretation",
         "orientation",
         "vips-loader",
+        "magick-format",
         "n-pages",
         "n-subifds",
         "tile-width",
@@ -631,6 +643,7 @@ fn header(image: &VipsImage) -> Result<String, String> {
             // vipsheader prints enum nicknames, while get_as_string prints the
             // GValue type and symbol. Existing layout validation needs nicknames.
             let value = match key {
+                "vips-loader" => value.strip_suffix("_source").unwrap_or(&value).to_owned(),
                 "format" => enum_name(&value, "VIPS_FORMAT_"),
                 "coding" => enum_name(&value, "VIPS_CODING_"),
                 "interpretation" => enum_name(&value, "VIPS_INTERPRETATION_"),
@@ -831,11 +844,60 @@ mod tests {
         let app = VipsApp::new("aperture-raw-binding-test", false).unwrap();
         app.concurrency_set(2);
         app.cache_set_max(0);
+        // Exercise the Windows I/O bridge against native decoding while keeping
+        // the single in-process libvips initialization used by this test.
+        for name in ["gray16-stripped.tif", "gray16-tiled-bigtiff.tif"] {
+            let source = Path::new(env!("CARGO_MANIFEST_DIR"))
+                .join("../tests/fixtures")
+                .join(name);
+            let native = VipsImage::new_from_file(source.to_str().unwrap()).unwrap();
+            let bridged =
+                VipsImage::new_from_file_handle(fs::File::open(source).unwrap(), "").unwrap();
+            assert_eq!(bridged.get_width(), native.get_width());
+            assert_eq!(bridged.get_height(), native.get_height());
+            assert_eq!(
+                bridged.get_as_string("format").unwrap(),
+                native.get_as_string("format").unwrap()
+            );
+            assert_eq!(
+                bridged.image_write_to_memory(),
+                native.image_write_to_memory()
+            );
+        }
         let directory =
             std::env::temp_dir().join(format!("aperture-raw-binding-{}", std::process::id()));
         fs::create_dir(&directory).unwrap();
         let source =
             Path::new(env!("CARGO_MANIFEST_DIR")).join("../tests/fixtures/gray16-stripped.tif");
+        let bmp = directory.join("source.bmp");
+        let samples = vec![255, 0, 0, 0, 128, 255];
+        image::RgbImage::from_raw(2, 1, samples.clone())
+            .unwrap()
+            .save_with_format(&bmp, image::ImageFormat::Bmp)
+            .unwrap();
+        {
+            let decoded = crate::platform::open_image(bmp.to_str().unwrap()).unwrap();
+            assert_eq!(decoded.image_write_to_memory(), samples);
+            assert!(header(&decoded).unwrap().contains("vips-loader: bmp2vips"));
+            let copy = directory.join("bmp-copy.tif");
+            let mut conversion = Worker {
+                images: HashMap::new(),
+                source: None,
+            };
+            conversion
+                .command(
+                    "vips",
+                    &[
+                        "tiffsave".into(),
+                        bmp.to_string_lossy().into_owned(),
+                        copy.to_string_lossy().into_owned(),
+                        "--compression=lzw".into(),
+                    ],
+                )
+                .unwrap();
+            let saved = VipsImage::new_from_file(copy.to_str().unwrap()).unwrap();
+            assert_eq!(saved.image_write_to_memory(), samples);
+        }
         let actual = directory.join("actual.jpg");
         let expected = directory.join("expected.jpg");
         let mut worker = Worker {

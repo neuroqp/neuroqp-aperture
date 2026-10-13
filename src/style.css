@@ -373,7 +373,9 @@ svg {
   background: var(--soft);
   color: var(--accent-ink);
 }
-#save-dialog {
+#save-dialog,
+#update-dialog,
+#update-unsaved-dialog {
   width: min(420px, calc(100vw - 32px));
   padding: 18px;
   border: 1px solid var(--field-border);
@@ -384,10 +386,14 @@ svg {
   font: inherit;
   line-height: 1.5;
 }
-#save-dialog::backdrop {
+#save-dialog::backdrop,
+#update-dialog::backdrop,
+#update-unsaved-dialog::backdrop {
   background: #19161e70;
 }
-#save-dialog h2 {
+#save-dialog h2,
+#update-dialog h2,
+#update-unsaved-dialog h2 {
   margin: 0;
   color: var(--accent-ink);
   font-size: 14px;
@@ -415,6 +421,40 @@ svg {
   color: var(--accent-ink);
   background: var(--soft);
   border-color: var(--accent);
+}
+#update-button.update-available {
+  color: var(--focus);
+  background: var(--soft);
+}
+#update-dialog {
+  width: min(460px, calc(100vw - 32px));
+}
+#update-edition {
+  color: var(--muted);
+}
+#update-notes {
+  max-height: 220px;
+  overflow: auto;
+  white-space: pre-wrap;
+  overflow-wrap: anywhere;
+  font: inherit;
+  padding: 10px;
+  background: var(--paper);
+  border: 1px solid var(--line);
+  border-radius: 4px;
+}
+#update-download-progress {
+  width: 100%;
+  accent-color: var(--solid);
+  margin-bottom: 12px;
+}
+.update-preference {
+  display: flex;
+  align-items: center;
+  gap: 7px;
+}
+.update-preference input {
+  accent-color: var(--solid);
 }
 /* Right-anchored row; wraps only when another panel cannot fit. */
 #tool-panels {

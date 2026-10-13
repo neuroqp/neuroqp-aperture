@@ -1,0 +1,17 @@
+{
+  "$schema": "https://schema.tauri.app/config/2",
+  "bundle": {
+    "active": true,
+    "targets": ["nsis"],
+    "resources": { "../build/windows/payload/": "./" },
+    "windows": {
+      "webviewInstallMode": { "type": "skip" },
+      "nsis": {
+        "installMode": "currentUser",
+        "installerHooks": "../scripts/release/windows-installer-hooks.nsh",
+        "compression": "lzma",
+        "startMenuFolder": "NeuroQP"
+      }
+    }
+  }
+}

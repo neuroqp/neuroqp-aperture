@@ -4,7 +4,10 @@
 use std::collections::BTreeMap;
 use std::fs::File;
 use std::io;
+#[cfg(unix)]
 use std::os::unix::fs::FileExt;
+#[cfg(windows)]
+use std::os::windows::fs::FileExt;
 use std::path::Path;
 
 #[link(name = "tiff")]
@@ -12,8 +15,15 @@ unsafe extern "C" {
     fn TIFFOpenOptionsAlloc() -> *mut std::ffi::c_void;
     fn TIFFOpenOptionsFree(options: *mut std::ffi::c_void);
     fn TIFFOpenOptionsSetMaxSingleMemAlloc(options: *mut std::ffi::c_void, bytes: isize);
+    #[cfg(unix)]
     fn TIFFOpenExt(
         path: *const std::ffi::c_char,
+        mode: *const std::ffi::c_char,
+        options: *mut std::ffi::c_void,
+    ) -> *mut std::ffi::c_void;
+    #[cfg(windows)]
+    fn TIFFOpenWExt(
+        path: *const u16,
         mode: *const std::ffi::c_char,
         options: *mut std::ffi::c_void,
     ) -> *mut std::ffi::c_void;
@@ -26,12 +36,34 @@ unsafe extern "C" {
     ) -> isize;
 }
 
+unsafe fn open_native(
+    path: &Path,
+    mode: *const std::ffi::c_char,
+    options: *mut std::ffi::c_void,
+) -> io::Result<*mut std::ffi::c_void> {
+    #[cfg(unix)]
+    {
+        use std::os::unix::ffi::OsStrExt;
+        let path = std::ffi::CString::new(path.as_os_str().as_bytes()).map_err(|_| invalid())?;
+        Ok(TIFFOpenExt(path.as_ptr(), mode, options))
+    }
+    #[cfg(windows)]
+    {
+        use std::os::windows::ffi::OsStrExt;
+        let path = std::fs::canonicalize(path).or_else(|_| std::path::absolute(path))?;
+        let mut path: Vec<u16> = path.as_os_str().encode_wide().collect();
+        if path.contains(&0) {
+            return Err(invalid());
+        }
+        path.push(0);
+        Ok(TIFFOpenWExt(path.as_ptr(), mode, options))
+    }
+}
+
 struct Tiff(*mut std::ffi::c_void);
 
 impl Tiff {
     fn open(path: &Path) -> io::Result<Self> {
-        use std::os::unix::ffi::OsStrExt;
-        let path = std::ffi::CString::new(path.as_os_str().as_bytes()).map_err(|_| invalid())?;
         // Every worker owns an independent native handle. Disable memory mapping
         // and cap individual native allocations as well as our decoded strip.
         let image = unsafe {
@@ -40,9 +72,9 @@ impl Tiff {
                 return Err(io::Error::other("cannot allocate TIFF decoder options"));
             }
             TIFFOpenOptionsSetMaxSingleMemAlloc(options, MAX_COMPRESSED_STRIP_BYTES as isize);
-            let image = TIFFOpenExt(path.as_ptr(), c"rm".as_ptr(), options);
+            let image = open_native(path, c"rm".as_ptr(), options);
             TIFFOpenOptionsFree(options);
-            image
+            image?
         };
         if image.is_null() {
             return Err(invalid());
@@ -116,7 +148,27 @@ fn read_at(file: &File, offset: u64, bytes: &mut [u8], len: u64) -> io::Result<(
     {
         return Err(invalid());
     }
-    file.read_exact_at(bytes, offset)
+    #[cfg(unix)]
+    {
+        file.read_exact_at(bytes, offset)
+    }
+    #[cfg(windows)]
+    {
+        let mut remaining = bytes;
+        let mut position = offset;
+        while !remaining.is_empty() {
+            let count = match file.seek_read(remaining, position) {
+                Err(error) if error.kind() == io::ErrorKind::Interrupted => continue,
+                result => result?,
+            };
+            if count == 0 {
+                return Err(io::ErrorKind::UnexpectedEof.into());
+            }
+            position += count as u64;
+            remaining = &mut remaining[count..];
+        }
+        Ok(())
+    }
 }
 
 fn parse(file: &File) -> io::Result<Option<Layout>> {
@@ -589,14 +641,12 @@ mod tests {
         rows: usize,
         values: &[u16],
     ) -> Fixture {
-        use std::os::unix::ffi::OsStrExt;
         let (big, little, bands, bits, predictor, compression) = config;
         let f = Fixture(std::env::temp_dir().join(format!(
             "aperture-compressed-{}-{}.tif",
             std::process::id(),
             NEXT.fetch_add(1, Ordering::Relaxed)
         )));
-        let path = std::ffi::CString::new(f.0.as_os_str().as_bytes()).unwrap();
         let mode = std::ffi::CString::new(format!(
             "w{}{}",
             if big { "8" } else { "" },
@@ -605,11 +655,7 @@ mod tests {
         .unwrap();
         // Exercise the same native codecs using independently generated sources.
         unsafe {
-            let image = Tiff(TIFFOpenExt(
-                path.as_ptr(),
-                mode.as_ptr(),
-                std::ptr::null_mut(),
-            ));
+            let image = Tiff(open_native(&f.0, mode.as_ptr(), std::ptr::null_mut()).unwrap());
             assert!(!image.0.is_null());
             for (tag, value) in [
                 (256, width as u32),

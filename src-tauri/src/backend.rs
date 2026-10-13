@@ -3,6 +3,8 @@ use crate::{
     native::{self, NativeLevel},
 };
 use serde::{Deserialize, Serialize};
+#[cfg(test)]
+use std::process::Command;
 use std::{
     cell::RefCell,
     collections::{hash_map::DefaultHasher, HashMap},
@@ -12,7 +14,7 @@ use std::{
     hash::{Hash, Hasher},
     io::{Read, Seek, SeekFrom},
     path::{Path, PathBuf},
-    process::{Child, Command, Stdio},
+    process::{Child, Stdio},
     sync::{
         atomic::{AtomicBool, AtomicU64, Ordering},
         Arc, Mutex,
@@ -202,10 +204,7 @@ impl Backend {
         fs::create_dir(dir.join("tmp")).map_err(|e| e.to_string())?;
         let input = dir.join(format!("source.{extension}"));
         // Loader options use brackets, so never pass a user filename to libvips.
-        #[cfg(unix)]
-        std::os::unix::fs::symlink(&source, &input).map_err(|e| e.to_string())?;
-        #[cfg(not(unix))]
-        return Err("This proof of concept currently supports Linux only.".into());
+        crate::platform::source_alias(&source, &input).map_err(|e| e.to_string())?;
         let initial = ImageState {
             id,
             revision: 0,
@@ -487,10 +486,40 @@ struct CacheManifest {
 // assuming that the installed reader still supports its native TIFF layout.
 fn tool_identity() -> u64 {
     let mut hasher = DefaultHasher::new();
+    // The application contains the Rust BMP reader and native worker. Bundled
+    // DLLs can also change while CLI filenames remain unchanged across updates.
+    if let Ok(executable) = std::env::current_exe() {
+        let mut readers = vec![executable.clone()];
+        if cfg!(windows) {
+            readers.extend(
+                [
+                    "libvips-42.dll",
+                    "libtiff-6.dll",
+                    "libglib-2.0-0.dll",
+                    "libgobject-2.0-0.dll",
+                ]
+                .map(|name| executable.with_file_name(name)),
+            );
+        }
+        for reader in readers {
+            reader.hash(&mut hasher);
+            if let Ok(metadata) = fs::metadata(reader) {
+                metadata.len().hash(&mut hasher);
+                metadata.modified().ok().hash(&mut hasher);
+            }
+        }
+    }
     for program in ["vips", "vipsheader", "tiffinfo"] {
         program.hash(&mut hasher);
-        for directory in std::env::split_paths(&std::env::var_os("PATH").unwrap_or_default()) {
-            let path = directory.join(program);
+        let bundled = PathBuf::from(crate::platform::tool(program).get_program());
+        #[cfg(windows)]
+        let filename = format!("{program}.exe");
+        #[cfg(not(windows))]
+        let filename = program;
+        let search_path = std::env::var_os("PATH").unwrap_or_default();
+        let paths = std::iter::once(bundled)
+            .chain(std::env::split_paths(&search_path).map(|directory| directory.join(&filename)));
+        for path in paths {
             if let Ok(metadata) = fs::metadata(&path) {
                 if metadata.is_file() {
                     path.hash(&mut hasher);
@@ -656,7 +685,7 @@ fn load(job: &Arc<Job>) -> Result<(), String> {
     }
     let header = run(job, "vipsheader", &["-a".into(), input(job, "")])?;
     let (width, height) = validate_header(&header)?;
-    let tiffinfo = if field(&header, "vips-loader") == Some("tiffload") {
+    let tiffinfo = if cfg!(unix) && field(&header, "vips-loader") == Some("tiffload") {
         run(job, "tiffinfo", &[job.input.clone().into_os_string()]).ok()
     } else {
         None
@@ -1389,7 +1418,7 @@ fn run_with_progress(
     let stderr_path = dir.join(format!("stderr-{number}"));
     let stdout = File::create(&stdout_path).map_err(|e| e.to_string())?;
     let stderr = File::create(&stderr_path).map_err(|e| e.to_string())?;
-    let mut command = Command::new(program);
+    let mut command = crate::platform::tool(program);
     command
         .args(args)
         .env("TMPDIR", dir.join("tmp"))
@@ -1483,10 +1512,11 @@ fn uses_worker(job: &Job) -> bool {
     if std::env::var_os("APERTURE_WORKER_EXECUTABLE").is_none() {
         return false;
     }
-    matches!(
-        job.input.extension().and_then(|s| s.to_str()),
-        Some("tif" | "tiff")
-    )
+    cfg!(windows)
+        || matches!(
+            job.input.extension().and_then(|s| s.to_str()),
+            Some("tif" | "tiff" | "bmp")
+        )
 }
 
 fn worker_call(
@@ -1762,6 +1792,7 @@ fn prune_except(root: &Path, limit: u64, protected: Option<&Path>) -> Result<(),
 mod tests {
     use super::*;
 
+    #[cfg(unix)]
     #[test]
     fn folder_navigation_matches_open_formats_and_preserves_aliases() {
         let root = std::env::temp_dir().join(format!(

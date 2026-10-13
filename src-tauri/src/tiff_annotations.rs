@@ -461,6 +461,9 @@ pub fn save_copy(
                 .map_err(|e| e.to_string())?;
         }
         out.sync_all().map_err(|e| e.to_string())?;
+        drop(out);
+        // Windows cannot replace an open source handle without delete sharing.
+        drop(t.file);
         if overwrite {
             fs::rename(&temp, target).map_err(|e| e.to_string())?;
         } else {

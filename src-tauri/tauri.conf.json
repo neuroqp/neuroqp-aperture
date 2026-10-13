@@ -24,5 +24,30 @@
       "csp": "default-src 'self'; img-src 'self' aperture: http://aperture.localhost blob: data:; connect-src 'self' ipc: http://ipc.localhost aperture: http://aperture.localhost; style-src 'self' 'unsafe-inline'"
     }
   },
-  "bundle": { "active": false, "icon": ["icons/icon.png"] }
+  "bundle": {
+    "active": true,
+    "icon": [
+      "icons/32x32.png",
+      "icons/128x128.png",
+      "icons/128x128@2x.png",
+      "icons/icon.ico"
+    ],
+    "targets": ["appimage"],
+    "createUpdaterArtifacts": true,
+    "publisher": "NeuroQP",
+    "category": "Science",
+    "shortDescription": "A microscopy image viewer",
+    "longDescription": "View large microscopy images and edit ImageJ-compatible point annotations."
+  },
+  "plugins": {
+    "updater": {
+      "pubkey": "dW50cnVzdGVkIGNvbW1lbnQ6IG1pbmlzaWduIHB1YmxpYyBrZXk6IDhFMTIxNjU5OUU4OEQ2NEYKUldSUDFvaWVXUllTam1PTnFod2o4Q0FlS0N1TkNXVGJIZ3lSQ1d0L1B6Y0pRTHc5VW9ZNDJnbGsK",
+      "endpoints": [
+        "https://github.com/neuroqp/neuroqp-aperture/releases/latest/download/latest.json"
+      ],
+      "windows": {
+        "installMode": "passive"
+      }
+    }
+  }
 }

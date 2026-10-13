@@ -7,3 +7,4 @@ artifacts/
 .DS_Store
 *.log
 __pycache__/
+build/

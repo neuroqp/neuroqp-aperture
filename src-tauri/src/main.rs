@@ -4,9 +4,11 @@ mod backend;
 mod channels;
 mod decoder;
 mod native;
+mod platform;
 mod raw_tiff;
 mod roi;
 mod tiff_annotations;
+mod updates;
 mod vips_worker;
 
 use backend::{Backend, ImageState};
@@ -143,6 +145,17 @@ async fn save_annotations(
     .map_err(|e| e.to_string())?
 }
 
+#[cfg(windows)]
+fn configure_webview_runtime() {
+    if let Ok(executable) = std::env::current_exe() {
+        let runtime = executable.with_file_name("webview2");
+        if runtime.join("msedgewebview2.exe").is_file() {
+            // This runs before Tauri starts threads or creates the WebView.
+            std::env::set_var("WEBVIEW2_BROWSER_EXECUTABLE_FOLDER", runtime);
+        }
+    }
+}
+
 fn main() {
     if std::env::args_os().nth(1).as_deref() == Some(std::ffi::OsStr::new("--image-worker")) {
         if let Err(error) = vips_worker::worker_main() {
@@ -151,6 +164,8 @@ fn main() {
         }
         return;
     }
+    #[cfg(windows)]
+    configure_webview_runtime();
     tauri::Builder::default()
         .plugin(tauri_plugin_single_instance::init(|app, _, _| {
             if let Some(window) = app.get_webview_window("main") {
@@ -159,6 +174,9 @@ fn main() {
             }
         }))
         .plugin(tauri_plugin_dialog::init())
+        .plugin(tauri_plugin_updater::Builder::new().build())
+        .plugin(tauri_plugin_opener::init())
+        .manage(updates::Updates::default())
         .setup(|app| {
             let root = app.path().app_cache_dir()?.join("display-v2");
             let mut backend = Backend::new(root).map_err(std::io::Error::other)?;
@@ -177,7 +195,13 @@ fn main() {
             cancel_load,
             load_annotations,
             annotation_target,
-            save_annotations
+            save_annotations,
+            updates::update_package,
+            updates::check_update,
+            updates::download_update,
+            updates::install_update,
+            updates::update_release_page,
+            updates::download_portable_update
         ])
         .register_asynchronous_uri_scheme_protocol("aperture", |context, request, responder| {
             let app = context.app_handle().clone();
