@@ -1046,3 +1046,12 @@ The source-material gate has six release-helper tests, including unfinished-sour
 blocking, accepted source bytes, archive tampering, and dependency identity
 mismatch. The checked-in source plan remains `unassembled`, so signed candidate
 creation is blocked until source/build material is assembled and reviewed.
+
+The complete [review-fix package run](https://github.com/neuroqp/neuroqp-aperture/actions/runs/38421253191)
+passed at `fc624ce`: 56 Windows and 59 Linux Rust tests, strict Clippy, six
+release-helper tests, frontend checks, optimized Setup/portable/AppImage builds,
+packaged-worker checks, Windows extraction/concurrency/reuse and per-user
+install/uninstall smoke, and combined artifact metadata/checksums. The Windows
+log confirms both the restored-mtime/file-replacement identity regression and
+two/four-band TIFF loading regression passed. Native desktop acceptance and a
+real signed upgrade remain separate first-release requirements.
