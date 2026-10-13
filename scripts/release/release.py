@@ -8,6 +8,7 @@ import hashlib
 import json
 import os
 import re
+import shutil
 import subprocess
 import tempfile
 from pathlib import Path
@@ -30,17 +31,17 @@ def digest(path):
 
 
 def current_version(root=ROOT):
-    package = json.loads((root / "package.json").read_text())["version"]
-    tauri = json.loads((root / "src-tauri/tauri.conf.json").read_text())["version"]
-    cargo = re.search(r'(?ms)^\[package\].*?^version = "([^"]+)"', (root / "src-tauri/Cargo.toml").read_text())[1]
-    lock = re.search(r'(?m)^name = "aperture"\nversion = "([^"]+)"', (root / "src-tauri/Cargo.lock").read_text())[1]
+    package = json.loads((root / "package.json").read_text(encoding="utf-8"))["version"]
+    tauri = json.loads((root / "src-tauri/tauri.conf.json").read_text(encoding="utf-8"))["version"]
+    cargo = re.search(r'(?ms)^\[package\].*?^version = "([^"]+)"', (root / "src-tauri/Cargo.toml").read_text(encoding="utf-8"))[1]
+    lock = re.search(r'(?m)^name = "aperture"\nversion = "([^"]+)"', (root / "src-tauri/Cargo.lock").read_text(encoding="utf-8"))[1]
     if len({package, tauri, cargo, lock}) != 1 or not VERSION.fullmatch(package):
         raise ValueError(f"Version mismatch or invalid stable version: {package}, {tauri}, {cargo}, {lock}")
     return package
 
 
 def notes(version, root=ROOT):
-    text = (root / "CHANGELOG.md").read_text()
+    text = (root / "CHANGELOG.md").read_text(encoding="utf-8")
     match = re.search(rf"(?ms)^## \[{re.escape(version)}\][^\n]*\n(.*?)(?=^## |\Z)", text)
     if not match or not match[1].strip():
         raise ValueError(f"CHANGELOG.md has no notes for {version}")
@@ -54,13 +55,13 @@ def set_version(version, root=ROOT):
     # Validate before writing any file. The lock's root package has no checksum.
     for name in ("package.json", "src-tauri/tauri.conf.json"):
         path = root / name
-        data = json.loads(path.read_text())
+        data = json.loads(path.read_text(encoding="utf-8"))
         data["version"] = version
-        path.write_text(json.dumps(data, indent=2) + "\n")
+        path.write_text(json.dumps(data, indent=2) + "\n", encoding="utf-8")
     path = root / "src-tauri/Cargo.toml"
-    path.write_text(path.read_text().replace(f'version = "{old}"', f'version = "{version}"', 1))
+    path.write_text(path.read_text(encoding="utf-8").replace(f'version = "{old}"', f'version = "{version}"', 1), encoding="utf-8")
     path = root / "src-tauri/Cargo.lock"
-    path.write_text(path.read_text().replace(f'name = "aperture"\nversion = "{old}"', f'name = "aperture"\nversion = "{version}"', 1))
+    path.write_text(path.read_text(encoding="utf-8").replace(f'name = "aperture"\nversion = "{old}"', f'name = "aperture"\nversion = "{version}"', 1), encoding="utf-8")
     # pnpm-lock.yaml has no root version field; its importer resolves dependencies only.
     current_version(root)
 
@@ -76,22 +77,22 @@ def manifest(directory, version, repository, source_sha, published_at, signed=Tr
         if not artifact.is_file() or artifact.stat().st_size == 0:
             raise ValueError(f"Missing or empty release asset: {name}")
         if signed:
-            signature = (directory / (name + ".sig")).read_text().strip()
+            signature = (directory / (name + ".sig")).read_text(encoding="utf-8").strip()
             if not signature:
                 raise ValueError(f"Empty updater signature: {name}")
             platforms[target] = {"signature": signature, "url": f"https://github.com/{repository}/releases/download/v{version}/{name}"}
     data = {"version": version, "notes": notes(version, root), "pub_date": published_at, "platforms": platforms}
     # Unsigned validation deliberately has no updater feed.
     if signed:
-        (directory / "latest.json").write_text(json.dumps(data, indent=2) + "\n")
+        (directory / "latest.json").write_text(json.dumps(data, indent=2) + "\n", encoding="utf-8")
     for platform in ("windows", "linux"):
-        info = json.loads((directory / f"BUILDINFO-{platform}.json").read_text())
+        info = json.loads((directory / f"BUILDINFO-{platform}.json").read_text(encoding="utf-8"))
         if info["version"] != version or info["source_sha"] != source_sha:
             raise ValueError(f"Wrong build identity in BUILDINFO-{platform}.json")
         if not (directory / f"THIRD-PARTY-NOTICES-{platform}.txt").stat().st_size:
             raise ValueError(f"Missing third-party notices for {platform}")
     checksums = "".join(f"{digest(path)}  {path.name}\n" for path in sorted(directory.iterdir()) if path.is_file() and path.name != "SHA256SUMS")
-    (directory / "SHA256SUMS").write_text(checksums)
+    (directory / "SHA256SUMS").write_text(checksums, encoding="utf-8")
     verify(directory, version, source_sha, signed)
 
 
@@ -100,7 +101,7 @@ def verify(directory, version, source_sha, signed=True):
     if signed:
         expected |= {name + ".sig" for name in ASSETS.values()} | {"latest.json"}
     rows = {}
-    for line in (directory / "SHA256SUMS").read_text().splitlines():
+    for line in (directory / "SHA256SUMS").read_text(encoding="utf-8").splitlines():
         match = re.fullmatch(r"([0-9a-f]{64})  ([A-Za-z0-9_.-]+)", line)
         if not match or match[2] in rows or match[2] == "SHA256SUMS":
             raise ValueError("Invalid or duplicate checksum entry")
@@ -111,43 +112,49 @@ def verify(directory, version, source_sha, signed=True):
         if digest(directory / name) != checksum:
             raise ValueError(f"Checksum mismatch: {name}")
     for platform in ("linux", "windows"):
-        info = json.loads((directory / f"BUILDINFO-{platform}.json").read_text())
+        info = json.loads((directory / f"BUILDINFO-{platform}.json").read_text(encoding="utf-8"))
         if info["version"] != version or info["source_sha"] != source_sha:
             raise ValueError("Build identity mismatch")
     if signed:
-        feed = json.loads((directory / "latest.json").read_text())
+        feed = json.loads((directory / "latest.json").read_text(encoding="utf-8"))
         if feed["version"] != version or set(feed["platforms"]) != set(ASSETS):
             raise ValueError("Updater feed identity mismatch")
         for target, name in ASSETS.items():
             entry = feed["platforms"][target]
-            if entry["signature"] != (directory / (name + ".sig")).read_text().strip() or entry["url"] != f"https://github.com/neuroqp/neuroqp-aperture/releases/download/v{version}/{name}":
+            if entry["signature"] != (directory / (name + ".sig")).read_text(encoding="utf-8").strip() or entry["url"] != f"https://github.com/neuroqp/neuroqp-aperture/releases/download/v{version}/{name}":
                 raise ValueError(f"Updater feed mismatch: {target}")
 
 
 def buildinfo(platform, directory, dependency_file, root=ROOT):
     def run(*args):
-        return subprocess.check_output(args, cwd=root, text=True).strip()
+        if os.name == "nt" and args[0] == "pnpm":
+            # pnpm/action-setup installs a .cmd shim, not a Windows executable.
+            shim = shutil.which("pnpm.cmd")
+            if not shim:
+                raise ValueError("pnpm.cmd is not on PATH")
+            args = (os.environ["COMSPEC"], "/d", "/c", shim, *args[1:])
+        return subprocess.check_output(args, cwd=root, text=True, encoding="utf-8").strip()
     info = {"version": current_version(root), "source_sha": run("git", "-c", f"safe.directory={root}", "rev-parse", "HEAD"), "platform": platform,
             "toolchains": {"rust": run("rustc", "--version"), "cargo": run("cargo", "--version"), "node": run("node", "--version"), "pnpm": run("pnpm", "--version")},
             "lockfiles": {name: digest(root / name) for name in ("pnpm-lock.yaml", "src-tauri/Cargo.lock")},
-            "native_dependencies": json.loads(dependency_file.read_text()), "desktop_acceptance": "Required before promotion; automated worker/package checks are not GUI acceptance."}
+            "native_dependencies": json.loads(dependency_file.read_text(encoding="utf-8")), "desktop_acceptance": "Required before promotion; automated worker/package checks are not GUI acceptance."}
     info["runner"] = {name: os.environ[name] for name in ("ImageOS", "ImageVersion", "RUNNER_OS", "RUNNER_ARCH") if name in os.environ}
     if platform == "windows":
         info["toolchains"].update({name: os.environ[name] for name in ("VCToolsVersion", "WindowsSDKVersion", "VSINSTALLDIR") if name in os.environ})
     else:
         info["toolchains"]["cc"] = run("cc", "--version").splitlines()[0]
     directory.mkdir(parents=True, exist_ok=True)
-    (directory / f"BUILDINFO-{platform}.json").write_text(json.dumps(info, indent=2) + "\n")
+    (directory / f"BUILDINFO-{platform}.json").write_text(json.dumps(info, indent=2) + "\n", encoding="utf-8")
 
 
 def verify_signatures(directory, root=ROOT):
-    public = json.loads((root / "src-tauri/tauri.conf.json").read_text())["plugins"]["updater"]["pubkey"]
+    public = json.loads((root / "src-tauri/tauri.conf.json").read_text(encoding="utf-8"))["plugins"]["updater"]["pubkey"]
     with tempfile.TemporaryDirectory(prefix="aperture-signatures-") as folder:
         key = Path(folder) / "public.key"
         key.write_bytes(base64.b64decode(public, validate=True))
         for name in ASSETS.values():
             signature = Path(folder) / (name + ".minisig")
-            signature.write_bytes(base64.b64decode((directory / (name + ".sig")).read_text().strip(), validate=True))
+            signature.write_bytes(base64.b64decode((directory / (name + ".sig")).read_text(encoding="utf-8").strip(), validate=True))
             subprocess.run(["minisign", "-Vm", str(directory / name), "-p", str(key), "-x", str(signature)], check=True)
 
 

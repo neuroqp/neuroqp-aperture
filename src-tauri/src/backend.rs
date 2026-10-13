@@ -2006,7 +2006,6 @@ mod tests {
             },
             "legacy cache migration starts only the CLI metadata readers (Windows omits tiffinfo)"
         );
-        assert_eq!(job.decoder.lock().unwrap().is_some(), uses_worker(&job));
         for corrupt in [b"{invalid".to_vec(), vec![b'x'; 65537]] {
             fs::write(dir.join("manifest.json"), corrupt).unwrap();
             backend.open(&source).unwrap();

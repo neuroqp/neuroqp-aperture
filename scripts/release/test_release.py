@@ -5,6 +5,7 @@ import json
 from pathlib import Path
 import tempfile
 import unittest
+from unittest import mock
 
 spec = importlib.util.spec_from_file_location("release", Path(__file__).with_name("release.py"))
 release = importlib.util.module_from_spec(spec)
@@ -12,6 +13,17 @@ spec.loader.exec_module(release)
 
 
 class ReleaseTests(unittest.TestCase):
+    def test_windows_pnpm_shim_uses_command_interpreter(self):
+        with tempfile.TemporaryDirectory() as folder:
+            directory = Path(folder)
+            dependency = directory / "dependencies.json"
+            dependency.write_text("{}")
+            interpreter = r"C:\Windows\System32\cmd.exe"
+            shim = r"C:\setup-pnpm\pnpm.cmd"
+            with mock.patch.object(release.os, "name", "nt"), mock.patch.dict(release.os.environ, {"COMSPEC": interpreter}), mock.patch.object(release.shutil, "which", return_value=shim), mock.patch.object(release.subprocess, "check_output", return_value="version") as command:
+                release.buildinfo("windows", directory, dependency)
+            self.assertIn(mock.call((interpreter, "/d", "/c", shim, "--version"), cwd=release.ROOT, text=True, encoding="utf-8"), command.call_args_list)
+
     def test_version_and_notes(self):
         with tempfile.TemporaryDirectory() as folder:
             root = Path(folder)
