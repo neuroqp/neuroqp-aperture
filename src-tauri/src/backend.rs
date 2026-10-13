@@ -494,13 +494,59 @@ struct CacheManifest {
     native: Vec<NativeLevel>,
 }
 
+// AppImage readers live under a different mount path after each launch. The
+// containing package identifies that complete reader payload without scanning it.
+#[cfg(target_os = "linux")]
+fn appimage_tool_identity(executable: &Path, appdir: &Path, appimage: &Path) -> Option<u64> {
+    use std::os::unix::fs::MetadataExt;
+    if !appdir.is_absolute()
+        || !appdir.is_dir()
+        || !executable.starts_with(appdir)
+        || !appimage.is_absolute()
+    {
+        return None;
+    }
+    let image = fs::canonicalize(appimage).ok()?;
+    let metadata = fs::metadata(&image).ok()?;
+    if !metadata.is_file() {
+        return None;
+    }
+    let mut hasher = DefaultHasher::new();
+    "aperture-appimage-readers-v1".hash(&mut hasher);
+    image.hash(&mut hasher);
+    (
+        metadata.dev(),
+        metadata.ino(),
+        metadata.len(),
+        metadata.mtime(),
+        metadata.mtime_nsec(),
+        metadata.ctime(),
+        metadata.ctime_nsec(),
+    )
+        .hash(&mut hasher);
+    Some(hasher.finish())
+}
+
 // Metadata-only identity keeps a cache made with different decoder tools from
 // assuming that the installed reader still supports its native TIFF layout.
 fn tool_identity() -> u64 {
+    let executable = std::env::current_exe().ok();
+    #[cfg(target_os = "linux")]
+    if let (Some(executable), Some(appdir), Some(appimage)) = (
+        executable.as_deref(),
+        std::env::var_os("APPDIR"),
+        std::env::var_os("APPIMAGE"),
+    ) {
+        if let Some(identity) =
+            appimage_tool_identity(executable, Path::new(&appdir), Path::new(&appimage))
+        {
+            return identity;
+        }
+    }
     let mut hasher = DefaultHasher::new();
     // The application contains the Rust BMP reader and native worker. Bundled
     // DLLs can also change while CLI filenames remain unchanged across updates.
-    if let Ok(executable) = std::env::current_exe() {
+    if let Some(executable) = executable {
         let mut readers = vec![executable.clone()];
         if cfg!(windows) {
             readers.extend(
@@ -1817,6 +1863,55 @@ fn prune_except(root: &Path, limit: u64, protected: Option<&Path>) -> Result<(),
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn appimage_reader_identity_survives_mount_changes_and_detects_package_changes() {
+        let root = std::env::temp_dir().join(format!(
+            "aperture-package-identity-{}-{}",
+            std::process::id(),
+            NEXT_ID.fetch_add(1, Ordering::Relaxed)
+        ));
+        fs::create_dir(&root).unwrap();
+        let image = root.join("Aperture.AppImage");
+        fs::write(&image, b"aperture vips-v1").unwrap();
+        let mounts = [root.join(".mount_first"), root.join(".mount_second")];
+        let identity = |mount: &Path| {
+            appimage_tool_identity(&mount.join("usr/bin/aperture"), mount, &image).unwrap()
+        };
+        for mount in &mounts {
+            fs::create_dir_all(mount.join("usr/bin")).unwrap();
+            fs::write(mount.join("usr/bin/aperture"), b"same application").unwrap();
+            fs::write(mount.join("usr/bin/vips"), b"same bundled reader").unwrap();
+        }
+        let original = identity(&mounts[0]);
+        assert_eq!(
+            original,
+            identity(&mounts[1]),
+            "Mount locations and reader ctimes must not invalidate a cache"
+        );
+        assert!(appimage_tool_identity(&root.join("development/aperture"), &mounts[0], &image).is_none(), "Inherited AppImage environment must leave ordinary binaries on their normal reader identity");
+        let metadata = fs::metadata(&image).unwrap();
+        let modified = metadata.modified().unwrap();
+        let replacement = root.join("replacement.AppImage");
+        fs::write(&replacement, b"aperture vips-v2").unwrap();
+        fs::File::options()
+            .write(true)
+            .open(&replacement)
+            .unwrap()
+            .set_times(fs::FileTimes::new().set_modified(modified))
+            .unwrap();
+        fs::rename(replacement, &image).unwrap();
+        assert_eq!(fs::metadata(&image).unwrap().len(), metadata.len());
+        assert_eq!(fs::metadata(&image).unwrap().modified().unwrap(), modified);
+        let changed = identity(&mounts[0]);
+        assert_ne!(
+            original, changed,
+            "Changed bundled readers must invalidate old caches even with preserved size and mtime"
+        );
+        assert_eq!(changed, identity(&mounts[1]));
+        fs::remove_dir_all(root).unwrap();
+    }
 
     #[cfg(unix)]
     #[test]

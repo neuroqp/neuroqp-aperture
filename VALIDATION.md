@@ -1072,3 +1072,10 @@ passed Cargo check, the targeted updater test, strict Clippy and rustfmt. The
 native recovery test above rejects development-mode installation before this
 branch, so it does not prove retry after a real installer failure. That case
 remains part of packaged signed-upgrade acceptance.
+
+The AppImage restart-cache correction identifies mounted readers through the
+actual package file after checking executable/APPDIR containment. Temporary
+mount paths and extraction ctimes no longer invalidate persistent caches. The
+regression checks two mount locations, an inherited environment on a development
+binary, and a same-size package replacement with restored mtime. All 60 Linux
+Rust tests, strict Clippy, rustfmt and independent review passed.
