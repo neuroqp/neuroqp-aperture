@@ -973,7 +973,7 @@ The release branch adds a Windows native-reader port, Windows per-user and
 portable packages, Linux AppImage packaging, and signed-update workflows.
 The final Linux debug build passed 57 Rust tests with the production worker,
 strict Clippy, 66 frontend tests, frontend build, and formatting. Release metadata
-checks pass three tests; signature verification separately accepted signed test
+checks pass four tests; signature verification separately accepted signed test
 assets and rejected modified bytes. Native reader tests compare custom file
 callbacks with TIFF/BigTIFF decoding and exercise BMP decoding and TIFF conversion.
 
@@ -989,9 +989,43 @@ ignored under `artifacts/native-validation/`. A separate picker/window-controls
 smoke attempt was stopped when desktop focus changed; it is not counted as a
 passed picker check. No source microscopy images were modified.
 
-Windows/MSVC and Debian 12 package builds run in the feature branch's Package
-validation workflow. Their artifacts are validation builds, not public releases.
+Windows/MSVC and Debian 12 package builds share the manual Native validation
+workflow and release build implementation. Their unsigned artifacts are validation
+builds, not public releases.
 Clean-machine desktop acceptance, the Linux distro matrix, and a complete signed
 upgrade from a prior package remain required before stable release promotion.
 See `RELEASING.md` for the checklist and the distinction between updater signing
 and pending Windows publisher signing.
+
+The Debian 12 AppImage from commit `cecb787` passed bundled vips, vipsheader,
+tiffinfo, PNG/BMP/TIFF conversion, raw-preview and DeepZoom worker checks in
+[package validation](https://github.com/neuroqp/neuroqp-aperture/actions/runs/38408565452).
+The downloaded 102.58 MiB artifact also launched and rendered its native window
+on Arch/Omarchy through `--appimage-extract-and-run`. This was a launch check,
+not the full distro or image-interaction acceptance matrix. The local screenshot
+is ignored at `artifacts/package-validation/appimage-native.png`.
+
+The complete [Windows/Linux package run](https://github.com/neuroqp/neuroqp-aperture/actions/runs/38413257615)
+passed at `cbc1acb`: both optimized packages, 53 Windows and 57 Linux Rust tests,
+strict Clippy, frontend checks, and combined artifact metadata/checksums. Windows
+produced Setup and portable executables. Its smoke checked interrupted extraction,
+forced/concurrent lock contention, payload reuse and file hashes, bundled worker
+conversion, per-user install/uninstall at a Unicode path, and native window handles
+using app-local fixed WebView2. The portable screenshot shows the rendered toolbar;
+the installed screenshot was captured before first paint, so installed rendering
+remains unverified. GitHub's runner account is not a clean university standard-user
+acceptance environment. The portable download is approximately 231.5 MiB and its
+uncompressed payload approximately 710.5 MiB.
+
+The real concurrency check exposed an invalid-handle/error-code handling defect
+in the first launcher. The corrected launcher compares the handle numerically and
+captures the Windows error in the same API call. A small production-template
+regression now forces contention before expensive builds; extraction-only failures
+exit without a blocking dialog and retain diagnostics. Full package smoke then
+passed. Evidence is retained as `windows-package-evidence` in that workflow run
+and locally under `artifacts/package-validation/windows-evidence/`.
+
+The final documentation/CI-trigger cleanup does not change these tested binaries.
+The temporary feature-branch push workflow was removed; manual Native validation
+continues to invoke the same reusable package build. No release tag or public
+release was created.
