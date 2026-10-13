@@ -515,7 +515,7 @@ fn tool_identity() -> u64 {
         #[cfg(windows)]
         let filename = format!("{program}.exe");
         #[cfg(not(windows))]
-        let filename = program;
+        let filename = program.to_owned();
         let search_path = std::env::var_os("PATH").unwrap_or_default();
         let paths = std::iter::once(bundled)
             .chain(std::env::split_paths(&search_path).map(|directory| directory.join(&filename)));

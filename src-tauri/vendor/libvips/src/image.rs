@@ -1008,7 +1008,10 @@ impl VipsTarget {
 
     pub fn finish(self) {
         unsafe {
-            bindings::vips_target_finish(self.ctx);
+            // The deprecated finish symbol is absent from the Windows SDK.
+            // Preserve this upstream method's void signature; Aperture uses
+            // checked saver APIs rather than this target convenience method.
+            let _ = bindings::vips_target_end(self.ctx);
         }
     }
 

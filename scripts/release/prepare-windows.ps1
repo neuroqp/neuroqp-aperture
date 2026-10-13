@@ -54,6 +54,19 @@ Copy-Item $runtimeExe[0].Directory.FullName "$BuildDirectory/payload/webview2" -
 $licenses = New-Item -ItemType Directory -Force "$BuildDirectory/payload/licenses/libvips"
 Copy-Item "$native/LICENSE", "$native/README.md", "$native/versions.json" $licenses
 Copy-Item "$PSScriptRoot/../../LICENSE" "$BuildDirectory/payload/LICENSE.txt"
+$licenseProvenance = Get-Content "$PSScriptRoot/windows-license-provenance.json" -Raw | ConvertFrom-Json
+$sourceInventory = Get-Content "$PSScriptRoot/windows-lgpl-sources.json" -Raw | ConvertFrom-Json
+$nativeVersions = Get-Content "$native/versions.json" -Raw | ConvertFrom-Json
+foreach ($component in $sourceInventory.components) {
+    if ($nativeVersions.PSObject.Properties[$component.nativeKey].Value -ne $component.version) {
+        throw "Update the source inventory and license snapshot for $($component.component)."
+    }
+}
+if ((Get-FileHash "$PSScriptRoot/windows-native-licenses.txt" -Algorithm SHA256).Hash.ToLowerInvariant() -ne $licenseProvenance.bundledTextSha256) {
+    throw 'Native license snapshot does not match its provenance.'
+}
+Copy-Item "$PSScriptRoot/windows-native-licenses.txt", "$PSScriptRoot/windows-license-provenance.json" "$BuildDirectory/payload/licenses"
+Copy-Item "$PSScriptRoot/windows-lgpl-sources.json" "$BuildDirectory/payload/licenses"
 $notices = @"
 Aperture Windows third-party notices
 
@@ -62,10 +75,14 @@ unmodified shared libraries from the upstream Windows web build. The package
 includes the vendor LGPL license, dependency versions, and library/source links
 in licenses/libvips. Shared libraries may be replaced by compatible builds.
 Native source and build recipes: https://github.com/libvips/build-win64-mxe/tree/v$($lock.libvips.version)
+Exact LGPL component source versions and archives are listed in
+licenses/windows-lgpl-sources.json. Corresponding-source distribution is a
+first-release gate; notice collection alone does not complete that work.
 
 Microsoft Edge WebView2 Fixed Runtime $($lock.webview2.version), Copyright Microsoft.
 The complete runtime, including its embedded license and third-party credits,
-is shipped under webview2. It is serviced with Aperture releases.
+is shipped under webview2. Its Fixed Runtime license terms also appear below.
+It is serviced with Aperture releases.
 https://developer.microsoft.com/microsoft-edge/webview2/
 
 The native libraries use the Windows 10 Universal CRT supplied by Windows.
@@ -73,12 +90,15 @@ Aperture links the Rust MSVC runtime statically. No VC redistributable installer
 or Evergreen WebView2 installer is run on the user's machine.
 "@
 $notices += "`n`nVendor license`n" + (Get-Content "$native/LICENSE" -Raw)
+$notices += "`n`n" + (Get-Content "$PSScriptRoot/windows-native-licenses.txt" -Raw)
 $notices | Set-Content "$BuildDirectory/native-notices.txt" -Encoding utf8
 $info = [ordered]@{
     architecture = 'x86_64-pc-windows-msvc'
     libvips = $lock.libvips
     webview2 = $lock.webview2
-    nativeComponents = (Get-Content "$native/versions.json" -Raw | ConvertFrom-Json)
+    nativeComponents = $nativeVersions
+    licenseProvenance = $licenseProvenance
+    correspondingSources = $sourceInventory
     rustCrt = 'static'
 }
 $info | ConvertTo-Json -Depth 8 | Set-Content "$BuildDirectory/dependencies.json" -Encoding utf8

@@ -70,6 +70,10 @@ application directories; Windows uses user-local application directories.
 Generated display data uses a 2 GiB soft cache limit. Saving TIFF annotations can
 require temporary disk space proportional to the source image. Portable means
 no installed application registration; it does not mean zero local files.
+Portable runtimes are retained by version to avoid deleting files used by another
+running copy. After closing Aperture, old payload folders under
+`%LOCALAPPDATA%\NeuroQP\Aperture\portable` can be removed; launching that version
+again will extract its payload. This does not remove image caches or preferences.
 
 ## Signing and credentials
 
@@ -94,6 +98,14 @@ validation must not receive release secrets. Only reviewed release-tag builds
 use the updater key. Treat workflow and release-script changes as security-relevant.
 MIT covers Aperture source; retain third-party licenses and satisfy their source
 and redistribution requirements for the actual libraries bundled in each build.
+Before distributing the first release candidate, assemble the corresponding native
+library sources and build material. Windows inventory and exact upstream versions
+are in `scripts/release/windows-lgpl-sources.json`; the build checks them against
+the bundled library versions. Linux BUILDINFO records the Debian package versions
+and libvips source hash. Notices and source links alone are not presented as a
+completed corresponding-source distribution. Preserve and publish the applicable
+sources/patches alongside downloads, or establish a suitable source-offer process.
+This preparation remains a first-publication requirement.
 
 ## Candidate and stable releases
 
@@ -120,6 +132,13 @@ commit, `SHA256SUMS` hash, operating systems, and acceptance results in the rele
 PR or associated test record. Run **Promote release** with that identity and the
 completed desktop-acceptance confirmation. Promotion verifies the asset set and
 checksums, then marks the same release stable/latest. It does not rebuild.
+
+Run `promote-release.yml` on `main` with `tag` such as `v0.2.0`, `source_sha`
+and `checksums_sha256` copied from the candidate release notes, and
+`desktop_acceptance` set to `accepted` after completing the checks below.
+`checksums_sha256` is the digest of the entire `SHA256SUMS` file. Promotion also
+verifies updater signatures, the unchanged tag, main ancestry, and increasing
+stable versions. It preserves every candidate asset ID and byte.
 
 If a candidate fails, fix it in a new PR and issue a new version/tag. Never change
 the bytes behind an already-tested release identity. If a stable release has a

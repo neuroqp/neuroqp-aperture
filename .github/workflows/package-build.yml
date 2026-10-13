@@ -56,6 +56,11 @@ jobs:
         with:
           toolchain: 1.98.0
           components: rustfmt, clippy
+      - uses: Swatinem/rust-cache@49a0bdc70d2e1b713ca9e2869b211fcce03d3c1c # v2
+        with:
+          workspaces: src-tauri
+          cache-on-failure: true
+          key: debian12-vips8.18-${{ inputs.signed && 'signed' || 'unsigned' }}
       - run: pnpm install --frozen-lockfile
       - run: python3 scripts/release/release.py check && python3 scripts/release/test_release.py
       - run: pnpm format:check && pnpm test && pnpm build
@@ -133,6 +138,8 @@ jobs:
       - uses: ilammy/msvc-dev-cmd@0b201ec74fa43914dc39ae48a89fd1d8cb592756 # v1
         with:
           arch: x64
+      - name: Install pinned portable packager
+        run: choco install nsis --version=3.11 --yes --no-progress --allow-downgrade
       - uses: pnpm/action-setup@f40ffcd9367d9f12939873eb1018b921a783ffaa # v4
         with:
           version: 9.15.9
@@ -155,6 +162,12 @@ jobs:
         run: |
           "APERTURE_NATIVE_DIR=$env:GITHUB_WORKSPACE\build\windows\native" >> $env:GITHUB_ENV
           "$env:GITHUB_WORKSPACE\build\windows\payload" >> $env:GITHUB_PATH
+      - uses: Swatinem/rust-cache@49a0bdc70d2e1b713ca9e2869b211fcce03d3c1c # v2
+        with:
+          workspaces: src-tauri
+          cache-on-failure: true
+          key: windows-msvc-vips8.18.7-${{ inputs.signed && 'signed' || 'unsigned' }}
+          env-vars: APERTURE_NATIVE_DIR;LIBCLANG_PATH
       - run: pnpm test; if ($LASTEXITCODE) { exit $LASTEXITCODE }; pnpm build
       - run: cargo build --manifest-path src-tauri/Cargo.toml --target x86_64-pc-windows-msvc --features custom-protocol --locked
       - run: cargo test --manifest-path src-tauri/Cargo.toml --target x86_64-pc-windows-msvc --locked

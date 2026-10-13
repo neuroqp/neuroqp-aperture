@@ -191,6 +191,8 @@ No microscopy source files are modified.
   channel stacks (first Z/time position). OME-TIFF mapping and contiguous
   single-directory ImageJ hyperstacks are not supported. Ambiguous grayscale
   alpha layouts are rejected rather than interpreted as scientific channels.
+- BMP decoding uses a 512 MiB decoded-allocation limit; the large-image streaming
+  paths apply to TIFF, not BMP.
 - Supported display pixels are unsigned 8/16-bit grayscale, RGB, and RGBA in
   grayscale/RGB/sRGB color spaces. Signed, floating-point, CMYK, and other
   unsupported channel layouts report an unsupported-image error.

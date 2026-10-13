@@ -68,6 +68,8 @@ jobs:
         run: |
           python3 scripts/release/release.py metadata build/release --version "$VERSION" --source-sha "$SOURCE_SHA"
           python3 scripts/release/release.py verify build/release --version "$VERSION" --source-sha "$SOURCE_SHA" --cryptographic
+          remote_sha=$(git ls-remote origin "refs/tags/v$VERSION" "refs/tags/v$VERSION^{}" | sort -k2 | tail -n1 | cut -f1)
+          test "$remote_sha" = "$SOURCE_SHA"
           python3 scripts/release/release.py notes "$VERSION" > build/release-notes.md
           printf '\nCandidate. Desktop acceptance is required before promotion.\n\nSource commit: `%s`\nSHA256SUMS digest: `%s`\n' "$SOURCE_SHA" "$(sha256sum build/release/SHA256SUMS | cut -d ' ' -f1)" >> build/release-notes.md
       - name: Publish candidate outside latest

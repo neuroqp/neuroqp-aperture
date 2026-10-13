@@ -966,3 +966,28 @@ Cancellation kills/reaps image workers and subprocesses, aborts active frontend
 downloads/histogram loading, and releases queued backend tile requests. A bounded
 annotation metadata read already inside its parser call finishes that call before
 its cancellation check; canceled work cannot publish annotations or restart loading.
+
+## Windows/Linux packaging and updates, October 13, 2026
+
+The release branch adds a Windows native-reader port, Windows per-user and
+portable packages, Linux AppImage packaging, and signed-update workflows.
+The final Linux debug build passed 57 Rust tests with the production worker,
+strict Clippy, 66 frontend tests, frontend build, and formatting. Release metadata
+checks pass three tests; signature verification separately accepted signed test
+assets and rejected modified bytes. Native reader tests compare custom file
+callbacks with TIFF/BigTIFF decoding and exercise BMP decoding and TIFF conversion.
+
+A real Linux Tauri/WebKit session verified the update dialog, displayed package
+version, development-build update restriction, preference toggle/persistence,
+and dialog dismissal. Native IPC opened the BMP fixture and produced its 65 × 49
+preview and tiles without errors. Reports and a rendered dialog screenshot are
+ignored under `artifacts/native-validation/`. A separate picker/window-controls
+smoke attempt was stopped when desktop focus changed; it is not counted as a
+passed picker check. No source microscopy images were modified.
+
+Windows/MSVC and Debian 12 package builds run in the feature branch's Package
+validation workflow. Their artifacts are validation builds, not public releases.
+Clean-machine desktop acceptance, the Linux distro matrix, and a complete signed
+upgrade from a prior package remain required before stable release promotion.
+See `RELEASING.md` for the checklist and the distinction between updater signing
+and pending Windows publisher signing.

@@ -31,9 +31,20 @@ function Assert-Payload($Directory) {
     } finally { $env:PATH = $originalPath }
 }
 
-function Assert-NativeWindow($Directory, $Name) {
+function Assert-NativeWindow($Directory, $Name, $Launcher = $null) {
     $Directory = (Resolve-Path $Directory).Path
-    $process = Start-Process "$Directory/aperture.exe" -PassThru
+    if ($Launcher) {
+        Wait-Success (Start-Process $Launcher -PassThru)
+        $deadline = [DateTime]::UtcNow.AddSeconds(15)
+        do {
+            $children = @(Get-CimInstance Win32_Process -Filter "Name='aperture.exe'" | Where-Object { $_.ExecutablePath -eq "$Directory\aperture.exe" })
+            if ($children.Count -eq 0) { Start-Sleep -Milliseconds 250 }
+        } until ($children.Count -gt 0 -or [DateTime]::UtcNow -ge $deadline)
+        if ($children.Count -ne 1) { throw 'Portable launcher did not start one Aperture process.' }
+        $process = Get-Process -Id $children[0].ProcessId
+    } else {
+        $process = Start-Process "$Directory/aperture.exe" -PassThru
+    }
     try {
         $deadline = [DateTime]::UtcNow.AddSeconds(45)
         do {
@@ -87,8 +98,7 @@ Wait-Success (Start-Process $Portable '--aperture-extract-only' -PassThru)
 if ((Get-Item "$payloadRoot/aperture.exe").LastWriteTimeUtc -ne $before) { throw 'Portable reused launch re-extracted the application.' }
 if (Test-Path "$payloadRoot/.aperture-installed") { throw 'Portable mode contains an installed marker.' }
 Assert-Payload $payloadRoot
-$env:APERTURE_PORTABLE = '1'
-try { Assert-NativeWindow $payloadRoot 'portable' } finally { Remove-Item Env:APERTURE_PORTABLE }
+Assert-NativeWindow $payloadRoot 'portable' $Portable
 
 $installed = Join-Path $env:LOCALAPPDATA 'Aperture packaging smoke µ'
 if (Test-Path $installed) { throw 'Install smoke directory must be fresh.' }

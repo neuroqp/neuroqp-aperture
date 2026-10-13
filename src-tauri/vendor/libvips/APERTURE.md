@@ -6,6 +6,7 @@ The Rust wrappers and Linux bindings remain upstream's; Aperture adds:
 - A Rust File-backed VipsSourceCustom reader. This avoids the filename option
   parser, symlink privileges, copying source pixels, and sharing CRT descriptors
   across MSVC and MinGW-built DLLs.
+- Target finalization calls the supported vips_target_end API.
 - Suppression of upstream generated-code warnings for the path dependency.
 
 Windows builds need LLVM/libclang and APERTURE_NATIVE_DIR pointing to the SDK

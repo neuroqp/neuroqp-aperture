@@ -3,17 +3,18 @@
 set -euo pipefail
 export DEBIAN_FRONTEND=noninteractive
 apt-get update
-apt-get install -y --no-install-recommends ca-certificates curl git build-essential pkg-config python3 meson ninja-build cmake patchelf file squashfs-tools xz-utils libfuse2 libgtk-3-dev libwebkit2gtk-4.1-dev libayatana-appindicator3-dev librsvg2-dev libtiff-dev libtiff-tools libjpeg-dev libpng-dev libwebp-dev libheif-dev libexif-dev liblcms2-dev libexpat1-dev liborc-0.4-dev
+apt-get install -y --no-install-recommends ca-certificates curl git build-essential pkg-config python3 meson ninja-build cmake patchelf file squashfs-tools xz-utils libfuse2 libgtk-3-dev libwebkit2gtk-4.1-dev libayatana-appindicator3-dev librsvg2-dev libtiff-dev libtiff-tools libjpeg-dev libpng-dev libwebp-dev libheif-dev libexif-dev liblcms2-dev libexpat1-dev liborc-0.4-dev libarchive-dev
 mkdir -p build/linux build/release
 curl --fail --location --retry 3 https://github.com/libvips/libvips/releases/download/v8.18.0/vips-8.18.0.tar.xz -o build/linux/vips.tar.xz
 echo 'b85ab92280c30d22f5c8fe2f68b809cddb7eaac437d8c33474475dac84ddc574  build/linux/vips.tar.xz' | sha256sum --check
 tar -xf build/linux/vips.tar.xz -C build/linux
-meson setup build/linux/vips-build build/linux/vips-8.18.0 --prefix=/usr -Dintrospection=disabled -Dvapi=false -Dexamples=false -Dcplusplus=false -Dmodules=disabled
+meson setup build/linux/vips-build build/linux/vips-8.18.0 --prefix=/usr -Dintrospection=disabled -Dvapi=false -Dexamples=false -Dcplusplus=false -Dmodules=disabled -Darchive=enabled -Djpeg=enabled -Dpng=enabled -Dtiff=enabled
 meson compile -C build/linux/vips-build
 meson install -C build/linux/vips-build
 ldconfig
 pkg-config --atleast-version=8.18.0 vips
 pkg-config --atleast-version=4.5.0 libtiff-4
+vips -l dzsave
 python3 - <<'PY'
 import json, subprocess
 from pathlib import Path

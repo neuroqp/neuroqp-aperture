@@ -35,7 +35,8 @@ def smoke(command):
         bitmap = folder / "source.bmp"
         bmp(bitmap)
         bitmap_tiff = folder / "bitmap.tif"
-        requests = [{"Command": {"program": "vips", "args": ["copy", str(source), str(converted)]}}, {"RawPreview": {"input": str(converted), "output": str(preview), "max_edge": 32, "threads": 1}}, {"Command": {"program": "vips", "args": ["copy", str(bitmap), str(bitmap_tiff)]}}]
+        pyramid = folder / "pyramid"
+        requests = [{"Command": {"program": "vips", "args": ["copy", str(source), str(converted)]}}, {"RawPreview": {"input": str(converted), "output": str(preview), "max_edge": 32, "threads": 1}}, {"Command": {"program": "vips", "args": ["copy", str(bitmap), str(bitmap_tiff)]}}, {"Command": {"program": "vips", "args": ["dzsave", str(converted), str(pyramid), "--tile-size=256", "--overlap=0", "--suffix=.png[strip]", "--depth=onepixel"]}}]
         process = subprocess.run(command + ["--image-worker"], input="".join(json.dumps(r) + "\n" for r in requests), capture_output=True, text=True, timeout=60, env=os.environ.copy())
         if process.returncode:
             raise RuntimeError(f"Packaged image worker failed: {process.stderr}")
@@ -46,7 +47,9 @@ def smoke(command):
             raise RuntimeError("Packaged worker did not produce TIFF and preview pixels")
         if hashlib.sha256(source.read_bytes()).hexdigest() != original:
             raise RuntimeError("Worker changed its source image")
-        print("Packaged worker: PNG/BMP decode, TIFF write/read and preview passed. Desktop interaction still requires acceptance.")
+        if not pyramid.with_suffix(".dzi").is_file() or not list((folder / "pyramid_files").rglob("*.png")):
+            raise RuntimeError("Packaged worker did not produce DeepZoom metadata and tiles")
+        print("Packaged worker: PNG/BMP decode, TIFF write/read, preview and DeepZoom passed. Desktop interaction still requires acceptance.")
 
 
 if __name__ == "__main__":
