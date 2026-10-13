@@ -178,7 +178,6 @@ export function bindUpdates(
         }
       } catch (error) {
         status.textContent = `Update failed: ${String(error)}`;
-        ready = false;
         if (prepared) finish();
         show();
       } finally {

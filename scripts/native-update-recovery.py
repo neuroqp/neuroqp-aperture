@@ -70,13 +70,17 @@ def main():
         url = request('GET', route + '/url')
         request('POST', route + '/url', {'url': url + '?colorBenchmark=1'})
         wait('return !!window.__apertureViewer && !!window.__TAURI_INTERNALS__')
-        js('''const original=window.fetch;window.__updateTest={installs:0,confirmations:0};
+        js('''const original=window.fetch;window.__updateTest={installs:0,confirmations:0,downloads:0,offline:false};
         window.fetch=function(url,options){
           const path=decodeURIComponent(String(url));let mock=false,value=null;
           if(path.includes('plugin:dialog|open')) {mock=true;value=''' + json.dumps(str(editable)) + ''';}
           if(path.includes('plugin:dialog|message')) {mock=true;value='Cancel';window.__updateTest.confirmations++;}
           if(path.endsWith('/check_update')) {mock=true;value={version:'99.0.0',notes:'Native guard check'};}
-          if(path.endsWith('/download_update')) mock=true;
+          if(path.endsWith('/download_update')) {
+            window.__updateTest.downloads++;
+            if(window.__updateTest.offline) return Promise.reject(new Error('Update download is offline'));
+            mock=true;
+          }
           if(path.endsWith('/install_update')) window.__updateTest.installs++;
           if(mock) return Promise.resolve(new Response(JSON.stringify(value),{headers:{'Content-Type':'application/json','Tauri-Response':'ok'}}));
           return original.call(this,url,options);
@@ -96,6 +100,7 @@ def main():
         click('update-check')
         wait("return !document.getElementById('update-action').hidden && !document.getElementById('update-action').disabled")
         download()
+        js('window.__updateTest.offline=true')
         click('update-action')
         choose('cancel')
         wait("return document.getElementById('update-dialog').open && !document.getElementById('update-action').disabled")
@@ -110,18 +115,22 @@ def main():
         wait('return window.__updateTest.confirmations===1')
         assert js("return document.getElementById('filename').classList.contains('unsaved') && document.getElementById('point-count').textContent==='1'")
         click('update-button')
-        download()
         click('update-action')
+        retry = wait("const t=window.__updateTest,prompt=document.getElementById('update-unsaved-dialog').open;return prompt || t.downloads>1 ? {prompt,downloads:t.downloads,installs:t.installs,action:document.getElementById('update-action').textContent} : null")
+        assert retry['prompt'] and retry['downloads'] == 1 and retry['installs'] == 1, (
+            'Install retry must use the downloaded update while offline: ' + json.dumps(retry))
         choose('save')
         wait("return document.getElementById('save-dialog').open")
         click('save-overwrite-button')
         wait("return document.getElementById('update-status').textContent.includes('Update failed') && window.__updateTest.installs===2")
         assert js("return !document.getElementById('filename').classList.contains('unsaved')")
+        assert js('return window.__updateTest.downloads===1 && window.__updateTest.offline')
         assert editable.read_bytes() != before, 'Native annotation save did not write the owned copy'
         assert source.read_bytes() == before, 'Source fixture changed'
         result = {'cancelPreservesEdits': True, 'failedDiscardInstallPreservesDirty': True,
                   'subsequentOpenWarns': True, 'editingRestored': True, 'savePersistsAnnotations': True,
                   'nativeDevelopmentInstallRejected': True,
+                  'offlineInstallRetryUsesDownloadedUpdate': True, 'downloadAttempts': 1,
                   'mocked': ['file chooser', 'confirmation response', 'update metadata', 'download']}
         args.output.write_text(json.dumps(result, indent=2) + '\n')
         print(json.dumps(result))
