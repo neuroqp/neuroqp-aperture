@@ -116,27 +116,29 @@ the bundled library versions. Linux BUILDINFO records the Debian package version
 and libvips source hash. Notices and source links alone are not presented as a
 completed corresponding-source distribution.
 
-`scripts/release/corresponding-source.json` currently records `unassembled`.
-The tag workflow stops before signed builds until it can download and verify the
-reviewed source material. Candidate metadata and promotion also require that
-material, its review record, and matching native dependency identities. This
-first-release preparation remains unfinished; changing a checkbox or adding
-source URLs cannot satisfy the gate.
+The reviewed first-release archive is published under
+[`source-v0.1.0`](https://github.com/neuroqp/neuroqp-aperture/releases/tag/source-v0.1.0),
+separate from application releases and excluded from latest.
+`scripts/release/corresponding-source.json` pins its checksum and both native
+dependency identities. [SOURCE-MATERIAL.md](scripts/release/SOURCE-MATERIAL.md)
+records the review and historical build-environment limits. The workflow downloads
+and verifies the archive, then compares its identities against actual BUILDINFO.
+An identity mismatch blocks binary uploads and requires refreshed material.
 
 Unsigned native builds and package smoke tests remain available. Immediately
 before either platform uploads binary artifacts, the workflow downloads and
 verifies reviewed source material against that platform's actual BUILDINFO.
-While source is `unassembled`, the job deliberately fails at this upload gate
-after builds and smoke checks; no binary artifacts, including failed packages,
+If source material is missing or fails verification, the job stops at this upload
+gate after builds and smoke checks; no binary artifacts, including failed packages,
 are uploaded. Windows screenshots, process JSON, and text diagnostics can still
 be retained. Public binary CI downloads require source material too; signing or
 calling a build validation does not establish redistribution compliance.
 
-When material is ready, unsigned package sets include the source archive and its
-review record in `SHA256SUMS`, and aggregate metadata checks both native identities.
+Unsigned package sets include the verified source archive and its review record
+in `SHA256SUMS`, and aggregate metadata checks both native identities.
 The gate does not assemble sources or certify their distribution.
 
-To prepare the source artifact in a reviewed follow-up:
+To refresh the source artifact when dependencies change:
 
 1. Assemble `Aperture-Corresponding-Source.tar.xz` with the applicable exact-version
    sources, build recipes/configuration, patches, and license material for the
@@ -153,8 +155,8 @@ To prepare the source artifact in a reviewed follow-up:
 3. Publish the reviewed archive under a fixed source-material tag in this source
    repository, outside latest, then update `corresponding-source.json` through a
    PR with `status: "ready"`, its version-tag asset URL, the archive's SHA-256,
-   and both identity hashes. This preparation does not publish anything today.
-   The workflow downloads actual bytes, checks their pinned hash and identity
+   and both identity hashes. Use a new source-material tag and preserve published
+   bytes. The workflow downloads actual bytes, checks their pinned hash and identity
    record, then compares identities against both completed binary builds.
 
 The gate checks reviewed byte/dependency identities. It does not determine
