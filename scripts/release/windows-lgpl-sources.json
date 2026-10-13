@@ -1,12 +1,12 @@
 {
-  "status": "First-release gate: corresponding-source distribution has not been assembled or verified.",
+  "status": "Versioned LGPL source inventory. Publication readiness is tracked and enforced separately by scripts/release/corresponding-source.json.",
   "vendorBuildRecipes": "https://github.com/libvips/build-win64-mxe/archive/refs/tags/v8.18.7.tar.gz",
   "instructions": [
     "Download and preserve the listed exact-version upstream source archives. Verify their hashes and record them in the source distribution.",
     "Include the vendor v8.18.7 Windows build recipes, corresponding MXE revision, and all applied patches. Inspect the vendor build container/recipes to confirm the complete source set, including statically incorporated transitive components.",
     "Publish the corresponding sources and build material beside the Windows binary assets, or establish an applicable source-offer mechanism before the first public release.",
     "The LGPL shared libraries remain replaceable. Aperture MIT licensing permits modification and reverse engineering needed to debug modified libraries.",
-    "Current packaging automation bundles notices and source inventory only. It does not assemble or certify the complete corresponding-source distribution."
+    "Packaging verifies the reviewed archive bytes and native dependency identities. Source completeness review remains separate from build automation."
   ],
   "components": [
     {

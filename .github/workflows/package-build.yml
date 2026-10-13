@@ -9,6 +9,9 @@ on:
       source_sha:
         type: string
         required: true
+      build_upgrade_fixture:
+        type: boolean
+        default: false
     secrets:
       TAURI_SIGNING_PRIVATE_KEY:
         required: false
@@ -37,8 +40,10 @@ jobs:
         env:
           SIGNED: ${{ inputs.signed }}
           SIGNING_KEY: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY }}
+          BUILD_UPGRADE_FIXTURE: ${{ inputs.build_upgrade_fixture }}
         run: |
           if [ "$SIGNED" = true ]; then
+            test "$BUILD_UPGRADE_FIXTURE" != true
             test "$GITHUB_REPOSITORY" = neuroqp/neuroqp-aperture
             test "$GITHUB_EVENT_NAME" = push
             case "$GITHUB_REF" in refs/tags/v*) ;; *) exit 1 ;; esac
@@ -133,8 +138,10 @@ jobs:
         env:
           SIGNED: ${{ inputs.signed }}
           SIGNING_KEY: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY }}
+          BUILD_UPGRADE_FIXTURE: ${{ inputs.build_upgrade_fixture }}
         run: |
           if ($env:SIGNED -eq 'true') {
+            if ($env:BUILD_UPGRADE_FIXTURE -eq 'true') { throw 'Upgrade fixtures are forbidden in signed release builds' }
             if ($env:GITHUB_REPOSITORY -ne 'neuroqp/neuroqp-aperture' -or $env:GITHUB_EVENT_NAME -ne 'push' -or !$env:GITHUB_REF.StartsWith('refs/tags/v') -or !$env:SIGNING_KEY) { throw 'Trusted release tag and signing key required' }
           }
       - uses: ilammy/msvc-dev-cmd@0b201ec74fa43914dc39ae48a89fd1d8cb592756 # v1
@@ -227,5 +234,18 @@ jobs:
         with:
           name: packages-windows
           path: build/release/*
+          if-no-files-found: error
+          retention-days: 14
+      - name: Build unsigned prior-version Windows upgrade fixture
+        if: ${{ inputs.build_upgrade_fixture && !inputs.signed }}
+        run: pwsh scripts/release/build-windows-upgrade-fixture.ps1
+      - name: Verify fixture corresponding source before upload
+        if: ${{ inputs.build_upgrade_fixture && !inputs.signed }}
+        run: python scripts/release/release.py source-material build/upgrade-fixture --platform windows --upgrade-fixture
+      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
+        if: ${{ inputs.build_upgrade_fixture && !inputs.signed }}
+        with:
+          name: windows-upgrade-fixture
+          path: build/upgrade-fixture/
           if-no-files-found: error
           retention-days: 14

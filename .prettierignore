@@ -8,3 +8,4 @@ tests/fixtures
 src-tauri/vendor
 build
 artifacts
+scripts/release/rust-runtime-licenses

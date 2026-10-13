@@ -2,6 +2,11 @@ name: Native validation
 
 on:
   workflow_dispatch:
+    inputs:
+      build_upgrade_fixture:
+        description: Build an unsigned prior-version Windows Setup for desktop upgrade testing
+        type: boolean
+        default: false
 
 permissions:
   contents: read
@@ -12,3 +17,4 @@ jobs:
     with:
       source_sha: ${{ github.sha }}
       signed: false
+      build_upgrade_fixture: ${{ inputs.build_upgrade_fixture }}

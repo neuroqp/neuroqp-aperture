@@ -1,2 +1,7 @@
 # Preserve verbatim upstream license bytes and their recorded hash on Windows.
 scripts/release/windows-native-licenses.txt -text -whitespace
+scripts/release/rust-runtime-licenses/* -text -whitespace
+
+# Release source identities compare exact lockfile bytes on both platforms.
+pnpm-lock.yaml text eol=lf
+src-tauri/Cargo.lock text eol=lf

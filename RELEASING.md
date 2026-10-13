@@ -48,6 +48,22 @@ Full native builds are deliberately separate from normal PR checks. Run package
 validation when packaging, platform-specific code, toolchains, or native
 libraries change. A successful worker test is not desktop acceptance.
 
+For first-release Windows upgrade testing, dispatch **Native validation** with
+`build_upgrade_fixture: true`. After preserving the normal unsigned packages and
+verifying corresponding source, the Windows job builds a separate `0.0.9` Setup
+fixture. Its loopback feed retains the production public key and signed-version
+checks. The `windows-upgrade-fixture` artifact contains the installer, exact test
+deltas, build identity, notices and verified source material. It receives no
+signing secrets and cannot be enabled in a signed release build. Use it only in
+an isolated desktop VM with the actual candidate installer and signature.
+
+For the first-release Linux upgrade test, follow the
+[local prior-AppImage recipe](scripts/release/LINUX-UPGRADE-FIXTURE.md). It builds
+an unsigned `0.0.9` fixture in a separate QA checkout with the production public
+key and a test-only loopback feed, records its provenance and version deltas,
+then runs the native updater harness against the exact signed candidate.
+Keep this fixture local; it is not a release or CI download asset.
+
 ## Package behavior
 
 - **Setup:** `Aperture-Setup-x64.exe` installs under the current user's local
@@ -107,27 +123,32 @@ the bundled library versions. Linux BUILDINFO records the Debian package version
 and libvips source hash. Notices and source links alone are not presented as a
 completed corresponding-source distribution.
 
-`scripts/release/corresponding-source.json` currently records `unassembled`.
-The tag workflow stops before signed builds until it can download and verify the
-reviewed source material. Candidate metadata and promotion also require that
-material, its review record, and matching native dependency identities. This
-first-release preparation remains unfinished; changing a checkbox or adding
-source URLs cannot satisfy the gate.
+The reviewed first-release archive is published under
+[`source-v0.1.0`](https://github.com/neuroqp/neuroqp-aperture/releases/tag/source-v0.1.0),
+separate from application releases and excluded from latest.
+`scripts/release/corresponding-source.json` pins its checksum, both native
+dependency identities, exact Cargo/pnpm lock hashes and the archived application
+source-inventory hash. [SOURCE-MATERIAL.md](scripts/release/SOURCE-MATERIAL.md)
+records the review and historical build-environment limits. The workflow downloads
+and verifies the archive, then compares its identities against actual BUILDINFO.
+Checkout lock changes block source preflight before downloading.
+An identity mismatch blocks binary uploads and requires refreshed material.
 
 Unsigned native builds and package smoke tests remain available. Immediately
 before either platform uploads binary artifacts, the workflow downloads and
 verifies reviewed source material against that platform's actual BUILDINFO.
-While source is `unassembled`, the job deliberately fails at this upload gate
-after builds and smoke checks; no binary artifacts, including failed packages,
+If source material is missing or fails verification, the job stops at this upload
+gate after builds and smoke checks; no binary artifacts, including failed packages,
 are uploaded. Windows screenshots, process JSON, and text diagnostics can still
 be retained. Public binary CI downloads require source material too; signing or
 calling a build validation does not establish redistribution compliance.
 
-When material is ready, unsigned package sets include the source archive and its
-review record in `SHA256SUMS`, and aggregate metadata checks both native identities.
+Unsigned package sets include the verified source archive and its review record
+in `SHA256SUMS`, and aggregate metadata checks both native identities and each
+build's application lock hashes.
 The gate does not assemble sources or certify their distribution.
 
-To prepare the source artifact in a reviewed follow-up:
+To refresh the source artifact when dependencies change:
 
 1. Assemble `Aperture-Corresponding-Source.tar.xz` with the applicable exact-version
    sources, build recipes/configuration, patches, and license material for the
@@ -144,9 +165,19 @@ To prepare the source artifact in a reviewed follow-up:
 3. Publish the reviewed archive under a fixed source-material tag in this source
    repository, outside latest, then update `corresponding-source.json` through a
    PR with `status: "ready"`, its version-tag asset URL, the archive's SHA-256,
-   and both identity hashes. This preparation does not publish anything today.
-   The workflow downloads actual bytes, checks their pinned hash and identity
-   record, then compares identities against both completed binary builds.
+   both native identity hashes, `application_lockfiles_sha256` for `pnpm-lock.yaml`
+   and `src-tauri/Cargo.lock`, and `application_source_inventory_sha256`. Verify
+   those exact lock bytes against the archived application source inventory,
+   which the first manifest must pin under `inventory_sha256`. Use a new
+   source-material tag and preserve published
+   bytes. The workflow downloads actual bytes, checks their pinned hash and identity
+   record, then compares native identities and lock hashes against both completed
+   binary builds.
+
+The separate unsigned prior-version fixture must use `source-material --platform
+windows --upgrade-fixture`. Its preserved `test-deltas/src-tauri/Cargo.lock` may
+change only the aperture root version from `0.1.0` to `0.0.9`; its actual BUILDINFO must hash
+that exact file. Production upload and metadata gates have no fixture exception.
 
 The gate checks reviewed byte/dependency identities. It does not determine
 license obligations or prove that the archive's contents are complete or
@@ -199,7 +230,10 @@ Use disposable copies of generated fixtures for saving. Never modify source
 microscopy datasets. Record actual results rather than marking an untested item
 as passed.
 
-1. **Windows 10/11 x64 standard user:** install without elevation, launch from
+For `0.1.0`, Windows acceptance covers Windows 11. Windows 10 remains unverified
+and does not block the first release; do not describe it as validated.
+
+1. **Windows 11 x64 standard user:** install without elevation, launch from
    shortcut, open PNG/JPEG/BMP/TIFF/BigTIFF, and save/reopen point annotations.
    Test on a clean machine without libvips, Rust, Node, or an installed WebView2.
    Check non-ASCII names, spaces/brackets, paths on another drive, and an allowed
@@ -213,13 +247,15 @@ as passed.
    file chooser, image formats, annotation save, and cancellation. Confirm no
    system libvips tools are needed. Check a read-only AppImage fails updating
    gracefully and retains the running version.
-4. **Upgrade from a previous signed test build:** check no update, update available,
+4. **Upgrade from an isolated prior-version test build:** check no update, update available,
    offline/error handling, notes, opt-out, deferral, and progress. Save/Discard/Cancel
    must work for unsaved annotations. Verify an altered payload is rejected,
    image workers stop before replacement, preferences survive, the new version
-   launches, and uninstall leaves source images untouched. Use a test configuration
-   and test signing key/feed for destructive upgrade tests; never weaken production
-   signature verification or point production clients at an experimental feed.
+   launches, and uninstall leaves source images untouched. Use a prior-version
+   test configuration with a loopback feed and the production public key to
+   verify the exact candidate bytes and signature. The prior fixture itself can
+   be unsigned; its incoming update must pass production signature and version
+   checks. Never weaken those checks or point production clients at a test feed.
 
 The first release still needs these platform acceptance results. Automated
 compile and worker checks are useful evidence, but cannot establish the behavior
