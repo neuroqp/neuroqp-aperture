@@ -7,6 +7,10 @@ The companion `corresponding-source.json` records publication readiness and the
 archive checksum. Inventory assembly labels inside the archive are historical
 records; they do not replace that reviewed publication record.
 
+Windows archive inputs are selected from the verified inventory plus explicit
+metadata files. Unpacked audit scratch remains excluded. The verifier checks
+those publication inputs, and archive assembly preserves that selection.
+
 The Windows review covered 42 native executable/library files and all 28 vendor
 component versions, recipe sources and patches, the librsvg locked crate closure,
 GVDB, compiler runtimes, NSIS and its Tauri installer plugin. The vendor does not
