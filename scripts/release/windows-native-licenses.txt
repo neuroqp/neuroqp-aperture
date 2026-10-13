@@ -6213,7 +6213,7 @@ freely, subject to the following restrictions:
 
 ========================================================================
 llvm
-Source: https://raw.githubusercontent.com/llvm/llvm-project/llvmorg-20.1.8/libcxx/LICENSE.TXT
+Source: https://raw.githubusercontent.com/llvm/llvm-project/llvmorg-23.1.2/libcxx/LICENSE.TXT
 SHA256: 539dd7aed86e8a4f12cbdd0e6c50c189c7d74847e4fecc64ce2c6ee3a01da38b
 
 ==============================================================================
@@ -6531,7 +6531,7 @@ THE SOFTWARE.
 
 ========================================================================
 llvm
-Source: https://raw.githubusercontent.com/llvm/llvm-project/llvmorg-20.1.8/libunwind/LICENSE.TXT
+Source: https://raw.githubusercontent.com/llvm/llvm-project/llvmorg-23.1.2/libunwind/LICENSE.TXT
 SHA256: b5efebcaca80879234098e52d1725e6d9eb8fb96a19fce625d39184b705f7b6d
 
 ==============================================================================
