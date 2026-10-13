@@ -72,6 +72,14 @@ pub fn open_image(input: &str) -> Result<libvips::VipsImage, String> {
         .filter(|_| input.ends_with(']'))
         .map_or((input, ""), |(p, o)| (p, o.strip_suffix(']').unwrap_or(o)));
     let path = source_path(Path::new(path)).map_err(|e| e.to_string())?;
+    // Native .v files are scratch outputs created by Aperture, never selectable
+    // source images. libvips requires a real filename to map this format.
+    // The explicit loader takes the literal path, bypassing option parsing.
+    if path.extension().is_some_and(|e| e == "v") {
+        let path = fs::canonicalize(&path).map_err(|e| e.to_string())?;
+        return libvips::ops::vipsload(path.to_str().ok_or("Scratch image path is not UTF-8")?)
+            .map_err(|e| e.to_string());
+    }
     if path
         .extension()
         .is_some_and(|e| e.eq_ignore_ascii_case("bmp"))

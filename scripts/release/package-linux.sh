@@ -6,7 +6,7 @@ python3 scripts/release/notices.py linux build/linux/native-notices.txt build/re
 python3 - <<'PY'
 import json
 from pathlib import Path
-files = {'usr/bin/vips':'/usr/bin/vips', 'usr/bin/vipsheader':'/usr/bin/vipsheader', 'usr/bin/tiffinfo':'/usr/bin/tiffinfo', 'usr/share/aperture/BUILDINFO.json':str(Path('build/release/BUILDINFO-linux.json').resolve()), 'usr/share/aperture/THIRD-PARTY-NOTICES.txt':str(Path('build/release/THIRD-PARTY-NOTICES-linux.txt').resolve())}
+files = {'usr/bin/vips':'/usr/bin/vips', 'usr/bin/vipsheader':'/usr/bin/vipsheader', 'usr/bin/tiffinfo':'/usr/bin/tiffinfo', 'usr/share/aperture/LICENSE.txt':str(Path('LICENSE').resolve()), 'usr/share/aperture/BUILDINFO.json':str(Path('build/release/BUILDINFO-linux.json').resolve()), 'usr/share/aperture/THIRD-PARTY-NOTICES.txt':str(Path('build/release/THIRD-PARTY-NOTICES-linux.txt').resolve())}
 Path('build/linux/bundle.json').write_text(json.dumps({'bundle':{'linux':{'appimage':{'files':files}}}}))
 PY
 pnpm exec tauri build --bundles appimage --config build/linux/bundle.json "$@" -- --locked

@@ -879,6 +879,10 @@ mod tests {
             let decoded = crate::platform::open_image(bmp.to_str().unwrap()).unwrap();
             assert_eq!(decoded.image_write_to_memory(), samples);
             assert!(header(&decoded).unwrap().contains("vips-loader: bmp2vips"));
+            let scratch = directory.join("native [page=3] 日本語.v");
+            ops::vipssave(&decoded, scratch.to_str().unwrap()).unwrap();
+            let reloaded = crate::platform::open_image(scratch.to_str().unwrap()).unwrap();
+            assert_eq!(reloaded.image_write_to_memory(), samples);
             let copy = directory.join("bmp-copy.tif");
             let mut conversion = Worker {
                 images: HashMap::new(),

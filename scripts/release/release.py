@@ -6,6 +6,7 @@ import base64
 import datetime
 import hashlib
 import json
+import os
 import re
 import subprocess
 import tempfile
@@ -126,10 +127,15 @@ def verify(directory, version, source_sha, signed=True):
 def buildinfo(platform, directory, dependency_file, root=ROOT):
     def run(*args):
         return subprocess.check_output(args, cwd=root, text=True).strip()
-    info = {"version": current_version(root), "source_sha": run("git", "rev-parse", "HEAD"), "platform": platform,
+    info = {"version": current_version(root), "source_sha": run("git", "-c", f"safe.directory={root}", "rev-parse", "HEAD"), "platform": platform,
             "toolchains": {"rust": run("rustc", "--version"), "cargo": run("cargo", "--version"), "node": run("node", "--version"), "pnpm": run("pnpm", "--version")},
             "lockfiles": {name: digest(root / name) for name in ("pnpm-lock.yaml", "src-tauri/Cargo.lock")},
             "native_dependencies": json.loads(dependency_file.read_text()), "desktop_acceptance": "Required before promotion; automated worker/package checks are not GUI acceptance."}
+    info["runner"] = {name: os.environ[name] for name in ("ImageOS", "ImageVersion", "RUNNER_OS", "RUNNER_ARCH") if name in os.environ}
+    if platform == "windows":
+        info["toolchains"].update({name: os.environ[name] for name in ("VCToolsVersion", "WindowsSDKVersion", "VSINSTALLDIR") if name in os.environ})
+    else:
+        info["toolchains"]["cc"] = run("cc", "--version").splitlines()[0]
     directory.mkdir(parents=True, exist_ok=True)
     (directory / f"BUILDINFO-{platform}.json").write_text(json.dumps(info, indent=2) + "\n")
 

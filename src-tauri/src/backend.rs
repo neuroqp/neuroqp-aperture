@@ -1997,9 +1997,16 @@ mod tests {
         let job = backend.current.lock().unwrap().clone().unwrap();
         assert_eq!(
             job.process_number.load(Ordering::Relaxed),
-            if uses_worker(&job) { 1 } else { 2 },
-            "legacy cache migration uses only metadata; vipsheader shares the worker"
+            if cfg!(windows) {
+                0
+            } else if uses_worker(&job) {
+                1
+            } else {
+                2
+            },
+            "legacy cache migration starts only the CLI metadata readers (Windows omits tiffinfo)"
         );
+        assert_eq!(job.decoder.lock().unwrap().is_some(), uses_worker(&job));
         for corrupt in [b"{invalid".to_vec(), vec![b'x'; 65537]] {
             fs::write(dir.join("manifest.json"), corrupt).unwrap();
             backend.open(&source).unwrap();
@@ -2014,6 +2021,10 @@ mod tests {
             job.process_number.load(Ordering::Relaxed),
             0,
             "cache hit must not spawn readers"
+        );
+        assert!(
+            job.decoder.lock().unwrap().is_none(),
+            "cache hit must not start the native worker"
         );
         // Reenter this same job's state mutex from its callback.
         *callback_job.lock().unwrap() = Some(Arc::downgrade(&job));

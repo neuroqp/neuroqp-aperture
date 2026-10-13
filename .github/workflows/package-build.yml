@@ -208,6 +208,13 @@ jobs:
         run: pnpm exec tauri signer sign --app-version (python scripts/release/release.py check) build/release/Aperture-Portable-x64.exe
       - run: pwsh scripts/release/smoke-windows.ps1 -Version (python scripts/release/release.py check) -Setup build/release/Aperture-Setup-x64.exe
       - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
+        if: always()
+        with:
+          name: windows-package-evidence
+          path: build/evidence/windows/*
+          if-no-files-found: ignore
+          retention-days: 14
+      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
         with:
           name: packages-windows
           path: build/release/*
