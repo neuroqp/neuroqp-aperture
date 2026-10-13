@@ -35,7 +35,7 @@
     "targets": ["appimage"],
     "createUpdaterArtifacts": true,
     "publisher": "NeuroQP",
-    "category": "Science",
+    "category": "Education",
     "shortDescription": "A microscopy image viewer",
     "longDescription": "View large microscopy images and edit ImageJ-compatible point annotations."
   },
