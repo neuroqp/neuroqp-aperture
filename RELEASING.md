@@ -48,6 +48,15 @@ Full native builds are deliberately separate from normal PR checks. Run package
 validation when packaging, platform-specific code, toolchains, or native
 libraries change. A successful worker test is not desktop acceptance.
 
+For first-release Windows upgrade testing, dispatch **Native validation** with
+`build_upgrade_fixture: true`. After preserving the normal unsigned packages and
+verifying corresponding source, the Windows job builds a separate `0.0.9` Setup
+fixture. Its loopback feed retains the production public key and signed-version
+checks. The `windows-upgrade-fixture` artifact contains the installer, exact test
+deltas, build identity, notices and verified source material. It receives no
+signing secrets and cannot be enabled in a signed release build. Use it only in
+an isolated desktop VM with the actual candidate installer and signature.
+
 ## Package behavior
 
 - **Setup:** `Aperture-Setup-x64.exe` installs under the current user's local
@@ -213,13 +222,15 @@ as passed.
    file chooser, image formats, annotation save, and cancellation. Confirm no
    system libvips tools are needed. Check a read-only AppImage fails updating
    gracefully and retains the running version.
-4. **Upgrade from a previous signed test build:** check no update, update available,
+4. **Upgrade from an isolated prior-version test build:** check no update, update available,
    offline/error handling, notes, opt-out, deferral, and progress. Save/Discard/Cancel
    must work for unsaved annotations. Verify an altered payload is rejected,
    image workers stop before replacement, preferences survive, the new version
-   launches, and uninstall leaves source images untouched. Use a test configuration
-   and test signing key/feed for destructive upgrade tests; never weaken production
-   signature verification or point production clients at an experimental feed.
+   launches, and uninstall leaves source images untouched. Use a prior-version
+   test configuration with a loopback feed and the production public key to
+   verify the exact candidate bytes and signature. The prior fixture itself can
+   be unsigned; its incoming update must pass production signature and version
+   checks. Never weaken those checks or point production clients at a test feed.
 
 The first release still needs these platform acceptance results. Automated
 compile and worker checks are useful evidence, but cannot establish the behavior

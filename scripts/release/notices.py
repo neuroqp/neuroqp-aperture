@@ -2,11 +2,50 @@
 """Collect installed Rust/JavaScript license notices and native bundle notices."""
 
 import argparse
+import hashlib
+from html.parser import HTMLParser
 import json
 from pathlib import Path
 import subprocess
 
 ROOT = Path(__file__).resolve().parents[2]
+RUST_RUNTIME = ROOT / "scripts/release/rust-runtime-licenses"
+
+
+class LicenseText(HTMLParser):
+    """Keep the release report's text, separating its paragraphs and headings."""
+
+    def __init__(self):
+        super().__init__(convert_charrefs=True)
+        self.parts = []
+
+    def handle_data(self, data):
+        self.parts.append(data)
+
+    def handle_endtag(self, tag):
+        if tag in ("p", "pre", "div", "li", "tr", "h1", "h2", "h3"):
+            self.parts.append("\n")
+
+
+def rust_runtime_notice(platform, compiler=None):
+    provenance = json.loads((RUST_RUNTIME / "provenance.json").read_text(encoding="utf-8"))
+    compiler = compiler or subprocess.check_output(["rustc", "--version"], text=True, encoding="utf-8").strip()
+    if not compiler.startswith(f"rustc {provenance['version']} "):
+        raise ValueError(f"Rust runtime notices cover {provenance['version']}, but this build uses {compiler}; review the new toolchain's notices first")
+    sections = [f"Rust standard library and statically linked runtime {provenance['version']}\nSource: {provenance['releases'][platform]['archiveUrl']}"]
+    for item in provenance["files"]:
+        path = RUST_RUNTIME / item["file"]
+        data = path.read_bytes()
+        if hashlib.sha256(data).hexdigest() != item["sha256"]:
+            raise ValueError(f"Rust runtime license checksum mismatch: {item['file']}")
+        text = data.decode("utf-8")
+        if path.suffix == ".html":
+            parser = LicenseText()
+            parser.feed(text)
+            parser.close()
+            text = "".join(parser.parts).strip()
+        sections.append(f"{item['file']}\n{text}")
+    return "\n\n".join(sections)
 
 
 def license_text(directory):
@@ -21,7 +60,7 @@ def main():
     parser.add_argument("output", type=Path)
     args = parser.parse_args()
     cargo = json.loads(subprocess.check_output(["cargo", "metadata", "--manifest-path", str(ROOT / "src-tauri/Cargo.toml"), "--locked", "--format-version", "1"], text=True, encoding="utf-8"))
-    sections = ["Aperture third-party notices\nIncludes build dependencies and bundled runtime dependencies.\n"]
+    sections = ["Aperture third-party notices\nIncludes build dependencies and bundled runtime dependencies.\n", rust_runtime_notice(args.platform)]
     for package in sorted(cargo["packages"], key=lambda p: (p["name"], p["version"])):
         if package["name"] == "aperture":
             continue

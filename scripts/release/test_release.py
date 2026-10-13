@@ -4,6 +4,7 @@ import importlib.util
 import io
 import json
 from pathlib import Path
+import shutil
 import tarfile
 import tempfile
 import unittest
@@ -12,6 +13,10 @@ from unittest import mock
 spec = importlib.util.spec_from_file_location("release", Path(__file__).with_name("release.py"))
 release = importlib.util.module_from_spec(spec)
 spec.loader.exec_module(release)
+
+spec = importlib.util.spec_from_file_location("notices", Path(__file__).with_name("notices.py"))
+notices = importlib.util.module_from_spec(spec)
+spec.loader.exec_module(notices)
 
 
 def reviewed_source(directory, root):
@@ -35,6 +40,25 @@ def reviewed_source(directory, root):
 
 
 class ReleaseTests(unittest.TestCase):
+    def test_rust_runtime_notices_preserve_terms_and_reject_stale_or_changed_material(self):
+        for platform in ("linux", "windows"):
+            with self.subTest(platform=platform), mock.patch.object(notices.subprocess, "check_output", return_value="rustc 1.98.0 (88d9e12ae 2026-08-18)\n") as compiler:
+                text = notices.rust_runtime_notice(platform)
+                compiler.assert_called_once_with(["rustc", "--version"], text=True, encoding="utf-8")
+                for required in ("The Rust Project Contributors", "Rust Standard Library", "Permission is hereby granted, free of charge", "Apache License", "Unicode"):
+                    self.assertIn(required, text)
+                self.assertNotIn("<html", text)
+                self.assertNotIn("&quot;", text)
+        with self.assertRaisesRegex(ValueError, "review the new toolchain"):
+            notices.rust_runtime_notice("linux", compiler="rustc 1.99.0 (different)")
+        with tempfile.TemporaryDirectory() as folder:
+            copied = Path(folder) / "runtime"
+            shutil.copytree(notices.RUST_RUNTIME, copied)
+            with (copied / "LICENSE-MIT").open("ab") as license_file:
+                license_file.write(b"changed")
+            with mock.patch.object(notices, "RUST_RUNTIME", copied), self.assertRaisesRegex(ValueError, "checksum mismatch: LICENSE-MIT"):
+                notices.rust_runtime_notice("windows", compiler="rustc 1.98.0 (88d9e12ae 2026-08-18)")
+
     def test_unassembled_material_blocks_candidate_before_feed_generation(self):
         with tempfile.TemporaryDirectory() as folder:
             directory = Path(folder) / "assets"

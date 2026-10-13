@@ -1,0 +1,59 @@
+{
+  "schema": 1,
+  "version": "1.98.0",
+  "channelUrl": "https://static.rust-lang.org/dist/channel-rust-1.98.0.toml",
+  "channelSha256": "3f7d139b73bbbd0004ef6e58b430831c68cdad2b1f64ee2eb35d54c09199489a",
+  "releases": {
+    "linux": {
+      "platform": "linux",
+      "target": "x86_64-unknown-linux-gnu",
+      "archiveUrl": "https://static.rust-lang.org/dist/2026-08-20/rustc-1.98.0-x86_64-unknown-linux-gnu.tar.xz",
+      "archiveSha256": "0e37cb339f447fc44d6d781073bacacebfdc5612f2600e4c7e84c266f5f3aced"
+    },
+    "windows": {
+      "platform": "windows",
+      "target": "x86_64-pc-windows-msvc",
+      "archiveUrl": "https://static.rust-lang.org/dist/2026-08-20/rustc-1.98.0-x86_64-pc-windows-msvc.tar.xz",
+      "archiveSha256": "a29cdefc01c747e15270ec64878adba4b0a88afaa7f19e3abf9231106fbd381b"
+    }
+  },
+  "files": [
+    {
+      "file": "LICENSE-APACHE",
+      "sha256": "62c7a1e35f56406896d7aa7ca52d0cc0d272ac022b5d2796e7d6905db8a3636a",
+      "size": 9723,
+      "archivePaths": {
+        "linux": "rustc-1.98.0-x86_64-unknown-linux-gnu/LICENSE-APACHE",
+        "windows": "rustc-1.98.0-x86_64-pc-windows-msvc/LICENSE-APACHE"
+      }
+    },
+    {
+      "file": "COPYRIGHT",
+      "sha256": "172020dbfd5b53a226dfde77616190a48dcff519b0bc0e6deb91a8450782c4af",
+      "size": 1571,
+      "archivePaths": {
+        "linux": "rustc-1.98.0-x86_64-unknown-linux-gnu/COPYRIGHT",
+        "windows": "rustc-1.98.0-x86_64-pc-windows-msvc/COPYRIGHT"
+      }
+    },
+    {
+      "file": "LICENSE-MIT",
+      "sha256": "b71bd43a069ca0641a9ecfe585ca7b3c53b5cc1608f8b68321168698e28b5ea1",
+      "size": 1068,
+      "archivePaths": {
+        "linux": "rustc-1.98.0-x86_64-unknown-linux-gnu/LICENSE-MIT",
+        "windows": "rustc-1.98.0-x86_64-pc-windows-msvc/LICENSE-MIT"
+      }
+    },
+    {
+      "file": "COPYRIGHT-library.html",
+      "sha256": "68129500b616d5838629e68f55ff3aed5e096dacf60ce9eb41bbe599a563afa6",
+      "size": 1512520,
+      "archivePaths": {
+        "linux": "rustc-1.98.0-x86_64-unknown-linux-gnu/rustc/share/doc/rust/COPYRIGHT-library.html",
+        "windows": "rustc-1.98.0-x86_64-pc-windows-msvc/rustc/share/doc/rust/COPYRIGHT-library.html"
+      }
+    }
+  ],
+  "scope": "Verbatim shared license and standard-library copyright artifacts from both official Rust1.98.0 releases. The library report is a conservative notice set, not a claim that every listed component is linked. Compiler and OS SDK source reconstruction is outside this notice correction."
+}
