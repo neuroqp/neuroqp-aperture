@@ -323,6 +323,10 @@ async fn load_annotations(
     .map_err(|e| e.to_string())?
 }
 
+fn staged_target_changed(selected: &Path, expected: &Path, staged: &Path) -> bool {
+    expected != staged || !path_key(selected).is_ok_and(|current| current == staged)
+}
+
 #[tauri::command]
 async fn save_annotations(
     id: String,
@@ -337,7 +341,7 @@ async fn save_annotations(
     let session = session.inner().clone();
     tauri::async_runtime::spawn_blocking(move || {
         let target = Path::new(&path);
-        {
+        let expected_target = {
             let _writing = session
                 .instances
                 .save_lock(target)
@@ -346,7 +350,8 @@ async fn save_annotations(
             if status.warning.is_some() && acknowledgment.as_ref() != Some(&status.acknowledgment) {
                 return Ok(status);
             }
-        }
+            path_key(target).map_err(|e| e.to_string())?
+        };
         // Serialize this window's saves while copying outside the destination lock.
         let mut annotations = job.annotations.lock().unwrap();
         if annotations.is_none() {
@@ -375,13 +380,20 @@ async fn save_annotations(
                 return Err(error);
             }
         };
+        let staged_target = staged.target().to_path_buf();
         // Lock both paths in stable order so another Aperture cannot replace a
         // Save As source between the final fingerprint check and destination commit.
         let _writing = session
             .instances
-            .save_locks(&[job.source.clone(), target.to_path_buf()])
+            .save_locks(&[job.source.clone(), staged_target.clone()])
             .map_err(|e| e.to_string())?;
-        let mut status = save_warning(&session, &id, target)?;
+        let mut status = save_warning(&session, &id, &staged_target)?;
+        if staged_target_changed(target, &expected_target, &staged_target) {
+            status.warning = Some(
+                "The destination path changed or became unavailable while saving. Review the destination and save again.".into(),
+            );
+            return Ok(status);
+        }
         if fingerprint(&job.source).map_err(|e| e.to_string())? != staged_source {
             // A changed source requires a fresh copy after the next acknowledgment.
             status.warning = Some(
@@ -393,7 +405,7 @@ async fn save_annotations(
             return Ok(status);
         }
         staged.commit()?;
-        Ok(finish_save(&session, &id, target, status))
+        Ok(finish_save(&session, &id, &staged_target, status))
     })
     .await
     .map_err(|e| e.to_string())?
@@ -821,6 +833,73 @@ mod startup_tests {
             .fingerprints
             .is_empty());
         drop(session);
+        std::fs::remove_dir_all(root).unwrap();
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn staged_destination_rejects_removed_or_retargeted_aliases() {
+        let root = std::env::temp_dir().join(format!(
+            "aperture-staged-alias-{}-{}",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ));
+        std::fs::create_dir(&root).unwrap();
+        let source = root.join("source.tif");
+        let original = root.join("original.data");
+        let replacement = root.join("replacement.data");
+        let selected = root.join("selected.tif");
+        let original_bytes = b"II*\0\x08\0\0\0\0\0\0\0\0\0original-pixels";
+        std::fs::write(&source, original_bytes).unwrap();
+        std::fs::write(&original, original_bytes).unwrap();
+        std::fs::write(&replacement, b"replacement must stay unchanged").unwrap();
+        std::os::unix::fs::symlink(&original, &selected).unwrap();
+        let expected = path_key(&selected).unwrap();
+        let staged =
+            tiff_annotations::stage_copy(&source, &selected, vec![7], vec![], true).unwrap();
+        assert_eq!(staged.target(), expected);
+        assert!(!staged_target_changed(
+            &selected,
+            &expected,
+            staged.target()
+        ));
+        std::fs::remove_file(&selected).unwrap();
+        assert!(staged_target_changed(&selected, &expected, staged.target()));
+        std::os::unix::fs::symlink(&replacement, &selected).unwrap();
+        assert!(staged_target_changed(&selected, &expected, staged.target()));
+        assert_eq!(staged.target(), expected);
+        drop(staged);
+        assert_eq!(std::fs::read(&original).unwrap(), original_bytes);
+        assert_eq!(
+            std::fs::read(&replacement).unwrap(),
+            b"replacement must stay unchanged"
+        );
+        // Retargeting between preflight and staging also requires a fresh review,
+        // even when the selected alias now agrees with the staged target.
+        let staged =
+            tiff_annotations::stage_copy(&source, &selected, vec![7], vec![], true).unwrap();
+        assert!(staged_target_changed(&selected, &expected, staged.target()));
+        let committed_target = staged.target().to_path_buf();
+        // A stage commits exactly the captured referent, never a later alias target.
+        std::fs::remove_file(&selected).unwrap();
+        std::os::unix::fs::symlink(&original, &selected).unwrap();
+        staged.commit().unwrap();
+        assert_eq!(committed_target, path_key(&replacement).unwrap());
+        assert_eq!(
+            tiff_annotations::read(&replacement).unwrap().active_roi,
+            Some(vec![7])
+        );
+        assert_eq!(std::fs::read(&original).unwrap(), original_bytes);
+        // New relative destinations normalize to the same canonical parent key.
+        let relative = root.join("unused").join("..").join("new.tif");
+        std::fs::create_dir(root.join("unused")).unwrap();
+        let staged =
+            tiff_annotations::stage_copy(&source, &relative, vec![], vec![], false).unwrap();
+        assert_eq!(staged.target(), path_key(&relative).unwrap());
+        drop(staged);
         std::fs::remove_dir_all(root).unwrap();
     }
 }

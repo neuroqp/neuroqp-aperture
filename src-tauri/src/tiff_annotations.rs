@@ -426,6 +426,10 @@ pub struct StagedSave {
 }
 
 impl StagedSave {
+    pub fn target(&self) -> &Path {
+        &self.target
+    }
+
     pub fn commit(self) -> Result<(), String> {
         if self.overwrite {
             fs::rename(&self.temp, &self.target).map_err(|e| e.to_string())?;
@@ -477,7 +481,7 @@ pub fn stage_copy(
                 && !fs::symlink_metadata(target)
                     .is_ok_and(|metadata| metadata.file_type().is_symlink()) =>
         {
-            target.to_path_buf()
+            crate::instances::path_key(target).map_err(|e| e.to_string())?
         }
         Err(error) => return Err(format!("Cannot resolve the destination: {error}")),
     };

@@ -2,7 +2,7 @@
 
 ## Aperture 0.2.0 refresh
 
-The `source-v0.2.0-r3` archive refreshes the application snapshot and Cargo root
+The planned `source-v0.2.0-r3` archive refreshes the application snapshot and Cargo root
 version from the reviewed `0.1.1` material. The removed single-instance plugin
 reduces the Cargo registry closure to 522 crates and 26,992 vendor files. All
 60 npm archives and the Windows/Linux native sources, patches and build inputs
