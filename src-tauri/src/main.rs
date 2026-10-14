@@ -59,11 +59,21 @@ fn open_image_path(
         .map_err(|e| e.to_string())?;
     let source = path_key(path).map_err(|e| e.to_string())?;
     let initial = fingerprint(&source).map_err(|e| e.to_string())?;
-    let state = backend.open(path)?;
+    // Publish presence before opening starts the worker or exposes image state.
     session
         .instances
         .set_image(Some(&source))
         .map_err(|e| e.to_string())?;
+    let state = match backend.open(path) {
+        Ok(state) => state,
+        Err(error) => {
+            session
+                .instances
+                .set_image(None)
+                .map_err(|e| e.to_string())?;
+            return Err(error);
+        }
+    };
     *session.loaded.lock().unwrap() = Some(LoadedImage {
         id: state.id.clone(),
         fingerprints: HashMap::from([(source.clone(), initial)]),
@@ -721,6 +731,9 @@ mod startup_tests {
             assert!(previous.cancel.load(Ordering::Relaxed));
             assert!(session.loaded.lock().unwrap().is_none());
             assert!(!observer.others_open(&source).unwrap());
+            if path_key(&failed).is_ok() {
+                assert!(!observer.others_open(&failed).unwrap());
+            }
         }
         backend.shutdown();
         drop(session);

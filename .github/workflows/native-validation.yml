@@ -4,7 +4,7 @@ on:
   workflow_dispatch:
     inputs:
       build_upgrade_fixture:
-        description: Build an isolated v0.1.1 prior-code Windows Setup for desktop upgrade testing
+        description: Build isolated v0.1.1 prior-code Windows Setup and Linux AppImage upgrade fixtures
         type: boolean
         default: false
 

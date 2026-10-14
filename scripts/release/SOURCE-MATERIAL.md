@@ -1,4 +1,28 @@
-# First-release source material review
+# Corresponding-source material review
+
+## Aperture 0.2.0 refresh
+
+The `source-v0.2.0` archive refreshes the application snapshot and Cargo root
+version from the reviewed `0.1.1` material. The removed single-instance plugin
+reduces the Cargo registry closure to 522 crates and 26,992 vendor files. All
+60 npm archives and the Windows/Linux native sources, patches and build inputs
+remain unchanged. Original source releases remain immutable.
+
+`refresh-source.py` takes a full committed application SHA, checks the prior
+reviewed archive and native build inputs, and rejects new dependency resolutions.
+It records a pending publication plan, then reads the complete new archive back
+to verify every retained member and generated application file. Review that
+receipt and dependency closure before changing the plan to ready and publishing.
+The final publication plan is excluded from its own application inventory to
+avoid a checksum cycle. Binary uploads still require exact application lock and
+native dependency identities from each actual build.
+
+Previous-stable upgrade fixtures retain the released `0.1.1` application source,
+version, locks and verification key. Their loopback transport overlay is separate
+QA material, checked through the ordinary prior-source gate. The historical
+`0.0.9` bootstrap exception below does not apply to those fixtures.
+
+## Retained 0.1.1 review
 
 The corresponding-source archive preserves original upstream sources, patches,
 build recipes, license material and application dependencies for Aperture 0.1.1.

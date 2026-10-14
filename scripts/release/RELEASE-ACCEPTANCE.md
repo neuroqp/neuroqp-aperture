@@ -76,7 +76,7 @@ upgrade, not an upgrade from the untouched published prior binary. Deliver the
 exact incoming candidate bytes and signature. Do not alter public downloads,
 production client configuration or production feeds for this test.
 
-For `0.2.0`, the optional unsigned Windows fixture job and
+For `0.2.0`, the optional unsigned Windows and Linux fixture jobs and
 `previous-upgrade-fixture.py` use the pinned released `0.1.1` source with its
 version and lockfiles unchanged. See the
 [fixture reference](RELEASE-REFERENCE.md#previous-stable-upgrade-fixtures).

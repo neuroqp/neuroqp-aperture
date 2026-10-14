@@ -131,13 +131,15 @@ def prepare(archive, prior_review, root, source_sha):
     return generated, files, removed, review
 
 
-def write_archive(archive, output, generated, files, removed):
+def write_archive(archive, output, generated, files, removed, preset=3):
+    if not isinstance(preset, int) or preset not in range(10):
+        raise ValueError("XZ preset must be an integer from 0 through 9")
     # Preserve every native/npm payload byte. Only the application snapshot,
     # its identities, and no-longer-locked Cargo directories are replaced.
     expected = {}
     temporary = output.with_suffix(".partial")
     try:
-        with lzma.LZMAFile(temporary, "w", preset=3) as compressed, tarfile.open(fileobj=compressed, mode="w|", format=tarfile.GNU_FORMAT) as target:
+        with lzma.LZMAFile(temporary, "w", preset=preset) as compressed, tarfile.open(fileobj=compressed, mode="w|", format=tarfile.GNU_FORMAT) as target:
             def add(name, body, mode=0o644):
                 info = tarfile.TarInfo(name)
                 info.size, info.mode = len(body), mode
@@ -181,7 +183,7 @@ def write_archive(archive, output, generated, files, removed):
             raise ValueError("Refreshed source readback has missing members")
         temporary.replace(output)
         return {"members_verified": len(seen), "archive_bytes": output.stat().st_size,
-                "sha256": release.digest(output)}
+                "sha256": release.digest(output), "xz_preset": preset}
     finally:
         temporary.unlink(missing_ok=True)
 
@@ -204,6 +206,7 @@ def main():
     parser.add_argument("--output", required=True, type=Path, help="New, empty, local material directory")
     parser.add_argument("--root", type=Path, default=release.ROOT)
     parser.add_argument("--write", action="store_true")
+    parser.add_argument("--xz-preset", type=int, choices=range(10), default=3, help="XZ compression level; 0 is fastest, 3 is the historical default")
     args = parser.parse_args()
     if args.prior_archive.name != release.SOURCE_ASSET or args.output.exists():
         parser.error("Use the fixed prior archive name and a new output directory; published bytes must be preserved")
@@ -214,7 +217,7 @@ def main():
                "changed_application_files": json.loads(generated["SOURCE-MANIFEST.json"])["refresh"]["changed_application_files"],
                "application_source_files": len(files), "archive_written": args.write}
     if args.write:
-        receipt.update(write_archive(args.prior_archive, args.output / release.SOURCE_ASSET, generated, files, removed))
+        receipt.update(write_archive(args.prior_archive, args.output / release.SOURCE_ASSET, generated, files, removed, args.xz_preset))
         review["sha256"] = receipt["sha256"]
         # The ordinary gate still requires an explicit reviewed ready plan.
         release.verify_source_material(args.output, review)

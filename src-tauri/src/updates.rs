@@ -212,7 +212,12 @@ pub async fn install_update(app: tauri::AppHandle) -> Result<(), String> {
                 .store(false, std::sync::atomic::Ordering::Relaxed);
             return Err(format!("{error}. Reopen your image to resume viewing."));
         }
+        // Windows installation exits inside the updater after launching NSIS;
+        // the installer owns relaunch. Linux replaces the AppImage synchronously.
+        #[cfg(not(windows))]
         app.restart();
+        #[cfg(windows)]
+        Ok(())
     })
     .await
     .map_err(|error| error.to_string())?

@@ -82,8 +82,8 @@ the bundled library versions. Linux BUILDINFO records the Debian package version
 and libvips source hash. Notices and source links alone are not presented as a
 completed corresponding-source distribution.
 
-The reviewed first-release archive is published under
-[`source-v0.1.1`](https://github.com/neuroqp/neuroqp-aperture/releases/tag/source-v0.1.1),
+The reviewed archive for this release is published under
+[`source-v0.2.0`](https://github.com/neuroqp/neuroqp-aperture/releases/tag/source-v0.2.0),
 separate from application releases and excluded from latest.
 `scripts/release/corresponding-source.json` pins its checksum, both native
 dependency identities, exact Cargo/pnpm lock hashes and the archived application
@@ -145,18 +145,19 @@ rebuildable; those claims require the source/material review above.
 ## Previous-stable upgrade fixtures
 
 For `0.2.0`, dispatch **Native validation** with `build_upgrade_fixture: true`.
-The optional Windows job runs `build-previous-windows-upgrade-fixture.ps1` in an
-isolated checkout of released `v0.1.1` source, retaining its version, locks, public
+The optional jobs run `build-previous-windows-upgrade-fixture.ps1` and
+`build-previous-linux-upgrade-fixture.sh` in isolated checkouts of released
+`v0.1.1` source, retaining its version, locks, public
 key and signed-version checks. Only an unsigned loopback transport overlay differs.
 The normal prior-source gate verifies its material, with no lockfile exception.
-The separate `windows-upgrade-fixture` artifact records provenance and hashes;
+The separate `windows-upgrade-fixture` and `linux-upgrade-fixture` artifacts record provenance and hashes;
 production packages remain unchanged. Signed release builds forbid this fixture.
 Updating the prior tag/SHA constant for future releases is a reviewed change.
 
-`previous-upgrade-fixture.py` prepares and records the same baseline for Linux.
-Use an isolated clone of its pinned prior commit in the Debian build container,
-retain `0.1.1`, and pass the generated overlay to the prior `package-linux.sh`.
-Record actual BUILDINFO and verify the prior checkout's ordinary source gate.
+`previous-upgrade-fixture.py` prepares and records both baselines. The Linux job
+reuses the prepared Debian build environment and Cargo cache, preserves the normal
+candidate bundle, and restores it even if the fixture build fails. Both jobs
+verify that staged production assets remain unchanged.
 Run `scripts/native-appimage-update.py` with `--prior-version 0.1.1`, the actual
 candidate `--version`, AppImage and detached signature. Its supplied chooser and
 confirmation inputs still require separate native dialog observations.

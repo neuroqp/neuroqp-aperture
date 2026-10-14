@@ -57,6 +57,24 @@ class PreviousCodeFixtureTests(unittest.TestCase):
         self.assertIn("$env:APERTURE_NATIVE_DIR = $oldNative", builder)
         self.assertIn("$env:PATH = $oldPath", builder)
 
+    def test_linux_builder_pins_the_same_baseline_and_restores_original_bundle(self):
+        fixture = helper_module("previous-upgrade-fixture")
+        builder = Path(__file__).with_name("build-previous-linux-upgrade-fixture.sh").read_text()
+        self.assertIn("refs/tags/" + fixture.PRIOR_TAG, builder)
+        self.assertIn(fixture.PRIOR_SHA, builder)
+        self.assertIn("--fetch --platform linux", builder)
+        self.assertNotIn("--upgrade-fixture", builder)
+        self.assertIn("TAURI_SIGNING_PRIVATE_KEY", builder)
+        self.assertIn("trap restore EXIT", builder)
+        self.assertIn('mv "$scratch/original" "$bundle"', builder)
+        self.assertIn('cmp "$scratch/production-before.sha256" "$scratch/production-after.sha256"', builder)
+        if release.os.name != "nt":
+            path = str(Path(__file__).with_name("build-previous-linux-upgrade-fixture.sh"))
+            release.subprocess.run(["bash", "-n", path], check=True)
+            guarded = release.subprocess.run(["bash", path], env={**release.os.environ, "SIGNED": "true"}, capture_output=True, text=True)
+            self.assertNotEqual(guarded.returncode, 0)
+            self.assertIn("unsigned context", guarded.stderr)
+
 
 class SourceRefreshTests(unittest.TestCase):
     def test_refresh_preserves_native_bytes_binds_current_locks_and_drops_unused_crates(self):
@@ -112,6 +130,13 @@ class SourceRefreshTests(unittest.TestCase):
                 output = directory / "refreshed" / release.SOURCE_ASSET
                 output.parent.mkdir()
                 result = refresh.write_archive(archive, output, generated, snapshot, removed)
+                for preset in (-1, 10, "0"):
+                    with self.assertRaisesRegex(ValueError, "XZ preset"):
+                        refresh.write_archive(archive, output, generated, snapshot, removed, preset)
+                fast = output.with_name("fast.tar.xz")
+                fast_result = refresh.write_archive(archive, fast, generated, snapshot, removed, 0)
+                self.assertEqual(fast_result["xz_preset"], 0)
+                self.assertEqual(fast_result["members_verified"], result["members_verified"])
                 self.assertEqual(review["status"], "assembled-awaiting-review")
                 self.assertEqual(removed, {"removed"})
                 self.assertEqual(release.digest(archive), original_hash)
