@@ -2,7 +2,7 @@
 use std::{
     fs::{self, File, OpenOptions},
     io::{Read, Seek, SeekFrom, Write},
-    path::Path,
+    path::{Path, PathBuf},
     time::{SystemTime, UNIX_EPOCH},
 };
 
@@ -418,8 +418,37 @@ pub fn channel_info(path: &Path) -> Result<String, String> {
     Ok(report)
 }
 
+/// A complete TIFF copy awaiting a short, coordinated destination commit.
+pub struct StagedSave {
+    temp: PathBuf,
+    target: PathBuf,
+    overwrite: bool,
+}
+
+impl StagedSave {
+    pub fn commit(self) -> Result<(), String> {
+        if self.overwrite {
+            fs::rename(&self.temp, &self.target).map_err(|e| e.to_string())?;
+        } else {
+            fs::hard_link(&self.temp, &self.target).map_err(|e| {
+                format!("Cannot create the destination without overwriting it: {e}")
+            })?;
+        }
+        if let Some(parent) = self.target.parent() {
+            let _ = File::open(parent).and_then(|directory| directory.sync_all());
+        }
+        Ok(())
+    }
+}
+
+impl Drop for StagedSave {
+    fn drop(&mut self) {
+        let _ = fs::remove_file(&self.temp);
+    }
+}
+
 /// Writes a TIFF atomically, including replacement of the source when authorized.
-/// The caller supplies all overlays to retain.
+#[cfg(test)]
 pub fn save_copy(
     source: &Path,
     target: &Path,
@@ -427,6 +456,16 @@ pub fn save_copy(
     overlays: Vec<Vec<u8>>,
     overwrite: bool,
 ) -> Result<(), String> {
+    stage_copy(source, target, active, overlays, overwrite)?.commit()
+}
+
+pub fn stage_copy(
+    source: &Path,
+    target: &Path,
+    active: Vec<u8>,
+    overlays: Vec<Vec<u8>>,
+    overwrite: bool,
+) -> Result<StagedSave, String> {
     if !overwrite && fs::symlink_metadata(target).is_ok() {
         return Err("The destination exists. Confirm overwrite before saving.".into());
     }
@@ -534,7 +573,7 @@ pub fn save_copy(
         .filter(|p| !p.as_os_str().is_empty())
         .unwrap_or(Path::new("."));
     let temp = parent.join(format!(".aperture-save-{}-{stamp}.tmp", std::process::id()));
-    let result = (|| {
+    let result: Result<(), String> = (|| {
         let mut out = OpenOptions::new()
             .read(true)
             .write(true)
@@ -608,25 +647,17 @@ pub fn save_copy(
         drop(out);
         // Windows cannot replace an open source handle without delete sharing.
         drop(t.file);
-        if overwrite {
-            fs::rename(&temp, target).map_err(|e| e.to_string())?;
-        } else {
-            // Creating the destination link is atomic and fails if it appeared
-            // after the dialog. A rename would silently replace that file.
-            fs::hard_link(&temp, target).map_err(|e| {
-                format!("Cannot create the destination without overwriting it: {e}")
-            })?;
-            let _ = fs::remove_file(&temp);
-        }
-        // The file is already committed; best effort directory fsync also
-        // persists the rename/link on filesystems which support it.
-        let _ = File::open(parent).and_then(|directory| directory.sync_all());
         Ok(())
     })();
     if result.is_err() {
         let _ = fs::remove_file(&temp);
     }
-    result
+    result?;
+    Ok(StagedSave {
+        temp,
+        target: target_path,
+        overwrite,
+    })
 }
 
 #[cfg(test)]
@@ -702,6 +733,35 @@ mod tests {
         b.extend(b"unchanged-pixel-block");
         fs::write(path, b).unwrap();
     }
+    #[test]
+    fn staged_copies_leave_source_intact_until_commit_and_clean_cancelled_work() {
+        let root = std::env::temp_dir().join(format!(
+            "aperture-staged-save-{}-{}",
+            std::process::id(),
+            SystemTime::now()
+                .duration_since(UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ));
+        fs::create_dir(&root).unwrap();
+        let source = root.join("source.tif");
+        fixture(&source, true, false);
+        let original = fs::read(&source).unwrap();
+        let staged = stage_copy(&source, &source, vec![7], vec![], true).unwrap();
+        assert_eq!(fs::read(&source).unwrap(), original);
+        let temporary = staged.temp.clone();
+        assert!(temporary.exists());
+        drop(staged);
+        assert!(!temporary.exists());
+        assert_eq!(fs::read(&source).unwrap(), original);
+        stage_copy(&source, &source, vec![7], vec![], true)
+            .unwrap()
+            .commit()
+            .unwrap();
+        assert_eq!(read(&source).unwrap().active_roi, Some(vec![7]));
+        fs::remove_dir_all(root).unwrap();
+    }
+
     #[test]
     fn directory_report_selects_only_reduced_tiled_pages_and_rejects_incomplete_graphs() {
         let root = std::env::temp_dir().join(format!(

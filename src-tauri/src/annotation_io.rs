@@ -163,6 +163,7 @@ fn check_target(
     Ok(())
 }
 
+#[cfg(test)]
 pub fn save(
     source: &Path,
     target: &Path,
@@ -170,11 +171,21 @@ pub fn save(
     basis: &AnnotationBasis,
     overwrite: bool,
 ) -> Result<(), String> {
+    stage_save(source, target, rois, basis, overwrite)?.commit()
+}
+
+pub fn stage_save(
+    source: &Path,
+    target: &Path,
+    rois: Vec<PointRoi>,
+    basis: &AnnotationBasis,
+    overwrite: bool,
+) -> Result<tiff_annotations::StagedSave, String> {
     let source_is_tiff = is_tiff(source)?;
     check_target(source, target, source_is_tiff, overwrite)?;
     if source_is_tiff {
         let (active, overlays) = edited_metadata(basis, rois)?;
-        return tiff_annotations::save_copy(source, target, active, overlays, overwrite);
+        return tiff_annotations::stage_copy(source, target, active, overlays, overwrite);
     }
     let (active, overlays) = edited_metadata(basis, rois)?;
     let source = fs::canonicalize(source).map_err(|e| e.to_string())?;
@@ -249,7 +260,7 @@ pub fn save(
             }
         }
         check_target(&source, target, false, overwrite)?;
-        tiff_annotations::save_copy(
+        tiff_annotations::stage_copy(
             &temp.join("converted.tif"),
             target,
             active,

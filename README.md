@@ -16,6 +16,48 @@ Point type, color, and size buttons preview the current combination. The header'
 sun/moon button switches light and dark modes and remembers your choice; the
 initial theme follows the system.
 
+## Multiple windows and file opening
+
+Each Aperture window displays one image. Launch another copy, use **New window**
+or press **Ctrl+N** to compare images independently. **Open** and folder navigation
+replace only the image in their current window.
+
+You can pass an image filename when launching Aperture:
+
+```sh
+~/Applications/Aperture-x86_64.AppImage "/path/to/cells étude.tif"
+```
+
+Overwriting warns when the image is open in another Aperture window or changed
+on disk. Choose Cancel, Save as or Overwrite anyway. Other windows remain editable;
+annotations are not merged automatically. Close other Aperture windows before
+installing an update. When upgrading from 0.1.1, close all its windows first,
+because that older version does not participate in the new coordination.
+
+For a Linux TIFF association, create
+`~/.local/share/applications/aperture.desktop` with the following content. Replace
+the example executable path with your AppImage's absolute path:
+
+```ini
+[Desktop Entry]
+Type=Application
+Name=Aperture
+Exec=/home/you/Applications/Aperture-x86_64.AppImage %f
+Terminal=false
+MimeType=image/tiff;
+Categories=Education;Science;
+```
+
+Then set and verify the default:
+
+```sh
+xdg-mime default aperture.desktop image/tiff
+xdg-mime query default image/tiff
+```
+
+Keep the AppImage at that path when updating. Windows Setup registers TIFF file
+opening; choose Aperture in Windows' Open with/default-app settings if needed.
+
 ## Downloads and updates
 
 Release packages are published on [GitHub Releases](https://github.com/neuroqp/neuroqp-aperture/releases).

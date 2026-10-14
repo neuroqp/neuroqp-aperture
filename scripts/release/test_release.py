@@ -19,6 +19,110 @@ notices = importlib.util.module_from_spec(spec)
 spec.loader.exec_module(notices)
 
 
+def helper_module(name):
+    spec = importlib.util.spec_from_file_location(name, Path(__file__).with_name(name + ".py"))
+    module = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(module)
+    return module
+
+
+class PreviousCodeFixtureTests(unittest.TestCase):
+    def test_fixed_baseline_retains_version_production_key_and_signature_checks(self):
+        fixture = helper_module("previous-upgrade-fixture")
+        updater = {"pubkey": "production-test-key", "requireSignedVersion": True}
+        with mock.patch.dict(release.os.environ, {}, clear=True):
+            fixture.validate_baseline(fixture.PRIOR_SHA, "0.1.1", updater, updater["pubkey"])
+            for sha, version, config, key, signed in (
+                ("0" * 40, "0.1.1", updater, updater["pubkey"], False),
+                (fixture.PRIOR_SHA, "0.0.9", updater, updater["pubkey"], False),
+                (fixture.PRIOR_SHA, "0.1.1", {**updater, "requireSignedVersion": False}, updater["pubkey"], False),
+                (fixture.PRIOR_SHA, "0.1.1", updater, "different-key", False),
+                (fixture.PRIOR_SHA, "0.1.1", updater, updater["pubkey"], True),
+            ):
+                with self.assertRaises(ValueError):
+                    fixture.validate_baseline(sha, version, config, key, signed)
+            with mock.patch.dict(release.os.environ, {"TAURI_SIGNING_PRIVATE_KEY": "synthetic-test-only"}):
+                with self.assertRaisesRegex(ValueError, "unsigned context"):
+                    fixture.validate_baseline(fixture.PRIOR_SHA, "0.1.1", updater, updater["pubkey"])
+
+    def test_windows_builder_pins_the_same_baseline_and_ordinary_source_gate(self):
+        fixture = helper_module("previous-upgrade-fixture")
+        builder = Path(__file__).with_name("build-previous-windows-upgrade-fixture.ps1").read_text()
+        self.assertIn("refs/tags/" + fixture.PRIOR_TAG, builder)
+        self.assertIn(fixture.PRIOR_SHA, builder)
+        self.assertIn("'--fetch', '--platform', 'windows'", builder)
+        self.assertNotIn("--upgrade-fixture", builder)
+        self.assertNotIn("'version'", builder)
+        self.assertIn("$env:TAURI_SIGNING_PRIVATE_KEY", builder)
+        self.assertIn("$env:APERTURE_NATIVE_DIR = $oldNative", builder)
+        self.assertIn("$env:PATH = $oldPath", builder)
+
+
+class SourceRefreshTests(unittest.TestCase):
+    def test_refresh_preserves_native_bytes_binds_current_locks_and_drops_unused_crates(self):
+        refresh = helper_module("refresh-source")
+        with tempfile.TemporaryDirectory() as temporary:
+            directory = Path(temporary)
+            files = {name: (b"unchanged native recipe\n", 0o644) for name in refresh.NATIVE_INPUTS}
+            files.update({"package.json": (b'{"version":"0.1.1"}', 0o644),
+                          "pnpm-lock.yaml": (b"unchanged npm lock\n", 0o644)})
+            lock = '[[package]]\nname = "aperture"\nversion = "0.1.1"\n'
+            def crate(name, checksum):
+                return f'\n[[package]]\nname = "{name}"\nversion = "1.0.0"\nsource = "registry+https://github.com/rust-lang/crates.io-index"\nchecksum = "{checksum}"\n'
+            lock += crate("kept", "1" * 64)
+            files["src-tauri/Cargo.lock"] = ((lock + crate("removed", "2" * 64)).encode(), 0o644)
+            old_locks = {name: refresh.sha(files[name][0]) for name in release.LOCKFILES}
+            inventories = {
+                release.SOURCE_INVENTORY: refresh.encoded({"schema": 1, "files": [{"path": name, "sha256": refresh.sha(body)} for name, (body, _) in files.items()]}),
+                "application/cargo-vendor-inventory.json": refresh.encoded({"schema": 1, "cargoLockSha256": old_locks["src-tauri/Cargo.lock"], "crates": [
+                    {"name": name, "version": "1.0.0", "directory": name, "packageChecksum": checksum * 64}
+                    for name, checksum in (("kept", "1"), ("removed", "2"))]}),
+                "application/npm-inventory.json": refresh.encoded({"lockfile_sha256": old_locks["pnpm-lock.yaml"]}),
+            }
+            identities = {"linux": "3" * 64, "windows": "4" * 64}
+            members = {"SOURCE-MANIFEST.json": refresh.encoded({"schema": 1, "native_dependencies_sha256": identities,
+                       "inventory_sha256": {name: refresh.sha(body) for name, body in inventories.items()}}),
+                       **inventories, "linux/native-source.tar": b"exact reviewed native source bytes",
+                       "windows/native-source.tar": b"exact reviewed Windows source bytes",
+                       "application/cargo-vendor/kept/source.rs": b"kept crate",
+                       "application/cargo-vendor/removed/source.rs": b"obsolete crate",
+                       **{"application/source/" + name: body for name, (body, _) in files.items()}}
+            archive = directory / release.SOURCE_ASSET
+            with tarfile.open(archive, "w:xz") as target:
+                for name, body in members.items():
+                    entry = tarfile.TarInfo(name)
+                    entry.size = len(body)
+                    target.addfile(entry, io.BytesIO(body))
+            original_hash = release.digest(archive)
+            plan = {"schema": 1, "status": "ready", "asset": release.SOURCE_ASSET,
+                    "url": "https://github.com/neuroqp/neuroqp-aperture/releases/download/source-v0.1.1/" + release.SOURCE_ASSET,
+                    "sha256": original_hash, "native_dependencies_sha256": identities,
+                    "application_lockfiles_sha256": old_locks,
+                    "application_source_inventory_sha256": refresh.sha(inventories[release.SOURCE_INVENTORY])}
+            review_path = directory / "prior-review.json"
+            review_path.write_bytes(refresh.encoded(plan))
+            files["package.json"] = (b'{"version":"0.2.0"}', 0o644)
+            files["src-tauri/Cargo.lock"] = (lock.replace('version = "0.1.1"', 'version = "0.2.0"').encode(), 0o644)
+            with mock.patch.object(refresh, "snapshot", return_value=files):
+                generated, snapshot, removed, review = refresh.prepare(archive, review_path, directory, "5" * 40)
+                output = directory / "refreshed" / release.SOURCE_ASSET
+                output.parent.mkdir()
+                result = refresh.write_archive(archive, output, generated, snapshot, removed)
+                self.assertEqual(review["status"], "assembled-awaiting-review")
+                self.assertEqual(removed, {"removed"})
+                self.assertEqual(release.digest(archive), original_hash)
+                review["sha256"] = result["sha256"]
+                release.verify_source_material(output.parent, review)
+                with tarfile.open(output, "r:xz") as source:
+                    self.assertEqual(source.next().name, "SOURCE-MANIFEST.json")
+                    self.assertEqual(source.extractfile("linux/native-source.tar").read(), members["linux/native-source.tar"])
+                    self.assertNotIn("application/cargo-vendor/removed/source.rs", source.getnames())
+                    self.assertEqual(source.extractfile("application/source/src-tauri/Cargo.lock").read(), files["src-tauri/Cargo.lock"][0])
+                files["src-tauri/Cargo.lock"] = (files["src-tauri/Cargo.lock"][0] + crate("new", "6" * 64).encode(), 0o644)
+                with self.assertRaisesRegex(ValueError, "New or changed Cargo"):
+                    refresh.prepare(archive, review_path, directory, "5" * 40)
+
+
 def reviewed_source(directory, root, version="0.1.0"):
     (root / "scripts/release").mkdir(parents=True)
     (root / "CHANGELOG.md").write_text((release.ROOT / "CHANGELOG.md").read_text(encoding="utf-8"), encoding="utf-8")

@@ -76,11 +76,13 @@ upgrade, not an upgrade from the untouched published prior binary. Deliver the
 exact incoming candidate bytes and signature. Do not alter public downloads,
 production client configuration or production feeds for this test.
 
-The existing Windows fixture helper and
-[Linux fixture recipe](LINUX-UPGRADE-FIXTURE.md) only bootstrap `0.1.1` from a
-`0.0.9` fixture. There is no generic committed recipe for every subsequent stable
-baseline. An operator must arrange and review that fixture/transport, or stop
-and report the gap. Direct installation of the new Setup is not updater evidence.
+For `0.2.0`, the optional unsigned Windows fixture job and
+`previous-upgrade-fixture.py` use the pinned released `0.1.1` source with its
+version and lockfiles unchanged. See the
+[fixture reference](RELEASE-REFERENCE.md#previous-stable-upgrade-fixtures).
+Future baseline changes require review of that pinned tag and commit. The
+[0.0.9 recipe](LINUX-UPGRADE-FIXTURE.md) is historical bootstrap evidence.
+Direct installation of the new Setup is not updater evidence.
 
 Observe update availability, notes and progress; save pending annotation edits
 through the real dialog; install and restart into the candidate version. Verify
@@ -107,6 +109,15 @@ non-applicable row. A broad runtime/library change can require the full matrix.
 | Updater, signing, installation, portable launcher, Tauri, WebView2 or native libraries | Save/Discard/Cancel, opt-out/deferral/no-update/offline/error paths, tampered payload and signed-version rejection, read-only/permission failures, concurrent extraction, full cold offline launch, worker-before-replacement ordering and upgrades across affected environments. Include second-drive/network-share paths and uninstall safety. |
 | Rendering, caching or performance                                                      | Representative changed image types, display/GPU/session paths, cold/warm cache and measured preview/save behavior against the previous stable baseline.                                                                                                                                                                                          |
 | File dialogs, navigation or worker lifecycle                                           | Real chooser/dialog behavior, unsaved-work branches, processing replacement/cancellation and absence of stale results or surviving workers on affected platforms.                                                                                                                                                                                |
+
+For multi-instance changes, add focused checks on Windows and Linux: two real
+processes with independent images/edits and cache directories; closing one leaves
+the other usable; shared-image and changed-file warnings exercise Cancel, Save as
+and Overwrite anyway with saved pixels independently verified. Confirm an update
+cannot replace files while another initialized window runs, and startup waits
+through replacement. On Windows also test the installer/uninstaller admission
+hooks, since Tauri exits before Setup replaces files. Existing `0.1.1` processes
+lack these locks, so close legacy windows before the first upgrade.
 
 ## Automation and evidence rules
 

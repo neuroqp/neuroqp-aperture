@@ -42,7 +42,9 @@ checksums, workflow code or release scripts require source review.
 All editions use the stable `com.neuroqp.aperture` identity. Preferences and
 image display caches are outside package directories. Linux uses the XDG
 application directories; Windows uses user-local application directories.
-Generated display data uses a 2 GiB soft cache limit. Saving TIFF annotations can
+Each process exclusively owns a reusable directory under `display-v3/slot-N`.
+Locks stay outside those directories, and cleanup only visits the owned directory.
+Generated display data uses a 2 GiB soft cache limit per directory. Saving TIFF annotations can
 require temporary disk space proportional to the source image. Portable means
 no installed application registration; it does not mean zero local files.
 Portable runtimes are retained by version to avoid deleting files used by another
@@ -136,34 +138,30 @@ To refresh the source artifact when version or dependency locks change:
    record, then compares native identities and lock hashes against both completed
    binary builds.
 
-The separate unsigned prior-version fixture must use `source-material --platform
-windows --upgrade-fixture`. Its preserved `test-deltas/src-tauri/Cargo.lock` may
-change only the aperture root version from `0.1.1` to `0.0.9`; its actual BUILDINFO must hash
-that exact file. Production upload and metadata gates have no fixture exception.
-
 The gate checks reviewed byte/dependency identities. It does not determine
 license obligations or prove that the archive's contents are complete or
 rebuildable; those claims require the source/material review above.
 
-## First-release upgrade fixtures
+## Previous-stable upgrade fixtures
 
-These are historical bootstrap recipes for `0.1.1`, not a command for upgrading
-from every later stable version. The Windows helper is version-specific.
-For later releases, arrange the previous stable baseline and any isolated test
-feed fixture before tagging, following [upgrade acceptance](RELEASE-ACCEPTANCE.md#upgrade-acceptance).
+For `0.2.0`, dispatch **Native validation** with `build_upgrade_fixture: true`.
+The optional Windows job runs `build-previous-windows-upgrade-fixture.ps1` in an
+isolated checkout of released `v0.1.1` source, retaining its version, locks, public
+key and signed-version checks. Only an unsigned loopback transport overlay differs.
+The normal prior-source gate verifies its material, with no lockfile exception.
+The separate `windows-upgrade-fixture` artifact records provenance and hashes;
+production packages remain unchanged. Signed release builds forbid this fixture.
+Updating the prior tag/SHA constant for future releases is a reviewed change.
 
-For first-release Windows upgrade testing, dispatch **Native validation** with
-`build_upgrade_fixture: true`. After preserving the normal unsigned packages and
-verifying corresponding source, the Windows job builds a separate `0.0.9` Setup
-fixture. Its loopback feed retains the production public key and signed-version
-checks. The `windows-upgrade-fixture` artifact contains the installer, exact test
-deltas, build identity, notices and verified source material. It receives no
-signing secrets and cannot be enabled in a signed release build. Use it only in
-an isolated desktop VM with the actual candidate installer and signature.
+`previous-upgrade-fixture.py` prepares and records the same baseline for Linux.
+Use an isolated clone of its pinned prior commit in the Debian build container,
+retain `0.1.1`, and pass the generated overlay to the prior `package-linux.sh`.
+Record actual BUILDINFO and verify the prior checkout's ordinary source gate.
+Run `scripts/native-appimage-update.py` with `--prior-version 0.1.1`, the actual
+candidate `--version`, AppImage and detached signature. Its supplied chooser and
+confirmation inputs still require separate native dialog observations.
 
-For the first-release Linux upgrade test, follow the
-[local prior-AppImage recipe](LINUX-UPGRADE-FIXTURE.md). It builds
-an unsigned `0.0.9` fixture in a separate QA checkout with the production public
-key and a test-only loopback feed, records its provenance and version deltas,
-then runs the native updater harness against the exact signed candidate.
-Keep this fixture local; it is not a release or CI download asset.
+The [0.0.9 Linux recipe](LINUX-UPGRADE-FIXTURE.md) and
+`build-windows-upgrade-fixture.ps1` remain historical first-release bootstrap
+helpers. They are not the routine previous-stable baseline. Fixture packages are
+QA inputs, never stable releases, and must receive no signing secrets.

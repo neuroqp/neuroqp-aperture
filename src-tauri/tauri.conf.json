@@ -1,7 +1,7 @@
 {
   "$schema": "https://schema.tauri.app/config/2",
   "productName": "Aperture",
-  "version": "0.1.1",
+  "version": "0.2.0",
   "identifier": "com.neuroqp.aperture",
   "build": {
     "beforeDevCommand": "npm run dev",
@@ -37,7 +37,16 @@
     "publisher": "NeuroQP",
     "category": "Education",
     "shortDescription": "A microscopy image viewer",
-    "longDescription": "View large microscopy images and edit ImageJ-compatible point annotations."
+    "longDescription": "View large microscopy images and edit ImageJ-compatible point annotations.",
+    "fileAssociations": [
+      {
+        "ext": ["tif", "tiff"],
+        "name": "TIFF image",
+        "description": "TIFF image",
+        "mimeType": "image/tiff",
+        "role": "Editor"
+      }
+    ]
   },
   "plugins": {
     "updater": {

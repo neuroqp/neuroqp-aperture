@@ -64,6 +64,15 @@ fn edition() -> Edition {
     )
 }
 
+pub fn launch_executable() -> Result<std::path::PathBuf, String> {
+    if edition() == Edition::Appimage {
+        return std::env::var_os("APPIMAGE")
+            .map(std::path::PathBuf::from)
+            .ok_or_else(|| "Cannot locate this AppImage.".into());
+    }
+    std::env::current_exe().map_err(|error| error.to_string())
+}
+
 #[derive(Default)]
 pub struct Updates {
     pending: Mutex<Option<(Update, Option<Vec<u8>>)>>,
@@ -176,21 +185,24 @@ pub async fn download_update(
 }
 
 #[tauri::command]
-pub async fn install_update(
-    app: tauri::AppHandle,
-    state: State<'_, Updates>,
-) -> Result<(), String> {
+pub async fn install_update(app: tauri::AppHandle) -> Result<(), String> {
     require_installable()?;
-    let (update, bytes) = {
-        let mut pending = state.pending.lock().unwrap();
-        pending
-            .as_ref()
-            .and_then(|(_, bytes)| bytes.as_ref())
-            .ok_or("Download the update first.")?;
-        pending.take().unwrap()
-    };
-    let bytes = bytes.unwrap();
     tauri::async_runtime::spawn_blocking(move || {
+        let session = app.state::<std::sync::Arc<crate::Session>>();
+        let _replacement = session
+            .instances
+            .begin_update()
+            .map_err(|error| error.to_string())?;
+        let (update, bytes) = {
+            let updates = app.state::<Updates>();
+            let mut pending = updates.pending.lock().unwrap();
+            pending
+                .as_ref()
+                .and_then(|(_, bytes)| bytes.as_ref())
+                .ok_or("Download the update first.")?;
+            pending.take().unwrap()
+        };
+        let bytes = bytes.unwrap();
         let backend = app.state::<Backend>();
         backend.shutdown();
         if let Err(error) = update.install(&bytes) {

@@ -3,6 +3,7 @@ mod annotation_io;
 mod backend;
 mod channels;
 mod decoder;
+mod instances;
 mod native;
 mod platform;
 mod raw_tiff;
@@ -12,13 +13,91 @@ mod updates;
 mod vips_worker;
 
 use backend::{Backend, ImageState};
-use std::sync::atomic::Ordering;
+use instances::{fingerprint, path_key, Fingerprint, Instances};
+use std::{
+    collections::HashMap,
+    path::{Path, PathBuf},
+    sync::{atomic::Ordering, Arc, Mutex},
+};
 use tauri::{Emitter, Manager, State};
 
-#[tauri::command]
-fn open_image(path: String, backend: State<'_, Backend>) -> Result<ImageState, String> {
-    backend.open(std::path::Path::new(&path))
+struct Session {
+    instances: Arc<Instances>,
+    loaded: Mutex<Option<LoadedImage>>,
+    opening: Mutex<()>,
+    startup: Mutex<Option<PathBuf>>,
 }
+
+struct LoadedImage {
+    id: String,
+    source: PathBuf,
+    fingerprints: HashMap<PathBuf, Option<Fingerprint>>,
+}
+
+#[tauri::command]
+fn open_image(
+    path: String,
+    backend: State<'_, Backend>,
+    session: State<'_, Arc<Session>>,
+) -> Result<ImageState, String> {
+    let _opening = session.opening.lock().unwrap();
+    let source = path_key(Path::new(&path)).map_err(|e| e.to_string())?;
+    let initial = fingerprint(&source).map_err(|e| e.to_string())?;
+    let state = backend.open(Path::new(&path))?;
+    session
+        .instances
+        .set_image(Some(&source))
+        .map_err(|e| e.to_string())?;
+    *session.loaded.lock().unwrap() = Some(LoadedImage {
+        id: state.id.clone(),
+        fingerprints: HashMap::from([(source.clone(), initial)]),
+        source,
+    });
+    Ok(state)
+}
+
+#[tauri::command]
+fn startup_image(session: State<'_, Arc<Session>>) -> Result<Option<String>, String> {
+    session
+        .startup
+        .lock()
+        .unwrap()
+        .take()
+        .map(|path| {
+            path.into_os_string()
+                .into_string()
+                .map_err(|_| "The image filename is not valid Unicode.".into())
+        })
+        .transpose()
+}
+
+#[tauri::command]
+fn new_window() -> Result<(), String> {
+    std::process::Command::new(updates::launch_executable()?)
+        .spawn()
+        .map(|_| ())
+        .map_err(|error| format!("Cannot open another window: {error}"))
+}
+
+fn startup_path(
+    args: impl IntoIterator<Item = std::ffi::OsString>,
+) -> Result<Option<PathBuf>, String> {
+    let Some(argument) = args.into_iter().skip(1).find(|argument| argument != "--") else {
+        return Ok(None);
+    };
+    if let Some(uri) = argument
+        .to_str()
+        .filter(|argument| argument.starts_with("file://"))
+    {
+        let path = tauri::Url::parse(uri)
+            .map_err(|error| error.to_string())?
+            .to_file_path()
+            .map_err(|_| "Cannot open this file URL.".to_owned())?;
+        return Ok(Some(path));
+    }
+    Ok(Some(PathBuf::from(argument)))
+}
+
 #[tauri::command]
 fn image_extensions() -> &'static [&'static str] {
     backend::IMAGE_EXTENSIONS
@@ -59,6 +138,53 @@ struct AnnotationTarget {
     path: String,
     exists: bool,
     is_tiff: bool,
+    warning: Option<String>,
+    acknowledgment: String,
+}
+
+#[derive(serde::Serialize)]
+#[serde(rename_all = "camelCase")]
+struct SaveResult {
+    saved: bool,
+    warning: Option<String>,
+    acknowledgment: String,
+}
+
+fn save_warning(session: &Session, id: &str, target: &Path) -> Result<SaveResult, String> {
+    let loaded = session.loaded.lock().unwrap();
+    let loaded = loaded
+        .as_ref()
+        .filter(|loaded| loaded.id == id)
+        .ok_or("The image has changed")?;
+    let target = path_key(target).map_err(|e| e.to_string())?;
+    let source_fingerprint = fingerprint(&loaded.source).map_err(|e| e.to_string())?;
+    let target_fingerprint = fingerprint(&target).map_err(|e| e.to_string())?;
+    let others_open = session
+        .instances
+        .others_open(&target)
+        .map_err(|e| e.to_string())?;
+    let source_changed = loaded.fingerprints.get(&loaded.source) != Some(&source_fingerprint);
+    let target_changed = match loaded.fingerprints.get(&target) {
+        Some(previous) => previous != &target_fingerprint,
+        None => target_fingerprint.is_some(),
+    };
+    let mut warnings = Vec::new();
+    if others_open {
+        warnings.push("This file is open in another Aperture window. Saving may overwrite that window's annotations.");
+    }
+    if source_changed {
+        warnings.push("The source image changed on disk since it was opened or last saved.");
+    }
+    if target_changed && target != loaded.source {
+        warnings.push("The destination already exists or changed on disk since the last save.");
+    }
+    Ok(SaveResult {
+        saved: false,
+        warning: (!warnings.is_empty()).then(|| warnings.join(" ")),
+        acknowledgment: format!(
+            "{target:?}|{source_fingerprint:?}|{target_fingerprint:?}|{others_open}"
+        ),
+    })
 }
 
 #[tauri::command]
@@ -66,8 +192,10 @@ async fn annotation_target(
     id: String,
     path: Option<String>,
     backend: State<'_, Backend>,
+    session: State<'_, Arc<Session>>,
 ) -> Result<AnnotationTarget, String> {
     let job = annotation_job(&backend, &id)?;
+    let session = session.inner().clone();
     tauri::async_runtime::spawn_blocking(move || {
         let is_tiff = annotation_io::is_tiff(&job.source)?;
         let target = path.map(std::path::PathBuf::from).unwrap_or_else(|| {
@@ -77,7 +205,14 @@ async fn annotation_target(
                 job.source.with_extension("tif")
             }
         });
+        let _writing = session
+            .instances
+            .save_lock(&target)
+            .map_err(|e| e.to_string())?;
+        let status = save_warning(&session, &id, &target)?;
         Ok(AnnotationTarget {
+            warning: status.warning,
+            acknowledgment: status.acknowledgment,
             exists: std::fs::symlink_metadata(&target).is_ok(),
             path: target.to_string_lossy().into_owned(),
             is_tiff,
@@ -123,26 +258,161 @@ async fn save_annotations(
     path: String,
     rois: Vec<roi::PointRoi>,
     overwrite: bool,
+    acknowledgment: Option<String>,
     backend: State<'_, Backend>,
-) -> Result<(), String> {
+    session: State<'_, Arc<Session>>,
+) -> Result<SaveResult, String> {
     let job = annotation_job(&backend, &id)?;
+    let session = session.inner().clone();
     tauri::async_runtime::spawn_blocking(move || {
-        // Serialize saves and keep sourceIndex stable even after deleting or
-        // splitting groups in a previous overwrite of this image.
+        let target = Path::new(&path);
+        {
+            let _writing = session
+                .instances
+                .save_lock(target)
+                .map_err(|e| e.to_string())?;
+            let status = save_warning(&session, &id, target)?;
+            if status.warning.is_some() && acknowledgment.as_ref() != Some(&status.acknowledgment) {
+                return Ok(status);
+            }
+        }
+        // Serialize this window's saves while copying outside the destination lock.
         let mut annotations = job.annotations.lock().unwrap();
         if annotations.is_none() {
             *annotations = Some(annotation_io::load_basis(&job.source)?);
         }
-        annotation_io::save(
+        let staged_source = fingerprint(&job.source).map_err(|e| e.to_string())?;
+        let staged = match annotation_io::stage_save(
             &job.source,
-            std::path::Path::new(&path),
+            target,
             rois,
             annotations.as_ref().unwrap(),
             overwrite,
-        )
+        ) {
+            Ok(staged) => staged,
+            Err(error) => {
+                let _writing = session
+                    .instances
+                    .save_lock(target)
+                    .map_err(|e| e.to_string())?;
+                let status = save_warning(&session, &id, target)?;
+                if status.warning.is_some()
+                    && acknowledgment.as_ref() != Some(&status.acknowledgment)
+                {
+                    return Ok(status);
+                }
+                return Err(error);
+            }
+        };
+        // Lock both paths in stable order so another Aperture cannot replace a
+        // Save As source between the final fingerprint check and destination commit.
+        let mut paths = vec![
+            path_key(&job.source).map_err(|e| e.to_string())?,
+            path_key(target).map_err(|e| e.to_string())?,
+        ];
+        paths.sort();
+        paths.dedup();
+        let _writing = paths
+            .iter()
+            .map(|path| session.instances.save_lock(path))
+            .collect::<Result<Vec<_>, _>>()
+            .map_err(|e| e.to_string())?;
+        let mut status = save_warning(&session, &id, target)?;
+        if fingerprint(&job.source).map_err(|e| e.to_string())? != staged_source {
+            // A changed source requires a fresh copy after the next acknowledgment.
+            status.warning = Some(
+                "The source image changed while saving. Review the warning and save again.".into(),
+            );
+            return Ok(status);
+        }
+        if status.warning.is_some() && acknowledgment.as_ref() != Some(&status.acknowledgment) {
+            return Ok(status);
+        }
+        staged.commit()?;
+        let target = path_key(target).map_err(|e| e.to_string())?;
+        let mut loaded = session.loaded.lock().unwrap();
+        let loaded = loaded
+            .as_mut()
+            .filter(|loaded| loaded.id == id)
+            .ok_or("The image has changed")?;
+        loaded.fingerprints.insert(
+            loaded.source.clone(),
+            fingerprint(&loaded.source).map_err(|e| e.to_string())?,
+        );
+        loaded.fingerprints.insert(
+            target.clone(),
+            fingerprint(&target).map_err(|e| e.to_string())?,
+        );
+        session
+            .instances
+            .set_images(&[loaded.source.clone(), target])
+            .map_err(|e| e.to_string())?;
+        status.saved = true;
+        Ok(status)
     })
     .await
     .map_err(|e| e.to_string())?
+}
+
+/// Resolve the same native cache directory used by Tauri before creating a WebView.
+fn app_cache_root(identifier: &str) -> std::io::Result<PathBuf> {
+    #[cfg(target_os = "linux")]
+    let root = std::env::var_os("XDG_CACHE_HOME")
+        .map(PathBuf::from)
+        .filter(|path| path.is_absolute())
+        .or_else(|| std::env::home_dir().map(|home| home.join(".cache")))
+        .ok_or_else(|| std::io::Error::other("Cannot locate the user cache directory."))?;
+    #[cfg(windows)]
+    let root = windows_cache_root()?;
+    Ok(root.join(identifier))
+}
+
+#[cfg(windows)]
+fn windows_cache_root() -> std::io::Result<PathBuf> {
+    use std::{
+        ffi::{c_void, OsString},
+        os::windows::ffi::OsStringExt,
+    };
+    use windows_sys::core::GUID;
+    #[link(name = "shell32")]
+    extern "system" {
+        fn SHGetKnownFolderPath(
+            folder: *const GUID,
+            flags: u32,
+            token: *mut c_void,
+            path: *mut *mut u16,
+        ) -> i32;
+    }
+    #[link(name = "ole32")]
+    extern "system" {
+        fn CoTaskMemFree(memory: *mut c_void);
+    }
+    const LOCAL_APP_DATA: GUID = GUID {
+        data1: 0xf1b32785,
+        data2: 0x6fba,
+        data3: 0x4fcf,
+        data4: [0x9d, 0x55, 0x7b, 0x8e, 0x7f, 0x15, 0x70, 0x91],
+    };
+    let mut directory = std::ptr::null_mut();
+    // The OS returns an allocated, null-terminated UTF-16 directory path.
+    unsafe {
+        let result = SHGetKnownFolderPath(&LOCAL_APP_DATA, 0, std::ptr::null_mut(), &mut directory);
+        if result < 0 || directory.is_null() {
+            CoTaskMemFree(directory.cast());
+            return Err(std::io::Error::other(format!(
+                "Cannot locate LocalAppData: HRESULT {result:#x}"
+            )));
+        }
+        let mut length = 0;
+        while *directory.add(length) != 0 {
+            length += 1;
+        }
+        let path = PathBuf::from(OsString::from_wide(std::slice::from_raw_parts(
+            directory, length,
+        )));
+        CoTaskMemFree(directory.cast());
+        Ok(path)
+    }
 }
 
 #[cfg(windows)]
@@ -164,31 +434,42 @@ fn main() {
         }
         return;
     }
+    let context = tauri::generate_context!();
+    let cache_root =
+        app_cache_root(&context.config().identifier).expect("Cannot locate Aperture cache");
+    let instances =
+        Arc::new(Instances::new(cache_root.clone()).expect("Cannot coordinate Aperture startup"));
     #[cfg(windows)]
     configure_webview_runtime();
+    let startup = startup_path(std::env::args_os());
     tauri::Builder::default()
-        .plugin(tauri_plugin_single_instance::init(|app, _, _| {
-            if let Some(window) = app.get_webview_window("main") {
-                let _ = window.show();
-                let _ = window.set_focus();
-            }
-        }))
         .plugin(tauri_plugin_dialog::init())
         .plugin(tauri_plugin_updater::Builder::new().build())
         .plugin(tauri_plugin_opener::init())
         .manage(updates::Updates::default())
-        .setup(|app| {
-            let root = app.path().app_cache_dir()?.join("display-v2");
-            let mut backend = Backend::new(root).map_err(std::io::Error::other)?;
+        .setup(move |app| {
+            if app.path().app_cache_dir()? != cache_root {
+                return Err(std::io::Error::other("The configured Aperture cache directory differs from the startup coordinator directory.").into());
+            }
+            let mut backend = Backend::new(instances.cache_root().to_path_buf())
+                .map_err(std::io::Error::other)?;
             let handle = app.handle().clone();
             backend.set_notifier(move |state| {
                 let _ = handle.emit("image-state", state);
             });
             app.manage(backend);
+            app.manage(Arc::new(Session {
+                instances,
+                loaded: Mutex::new(None),
+                opening: Mutex::new(()),
+                startup: Mutex::new(startup.map_err(std::io::Error::other)?),
+            }));
             Ok(())
         })
         .invoke_handler(tauri::generate_handler![
             open_image,
+            startup_image,
+            new_window,
             image_extensions,
             folder_images,
             image_state,
@@ -280,7 +561,7 @@ fn main() {
                 }
             });
         })
-        .build(tauri::generate_context!())
+        .build(context)
         .expect("Cannot start Aperture")
         .run(|app, event| {
             if matches!(
@@ -309,4 +590,83 @@ fn response(status: u16, bytes: Vec<u8>) -> tauri::http::Response<Vec<u8>> {
         .header("Cache-Control", "no-store")
         .body(bytes)
         .unwrap()
+}
+
+#[cfg(test)]
+mod startup_tests {
+    use super::*;
+
+    #[test]
+    fn filename_arguments_preserve_spaces_unicode_and_separator() {
+        let filename = std::ffi::OsString::from("/tmp/cells étude 01.tif");
+        assert_eq!(
+            startup_path(["aperture".into(), filename.clone()]).unwrap(),
+            Some(PathBuf::from(&filename))
+        );
+        assert_eq!(
+            startup_path(["aperture".into(), "--".into(), filename.clone()]).unwrap(),
+            Some(PathBuf::from(filename))
+        );
+        assert_eq!(startup_path(["aperture".into()]).unwrap(), None);
+        assert_eq!(
+            startup_path([
+                "aperture".into(),
+                "file:///tmp/cells%20%C3%A9tude%2001.tif".into()
+            ])
+            .unwrap(),
+            Some(PathBuf::from("/tmp/cells étude 01.tif"))
+        );
+    }
+
+    #[test]
+    fn overwrite_warnings_follow_live_windows_and_disk_changes() {
+        let root = std::env::temp_dir().join(format!(
+            "aperture-save-warning-{}-{}",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ));
+        std::fs::create_dir(&root).unwrap();
+        let source = root.join("cells étude.tif");
+        std::fs::write(&source, b"source").unwrap();
+        let source = path_key(&source).unwrap();
+        let coordinator = Arc::new(Instances::new(root.join("cache")).unwrap());
+        coordinator.set_image(Some(&source)).unwrap();
+        let session = Session {
+            instances: coordinator,
+            loaded: Mutex::new(Some(LoadedImage {
+                id: "image".into(),
+                source: source.clone(),
+                fingerprints: HashMap::from([(source.clone(), fingerprint(&source).unwrap())]),
+            })),
+            opening: Mutex::new(()),
+            startup: Mutex::new(None),
+        };
+        assert!(save_warning(&session, "image", &source)
+            .unwrap()
+            .warning
+            .is_none());
+        let other = Instances::new(root.join("cache")).unwrap();
+        other.set_image(Some(&source)).unwrap();
+        let live = save_warning(&session, "image", &source).unwrap();
+        assert!(live.warning.unwrap().contains("another Aperture window"));
+        drop(other);
+        let before = save_warning(&session, "image", &source).unwrap();
+        assert!(before.warning.is_none());
+        std::fs::write(&source, b"changed source").unwrap();
+        let changed = save_warning(&session, "image", &source).unwrap();
+        assert!(changed.warning.unwrap().contains("changed on disk"));
+        assert_ne!(before.acknowledgment, changed.acknowledgment);
+        let destination = root.join("existing.tif");
+        std::fs::write(&destination, b"existing").unwrap();
+        assert!(save_warning(&session, "image", &destination)
+            .unwrap()
+            .warning
+            .unwrap()
+            .contains("destination already exists"));
+        drop(session);
+        std::fs::remove_dir_all(root).unwrap();
+    }
 }

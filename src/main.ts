@@ -6,6 +6,11 @@ import { open, save, confirm } from "@tauri-apps/plugin-dialog";
 import { AnnotationViewer } from "./annotation-viewer";
 import { FolderNavigation } from "./folder-navigation";
 import {
+  saveAnnotationFile,
+  type AnnotationTarget,
+  type SaveResult,
+} from "./save-flow";
+import {
   addPoint,
   movePoint,
   deletePoint,
@@ -52,6 +57,7 @@ document.querySelector<HTMLDivElement>("#app")!.innerHTML = `
       <button id="next-image-button" class="tool image-navigation" type="button" title="Next image" aria-label="Next image" disabled>${icon("next")}</button>
     </div>
     <div class="file-actions">
+      <button id="new-window-button" class="file-button" type="button" title="New window (Ctrl+N)">${icon("restore")}<span>New window</span></button>
       <button id="open-button" class="file-button" type="button" title="Open image (Ctrl+O)">${icon("open")}<span>Open</span></button>
       <button id="save-button" class="file-button" type="button" title="Save annotated TIFF (Ctrl+S)" disabled>${icon("save")}<span>Save</span></button>
     </div>
@@ -302,45 +308,53 @@ async function saveAnnotations() {
   if (currentImage) showImage(currentImage);
   let completed = false;
   try {
-    const target = await invoke<{
-      path: string;
-      exists: boolean;
-      isTiff: boolean;
-    }>("annotation_target", {
+    const target = await invoke<AnnotationTarget>("annotation_target", {
       id: currentId,
       path: savedPath,
     });
-    let path = target.path;
-    let overwrite = false;
-    if (target.isTiff || target.exists) {
-      $("save-dialog-path").textContent = target.path;
-      saveDialog.returnValue = "cancel";
-      const choice = await new Promise<string>((resolve) => {
-        saveDialog.addEventListener(
-          "close",
-          () => resolve(saveDialog.returnValue),
-          { once: true },
-        );
-        saveDialog.showModal();
-      });
-      if (choice === "overwrite") overwrite = true;
-      else if (choice === "save-as") {
-        const selected = await save({
-          title: "Save annotated TIFF as",
-          defaultPath: target.path,
-          filters: [{ name: "TIFF image", extensions: ["tif", "tiff"] }],
+    const path = await saveAnnotationFile(target, {
+      choose: async (target) => {
+        $("save-dialog-path").textContent = target.path;
+        $("save-dialog-title").textContent = target.warning
+          ? "Review before overwriting"
+          : "Save annotated TIFF";
+        $("save-dialog-description").textContent = target.warning
+          ? `${target.warning} Annotations from other windows are not merged.`
+          : "Overwrite this TIFF or save to another file. Image pixels stay unchanged.";
+        $("save-overwrite-button").textContent = target.warning
+          ? "Overwrite anyway"
+          : "Overwrite";
+        saveDialog.returnValue = "cancel";
+        return new Promise<string>((resolve) => {
+          saveDialog.addEventListener(
+            "close",
+            () => resolve(saveDialog.returnValue),
+            { once: true },
+          );
+          saveDialog.showModal();
         });
-        if (!selected) return;
-        path = selected;
-        // The native save picker confirms replacement of an existing file.
-        overwrite = true;
-      } else return;
-    }
-    if (!/\.tiff?$/i.test(path) && !(target.isTiff && path === target.path))
-      throw new Error("Use a .tif or .tiff filename for the annotated TIFF.");
-    $("status").classList.remove("error");
-    $("status").textContent = "Saving annotations…";
-    await invoke("save_annotations", { id: currentId, path, rois, overwrite });
+      },
+      pick: (defaultPath) =>
+        save({
+          title: "Save annotated TIFF as",
+          defaultPath,
+          filters: [{ name: "TIFF image", extensions: ["tif", "tiff"] }],
+        }),
+      inspect: (path) =>
+        invoke<AnnotationTarget>("annotation_target", { id: currentId, path }),
+      write: (path, overwrite, acknowledgment) => {
+        $("status").classList.remove("error");
+        $("status").textContent = "Saving annotations…";
+        return invoke<SaveResult>("save_annotations", {
+          id: currentId,
+          path,
+          rois,
+          overwrite,
+          acknowledgment,
+        });
+      },
+    });
+    if (!path) return;
     savedPath = path;
     dirty = false;
     completed = true;
@@ -715,6 +729,9 @@ async function cancelLoad() {
   $<HTMLButtonElement>("cancel-button").disabled = false;
 }
 
+$("new-window-button").addEventListener("click", () => {
+  if (native) void invoke("new_window").catch(showError);
+});
 $("save-button").addEventListener("click", () => void saveAnnotations());
 $("open-button").addEventListener("click", () => void chooseImage());
 $("previous-image-button").addEventListener(
@@ -757,7 +774,13 @@ $("zoom-out-button").addEventListener("click", () => {
 document.addEventListener("keydown", (event) => {
   if (dialogOpen || saving || $<HTMLDialogElement>("update-dialog").open)
     return;
-  if ((event.ctrlKey || event.metaKey) && event.key.toLowerCase() === "o") {
+  if ((event.ctrlKey || event.metaKey) && event.key.toLowerCase() === "n") {
+    event.preventDefault();
+    if (native) void invoke("new_window").catch(showError);
+  } else if (
+    (event.ctrlKey || event.metaKey) &&
+    event.key.toLowerCase() === "o"
+  ) {
     event.preventDefault();
     void chooseImage();
   } else if (
@@ -836,8 +859,11 @@ if (windowHandle) {
         void openPath(event.payload.paths[0]);
     })
     .catch(showError);
-  void loader.restore();
+  void invoke<string | null>("startup_image")
+    .then((path) => (path ? openPath(path, true) : loader.restore()))
+    .catch(showError);
 } else {
+  $<HTMLButtonElement>("new-window-button").disabled = true;
   $<HTMLButtonElement>("open-button").disabled = true;
   $("open-button").title = "Open images in the desktop app";
   document

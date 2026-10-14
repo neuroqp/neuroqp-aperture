@@ -49,7 +49,7 @@ checksum = "330a5ed07fa54e4702c9d6c4174f74427fc0ef6e214bbd677ae50a5099946470"
 
 [[package]]
 name = "aperture"
-version = "0.1.1"
+version = "0.2.0"
 dependencies = [
  "image",
  "libvips",
@@ -60,7 +60,6 @@ dependencies = [
  "tauri-build",
  "tauri-plugin-dialog",
  "tauri-plugin-opener",
- "tauri-plugin-single-instance",
  "tauri-plugin-updater",
  "tokio",
  "windows-sys 0.61.2",
@@ -4055,22 +4054,6 @@ dependencies = [
  "thiserror 2.0.21",
  "url",
  "windows",
- "zbus",
-]
-
-[[package]]
-name = "tauri-plugin-single-instance"
-version = "2.5.2"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "ee2c8fe2d6b75caed0153f91eda30ea1dea3bfb6710d5adb80456d2c035a569d"
-dependencies = [
- "serde",
- "serde_json",
- "tauri",
- "thiserror 2.0.21",
- "tokio",
- "tracing",
- "windows-sys 0.61.2",
  "zbus",
 ]
 
