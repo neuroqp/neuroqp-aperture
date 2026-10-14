@@ -224,6 +224,40 @@ fn save_warning(session: &Session, id: &str, target: &Path) -> Result<SaveResult
     })
 }
 
+// Called only after the destination commit has succeeded. Tracking failures
+// cannot turn that completed write into a failed save or trust old baselines.
+fn finish_save(session: &Session, id: &str, target: &Path, mut status: SaveResult) -> SaveResult {
+    let refresh = (|| -> Result<(), String> {
+        let mut loaded = session.loaded.lock().unwrap();
+        let loaded = loaded
+            .as_mut()
+            .filter(|loaded| loaded.id == id)
+            .ok_or("The image has changed")?;
+        loaded.fingerprints.clear();
+        let target = path_key(target).map_err(|e| e.to_string())?;
+        let source_fingerprint = fingerprint(&loaded.source)
+            .map_err(|e| e.to_string())?
+            .ok_or("The source image is no longer present.")?;
+        let target_fingerprint = fingerprint(&target)
+            .map_err(|e| e.to_string())?
+            .ok_or("The saved file is no longer present.")?;
+        session
+            .instances
+            .set_images(&[loaded.source.clone(), target.clone()])
+            .map_err(|e| e.to_string())?;
+        loaded
+            .fingerprints
+            .insert(loaded.source.clone(), Some(source_fingerprint));
+        loaded.fingerprints.insert(target, Some(target_fingerprint));
+        Ok(())
+    })();
+    status.saved = true;
+    status.warning = refresh.err().map(|error| format!(
+        "Saved, but file and window tracking could not be refreshed: {error}. Later saves may show additional overwrite warnings."
+    ));
+    status
+}
+
 #[tauri::command]
 async fn annotation_target(
     id: String,
@@ -366,26 +400,7 @@ async fn save_annotations(
             return Ok(status);
         }
         staged.commit()?;
-        let target = path_key(target).map_err(|e| e.to_string())?;
-        let mut loaded = session.loaded.lock().unwrap();
-        let loaded = loaded
-            .as_mut()
-            .filter(|loaded| loaded.id == id)
-            .ok_or("The image has changed")?;
-        loaded.fingerprints.insert(
-            loaded.source.clone(),
-            fingerprint(&loaded.source).map_err(|e| e.to_string())?,
-        );
-        loaded.fingerprints.insert(
-            target.clone(),
-            fingerprint(&target).map_err(|e| e.to_string())?,
-        );
-        session
-            .instances
-            .set_images(&[loaded.source.clone(), target])
-            .map_err(|e| e.to_string())?;
-        status.saved = true;
-        Ok(status)
+        Ok(finish_save(&session, &id, target, status))
     })
     .await
     .map_err(|e| e.to_string())?
@@ -749,6 +764,63 @@ mod startup_tests {
         backend.shutdown();
         drop(session);
         drop(observer);
+        std::fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn committed_save_stays_successful_when_tracking_refresh_fails() {
+        let root = std::env::temp_dir().join(format!(
+            "aperture-committed-tracking-failure-{}-{}",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ));
+        std::fs::create_dir(&root).unwrap();
+        let source = root.join("source.tif");
+        let target = root.join("saved.tif");
+        // A minimal classic TIFF directory, created only for this regression.
+        std::fs::write(&source, b"II*\0\x08\0\0\0\0\0\0\0\0\0").unwrap();
+        let source = path_key(&source).unwrap();
+        let instances = Arc::new(Instances::new(root.join("cache")).unwrap());
+        instances.set_image(Some(&source)).unwrap();
+        let session = Session {
+            instances,
+            loaded: Mutex::new(Some(LoadedImage {
+                id: "image".into(),
+                source: source.clone(),
+                fingerprints: HashMap::from([(source.clone(), fingerprint(&source).unwrap())]),
+            })),
+            opening: Mutex::new(()),
+            startup: Mutex::new(None),
+        };
+        let before = save_warning(&session, "image", &target).unwrap();
+        tiff_annotations::stage_copy(&source, &target, vec![7], vec![], false)
+            .unwrap()
+            .commit()
+            .unwrap();
+        let committed = std::fs::read(&target).unwrap();
+        let images = root.join("cache/instance-locks-v1/images");
+        std::fs::rename(&images, root.join("image-leases-backup")).unwrap();
+        std::fs::write(&images, b"unusable lease directory").unwrap();
+        let result = finish_save(&session, "image", &target, before);
+        assert!(result.saved);
+        assert!(result.warning.unwrap().starts_with("Saved, but"));
+        assert_eq!(std::fs::read(&target).unwrap(), committed);
+        assert_eq!(
+            tiff_annotations::read(&target).unwrap().active_roi,
+            Some(vec![7])
+        );
+        assert!(session
+            .loaded
+            .lock()
+            .unwrap()
+            .as_ref()
+            .unwrap()
+            .fingerprints
+            .is_empty());
+        drop(session);
         std::fs::remove_dir_all(root).unwrap();
     }
 }

@@ -72,3 +72,22 @@ test("a changed destination requires a fresh explicit acknowledgment", async () 
   assert.deepEqual(choices, ["initial", "new"]);
   assert.deepEqual(acknowledgments, ["initial", "new"]);
 });
+
+test("a completed save with a tracking warning still reports the saved path", async () => {
+  let writes = 0;
+  const path = await saveAnnotationFile(target, {
+    choose: async () => "overwrite",
+    pick: async () => null,
+    inspect: async () => target,
+    write: async () => {
+      writes++;
+      return {
+        saved: true,
+        warning: "Saved, but tracking could not be refreshed.",
+        acknowledgment: "initial",
+      };
+    },
+  });
+  assert.equal(path, target.path);
+  assert.equal(writes, 1);
+});
