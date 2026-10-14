@@ -7,6 +7,7 @@ from pathlib import Path
 import shutil
 import tarfile
 import tempfile
+from types import SimpleNamespace
 import unittest
 from unittest import mock
 
@@ -17,6 +18,89 @@ spec.loader.exec_module(release)
 spec = importlib.util.spec_from_file_location("notices", Path(__file__).with_name("notices.py"))
 notices = importlib.util.module_from_spec(spec)
 spec.loader.exec_module(notices)
+
+
+def helper_module(name):
+    spec = importlib.util.spec_from_file_location(name, Path(__file__).with_name(name + ".py"))
+    module = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(module)
+    return module
+
+
+class SourceRefreshTests(unittest.TestCase):
+    def test_refresh_preserves_native_bytes_binds_current_locks_and_drops_unused_crates(self):
+        refresh = helper_module("refresh-source")
+        with tempfile.TemporaryDirectory() as temporary:
+            directory = Path(temporary)
+            files = {name: (b"unchanged native recipe\n", 0o644) for name in refresh.NATIVE_INPUTS}
+            files.update({"package.json": (b'{"version":"0.1.1"}', 0o644),
+                          "pnpm-lock.yaml": (b"unchanged npm lock\n", 0o644)})
+            lock = '[[package]]\nname = "aperture"\nversion = "0.1.1"\n'
+            def crate(name, checksum):
+                return f'\n[[package]]\nname = "{name}"\nversion = "1.0.0"\nsource = "registry+https://github.com/rust-lang/crates.io-index"\nchecksum = "{checksum}"\n'
+            lock += crate("kept", "1" * 64)
+            files["src-tauri/Cargo.lock"] = ((lock + crate("removed", "2" * 64)).encode(), 0o644)
+            old_locks = {name: refresh.sha(files[name][0]) for name in release.LOCKFILES}
+            inventories = {
+                release.SOURCE_INVENTORY: refresh.encoded({"schema": 1, "files": [{"path": name, "sha256": refresh.sha(body)} for name, (body, _) in files.items()]}),
+                "application/cargo-vendor-inventory.json": refresh.encoded({"schema": 1, "cargoLockSha256": old_locks["src-tauri/Cargo.lock"], "crates": [
+                    {"name": name, "version": "1.0.0", "directory": name, "packageChecksum": checksum * 64}
+                    for name, checksum in (("kept", "1"), ("removed", "2"))]}),
+                "application/npm-inventory.json": refresh.encoded({"lockfile_sha256": old_locks["pnpm-lock.yaml"]}),
+            }
+            identities = {"linux": "3" * 64, "windows": "4" * 64}
+            members = {"SOURCE-MANIFEST.json": refresh.encoded({"schema": 1, "native_dependencies_sha256": identities,
+                       "inventory_sha256": {name: refresh.sha(body) for name, body in inventories.items()}}),
+                       **inventories, "linux/native-source.tar": b"exact reviewed native source bytes",
+                       "windows/native-source.tar": b"exact reviewed Windows source bytes",
+                       "application/cargo-vendor/kept/source.rs": b"kept crate",
+                       "application/cargo-vendor/removed/source.rs": b"obsolete crate",
+                       **{"application/source/" + name: body for name, (body, _) in files.items()}}
+            archive = directory / release.SOURCE_ASSET
+            with tarfile.open(archive, "w:xz") as target:
+                for name, body in members.items():
+                    entry = tarfile.TarInfo(name)
+                    entry.size = len(body)
+                    target.addfile(entry, io.BytesIO(body))
+            original_hash = release.digest(archive)
+            plan = {"schema": 1, "status": "ready", "asset": release.SOURCE_ASSET,
+                    "url": "https://github.com/neuroqp/neuroqp-aperture/releases/download/source-v0.1.1/" + release.SOURCE_ASSET,
+                    "sha256": original_hash, "native_dependencies_sha256": identities,
+                    "application_lockfiles_sha256": old_locks,
+                    "application_source_inventory_sha256": refresh.sha(inventories[release.SOURCE_INVENTORY])}
+            review_path = directory / "prior-review.json"
+            review_path.write_bytes(refresh.encoded(plan))
+            renamed = directory / "unreviewed-other-name.tar.xz"
+            renamed.write_bytes(b"not the reviewed archive")
+            with self.assertRaisesRegex(ValueError, "fixed corresponding-source asset name"):
+                refresh.prepare(renamed, review_path, directory, "5" * 40)
+            files["package.json"] = (b'{"version":"0.2.0"}', 0o644)
+            files["src-tauri/Cargo.lock"] = (lock.replace('version = "0.1.1"', 'version = "0.2.0"').encode(), 0o644)
+            with mock.patch.object(refresh, "snapshot", return_value=files):
+                generated, snapshot, removed, review = refresh.prepare(archive, review_path, directory, "5" * 40)
+                output = directory / "refreshed" / release.SOURCE_ASSET
+                output.parent.mkdir()
+                result = refresh.write_archive(archive, output, generated, snapshot, removed)
+                for preset in (-1, 10, "0"):
+                    with self.assertRaisesRegex(ValueError, "XZ preset"):
+                        refresh.write_archive(archive, output, generated, snapshot, removed, preset)
+                fast = output.with_name("fast.tar.xz")
+                fast_result = refresh.write_archive(archive, fast, generated, snapshot, removed, 0)
+                self.assertEqual(fast_result["xz_preset"], 0)
+                self.assertEqual(fast_result["members_verified"], result["members_verified"])
+                self.assertEqual(review["status"], "assembled-awaiting-review")
+                self.assertEqual(removed, {"removed"})
+                self.assertEqual(release.digest(archive), original_hash)
+                review["sha256"] = result["sha256"]
+                release.verify_source_material(output.parent, review)
+                with tarfile.open(output, "r:xz") as source:
+                    self.assertEqual(source.next().name, "SOURCE-MANIFEST.json")
+                    self.assertEqual(source.extractfile("linux/native-source.tar").read(), members["linux/native-source.tar"])
+                    self.assertNotIn("application/cargo-vendor/removed/source.rs", source.getnames())
+                    self.assertEqual(source.extractfile("application/source/src-tauri/Cargo.lock").read(), files["src-tauri/Cargo.lock"][0])
+                files["src-tauri/Cargo.lock"] = (files["src-tauri/Cargo.lock"][0] + crate("new", "6" * 64).encode(), 0o644)
+                with self.assertRaisesRegex(ValueError, "New or changed Cargo"):
+                    refresh.prepare(archive, review_path, directory, "5" * 40)
 
 
 def reviewed_source(directory, root, version="0.1.0"):
@@ -37,13 +121,324 @@ def reviewed_source(directory, root, version="0.1.0"):
         path.write_text(json.dumps(info), encoding="utf-8")
         identities[platform] = release.native_identity(info["native_dependencies"])
     with tarfile.open(directory / release.SOURCE_ASSET, "w:xz") as source:
-        for name, data in (("SOURCE-MANIFEST.json", json.dumps({"schema": 1, "native_dependencies_sha256": identities, "inventory_sha256": {release.SOURCE_INVENTORY: inventory_hash}}).encode()), (release.SOURCE_INVENTORY, inventory), ("fixture/source.c", b"/* Synthetic source material for the gate test. */\n")):
+        for name, data in (("SOURCE-MANIFEST.json", json.dumps({"schema": 1, "native_dependencies_sha256": identities, "inventory_sha256": {release.SOURCE_INVENTORY: inventory_hash}}).encode()), (release.SOURCE_INVENTORY, inventory), *(("application/source/" + name, (root / name).read_bytes()) for name in locks), ("fixture/source.c", b"/* Synthetic source material for the gate test. */\n")):
             member = tarfile.TarInfo(name)
             member.size = len(data)
             source.addfile(member, io.BytesIO(data))
     plan = {"schema": 1, "status": "ready", "asset": release.SOURCE_ASSET, "url": "https://github.com/neuroqp/neuroqp-aperture/releases/download/source-fixture/Aperture-Corresponding-Source.tar.xz", "sha256": release.digest(directory / release.SOURCE_ASSET), "native_dependencies_sha256": identities, "application_lockfiles_sha256": locks, "application_source_inventory_sha256": inventory_hash}
     (root / "scripts/release/corresponding-source.json").write_text(json.dumps(plan), encoding="utf-8")
     release.source_material(directory, root=root)
+
+
+def rewrite_archive(directory, plan, transform):
+    archive = directory / release.SOURCE_ASSET
+    with tarfile.open(archive, "r:xz") as source:
+        rows = [(member.name, source.extractfile(member).read(), member.mode) for member in source]
+    rows = transform(rows)
+    with tarfile.open(archive, "w:xz") as source:
+        for name, body, mode in rows:
+            member = tarfile.TarInfo(name)
+            member.size, member.mode = len(body), mode
+            source.addfile(member, io.BytesIO(body))
+    plan["sha256"] = release.digest(archive)
+
+
+def frozen_source(directory, root):
+    for platform in ("linux", "windows"):
+        (directory / f"BUILDINFO-{platform}.json").write_text(json.dumps({"version": "0.1.0", "source_sha": "a" * 40}))
+    reviewed_source(directory, root)
+    (root / "application.txt").write_bytes(b"Frozen application implementation.\n")
+    release.subprocess.run(["git", "init", "-q", str(root)], check=True)
+    release.subprocess.run(["git", "add", "."], cwd=root, check=True)
+    release.subprocess.run(["git", "-c", "user.name=Fixture", "-c", "user.email=fixture@example.invalid", "commit", "-qm", "Tiny frozen source fixture"], cwd=root, check=True)
+    source_sha = release.subprocess.check_output(["git", "rev-parse", "HEAD"], cwd=root, text=True).strip()
+    files = release.application_snapshot(root, source_sha)
+    inventory = json.dumps({"schema": 1, "gitBaseSha": source_sha, "trackedChanges": [], "includedUntracked": [],
+                            "excludedPublicationRecord": release.SOURCE_PUBLICATION,
+                            "workingTreePatchSha256": release.hashlib.sha256(b"").hexdigest(),
+                            "files": [{"path": name, "sha256": release.hashlib.sha256(body).hexdigest(), "size": len(body), "mode": mode}
+                                      for name, (body, mode) in sorted(files.items())]}).encode()
+    review = root / release.SOURCE_PUBLICATION
+    plan = json.loads(review.read_text())
+    plan.update(application_source_sha=source_sha, application_source_inventory_sha256=release.hashlib.sha256(inventory).hexdigest())
+    def replace(rows):
+        record = json.loads(rows[0][1])
+        record["inventory_sha256"][release.SOURCE_INVENTORY] = plan["application_source_inventory_sha256"]
+        return [("SOURCE-MANIFEST.json", json.dumps(record).encode(), 0o644), (release.SOURCE_INVENTORY, inventory, 0o644),
+                *(("application/source/" + name, body, mode) for name, (body, mode) in files.items()),
+                ("fixture/source.c", b"preserved dependency source", 0o644)]
+    rewrite_archive(directory, plan, replace)
+    # Keep the tracked plan bytes untouched after freezing the commit.
+    external = root.parent / "external-review.json"
+    external.write_text(json.dumps(plan))
+    for platform in ("linux", "windows"):
+        path = directory / f"BUILDINFO-{platform}.json"
+        info = json.loads(path.read_text())
+        info["source_sha"] = source_sha
+        path.write_text(json.dumps(info))
+    return external, source_sha, plan
+
+
+class FrozenSourceTests(unittest.TestCase):
+    def test_external_plan_hash_is_checked_before_parse_or_network(self):
+        with tempfile.TemporaryDirectory() as folder:
+            path = Path(folder) / "external.json"
+            path.write_bytes(b"this is not JSON")
+            with mock.patch.object(release.urllib.request, "urlopen") as download:
+                with self.assertRaisesRegex(ValueError, "trusted SHA-256"):
+                    release.source_material(Path(folder) / "output", fetch=True, plan_path=path, plan_sha256="f" * 64, source_sha="a" * 40)
+                download.assert_not_called()
+            for plan_path, checksum, source_sha in ((path, None, "a" * 40), (None, "f" * 64, "a" * 40), (path, "f" * 64, None)):
+                with self.assertRaises(ValueError):
+                    release.reviewed_plan(Path(folder), plan_path, checksum, source_sha)
+
+    def test_frozen_external_plan_transfers_existing_bytes_and_preserves_tracked_plan(self):
+        with tempfile.TemporaryDirectory() as folder:
+            directory, root = Path(folder) / "assets", Path(folder) / "root"
+            directory.mkdir()
+            external, source_sha, plan = frozen_source(directory, root)
+            tracked = (root / release.SOURCE_PUBLICATION).read_bytes()
+            with mock.patch.object(release.urllib.request, "urlopen") as download:
+                release.source_material(directory, fetch=True, root=root, platform="linux", plan_path=external,
+                                        plan_sha256=release.digest(external), source_sha=source_sha)
+                download.assert_not_called()
+            self.assertEqual((root / release.SOURCE_PUBLICATION).read_bytes(), tracked)
+            self.assertEqual((directory / release.SOURCE_REVIEW).read_bytes(), external.read_bytes())
+            release.verify_source_material(directory, plan, root=root, source_sha=source_sha, builds=True)
+            wrong = {**plan, "application_source_sha": "f" * 40}
+            external.write_text(json.dumps(wrong))
+            with self.assertRaisesRegex(ValueError, "pin the frozen"):
+                release.source_material(directory, root=root, plan_path=external, plan_sha256=release.digest(external), source_sha=source_sha)
+            path = directory / "BUILDINFO-linux.json"
+            info = json.loads(path.read_text())
+            info["source_sha"] = "f" * 40
+            path.write_text(json.dumps(info))
+            with self.assertRaisesRegex(ValueError, "linux frozen source SHA"):
+                release.verify_source_material(directory, plan, root=root, source_sha=source_sha, platform="linux")
+
+    def test_external_metadata_uses_frozen_review_without_tracked_plan_update(self):
+        with tempfile.TemporaryDirectory() as folder:
+            directory, root = Path(folder) / "assets", Path(folder) / "root"
+            directory.mkdir()
+            external, source_sha, plan = frozen_source(directory, root)
+            tracked = (root / release.SOURCE_PUBLICATION).read_bytes()
+            for name in release.ASSETS.values():
+                (directory / name).write_bytes(b"synthetic binary")
+                (directory / (name + ".sig")).write_text("synthetic signature")
+            for platform in ("linux", "windows"):
+                (directory / f"THIRD-PARTY-NOTICES-{platform}.txt").write_text("synthetic notice")
+            release.source_material(directory, root=root, plan_path=external, plan_sha256=release.digest(external), source_sha=source_sha)
+            release.manifest(directory, "0.1.0", "neuroqp/neuroqp-aperture", source_sha, "2026-10-14T00:00:00Z",
+                             root=root, plan_path=external, plan_sha256=release.digest(external))
+            release.verify(directory, "0.1.0", source_sha, root=root)
+            self.assertEqual((root / release.SOURCE_PUBLICATION).read_bytes(), tracked)
+            self.assertEqual(release.digest(directory / release.SOURCE_ASSET), plan["sha256"])
+            copied = directory / release.SOURCE_REVIEW
+            copied.write_bytes(copied.read_bytes() + b"\n")
+            with self.assertRaisesRegex(ValueError, "Transferred source review"):
+                release.manifest(directory, "0.1.0", "neuroqp/neuroqp-aperture", source_sha, "2026-10-14T00:00:00Z",
+                                 root=root, plan_path=external, plan_sha256=release.digest(external))
+
+    def test_snapshot_ignores_export_attributes_and_requires_commit_object(self):
+        with tempfile.TemporaryDirectory() as folder:
+            directory, root = Path(folder) / "assets", Path(folder) / "root"
+            directory.mkdir()
+            frozen_source(directory, root)
+            (root / ".gitattributes").write_text("application.txt export-ignore\nsubstitute.txt export-subst\n")
+            (root / "substitute.txt").write_bytes(b"$Format:%H$")
+            release.subprocess.run(["git", "add", "."], cwd=root, check=True)
+            release.subprocess.run(["git", "-c", "user.name=Fixture", "-c", "user.email=fixture@example.invalid", "commit", "-qm", "Fixture export attributes"], cwd=root, check=True)
+            source_sha = release.subprocess.check_output(["git", "rev-parse", "HEAD"], cwd=root, text=True).strip()
+            files = release.application_snapshot(root, source_sha)
+            self.assertEqual(files["application.txt"][0], b"Frozen application implementation.\n")
+            self.assertEqual(files["substitute.txt"][0], b"$Format:%H$")
+            tree_sha = release.subprocess.check_output(["git", "rev-parse", "HEAD^{tree}"], cwd=root, text=True).strip()
+            with self.assertRaisesRegex(ValueError, "identify a Git commit"):
+                release.application_snapshot(root, tree_sha)
+
+    def test_current_git_tree_requires_every_member_and_original_bytes(self):
+        mutations = (
+            lambda rows: [row for row in rows if row[0] != "application/source/application.txt"],
+            lambda rows: [(name, b"forged" if name == "application/source/application.txt" else body, mode) for name, body, mode in rows],
+            lambda rows: rows + [("application/source/unlisted.txt", b"extra", 0o644)],
+            lambda rows: rows + [rows[-1]],
+            lambda rows: rows + [("application/source/../escape", b"unsafe", 0o644)],
+        )
+        for mutation in mutations:
+            with self.subTest(mutation=mutation), tempfile.TemporaryDirectory() as folder:
+                directory, root = Path(folder) / "assets", Path(folder) / "root"
+                directory.mkdir()
+                _, source_sha, plan = frozen_source(directory, root)
+                rewrite_archive(directory, plan, mutation)
+                with self.assertRaisesRegex(ValueError, "members differ|Unsafe or duplicate"):
+                    release.verify_source_material(directory, plan, root=root, source_sha=source_sha)
+        with tempfile.TemporaryDirectory() as folder:
+            directory, root = Path(folder) / "assets", Path(folder) / "root"
+            directory.mkdir()
+            _, source_sha, plan = frozen_source(directory, root)
+            # Archive and inventory agree but the committed Git tree rejects the forged application.
+            def forge(rows):
+                inventory = json.loads(next(body for name, body, mode in rows if name == release.SOURCE_INVENTORY))
+                entry = next(entry for entry in inventory["files"] if entry["path"] == "application.txt")
+                entry.update(sha256=release.hashlib.sha256(b"forged").hexdigest(), size=6)
+                inventory_bytes = json.dumps(inventory).encode()
+                plan["application_source_inventory_sha256"] = release.hashlib.sha256(inventory_bytes).hexdigest()
+                manifest = json.loads(rows[0][1])
+                manifest["inventory_sha256"][release.SOURCE_INVENTORY] = plan["application_source_inventory_sha256"]
+                return [(name, json.dumps(manifest).encode() if name == "SOURCE-MANIFEST.json" else
+                         inventory_bytes if name == release.SOURCE_INVENTORY else
+                         b"forged" if name == "application/source/application.txt" else body, mode) for name, body, mode in rows]
+            rewrite_archive(directory, plan, forge)
+            with self.assertRaisesRegex(ValueError, "frozen Git tree"):
+                release.verify_source_material(directory, plan, root=root, source_sha=source_sha)
+
+    def test_checksum_cache_reuses_reviewed_archive_without_network(self):
+        with tempfile.TemporaryDirectory() as folder:
+            directory, root = Path(folder) / "assets", Path(folder) / "root"
+            directory.mkdir()
+            for platform in ("linux", "windows"):
+                (directory / f"BUILDINFO-{platform}.json").write_text(json.dumps({"version": "0.1.0", "source_sha": "a" * 40}))
+            reviewed_source(directory, root)
+            archive = directory / release.SOURCE_ASSET
+            original = archive.read_bytes()
+            cache = Path(folder) / "cache"
+            release.source_material(directory, root=root, cache=cache)
+            checksum = release.digest(archive)
+            self.assertEqual((cache / (checksum + ".tar.xz")).read_bytes(), original)
+            archive.unlink()
+            with mock.patch.object(release.urllib.request, "urlopen") as download:
+                release.source_material(directory, fetch=True, root=root, cache=cache)
+                download.assert_not_called()
+            self.assertEqual(archive.read_bytes(), original)
+            (cache / (checksum + ".tar.xz")).write_bytes(b"corrupt")
+            # A correct local archive also repairs a corrupt cached entry without fetching.
+            with mock.patch.object(release.urllib.request, "urlopen") as download:
+                release.source_material(directory, fetch=True, root=root, cache=cache)
+                download.assert_not_called()
+            self.assertEqual((cache / (checksum + ".tar.xz")).read_bytes(), original)
+
+
+class SourceAssemblyDeadlineTests(unittest.TestCase):
+    def test_assembly_uses_original_attempt_and_rejects_old_or_revised_inputs(self):
+        refresh = helper_module("refresh-source")
+        expected = {"schema": 1, "stage": "B", "source_sha": "a" * 40, "build_inputs_sha256": "b" * 64,
+                    "freeze_started_at": "2026-10-14T00:00:00Z", "deadline_at": "2026-10-14T00:30:00Z"}
+        with tempfile.TemporaryDirectory() as folder:
+            path = Path(folder) / "attempt.json"
+            path.write_text(json.dumps(expected))
+            with mock.patch.object(refresh.bounded, "identity", return_value=expected), mock.patch.object(refresh.bounded, "timestamp", return_value="2026-10-14T00:10:00Z"):
+                attempt, checksum = refresh.attempt_inputs(path, Path(folder), "a" * 40)
+                self.assertEqual(attempt, expected)
+                self.assertEqual(checksum, release.digest(path))
+                for source_sha in ("c" * 40, "main"):
+                    with self.assertRaisesRegex(ValueError, "frozen source SHA"):
+                        refresh.attempt_inputs(path, Path(folder), source_sha)
+                with self.assertRaisesRegex(ValueError, "bytes changed"):
+                    refresh.attempt_inputs(path, Path(folder), "a" * 40, "f" * 64)
+            with mock.patch.object(refresh.bounded, "identity", return_value={**expected, "build_inputs_sha256": "c" * 64}), self.assertRaisesRegex(ValueError, "frozen inputs"):
+                refresh.attempt_inputs(path, Path(folder), "a" * 40)
+            with mock.patch.object(refresh.bounded, "identity", return_value=expected), mock.patch.object(refresh.bounded, "timestamp", return_value="2026-10-14T00:31:00Z"), self.assertRaisesRegex(ValueError, "deadline exceeded"):
+                refresh.attempt_inputs(path, Path(folder), "a" * 40)
+            path.write_text(json.dumps({**expected, "deadline_at": "2026-10-14T00:31:00Z"}))
+            with mock.patch.object(refresh.bounded, "identity", return_value=expected), self.assertRaisesRegex(ValueError, "exactly 30"):
+                refresh.attempt_inputs(path, Path(folder), "a" * 40)
+
+    def test_actual_write_requires_attempt_and_dispatches_one_bounded_assembly(self):
+        refresh = helper_module("refresh-source")
+        expected = {"schema": 1, "stage": "B", "source_sha": "a" * 40, "build_inputs_sha256": "b" * 64,
+                    "freeze_started_at": "2026-10-14T00:00:00Z", "deadline_at": "2026-10-14T00:30:00Z"}
+        with tempfile.TemporaryDirectory() as folder:
+            root = Path(folder)
+            output = root / "material"
+            args = ["refresh-source.py", "--prior-archive", str(root / release.SOURCE_ASSET), "--prior-review", str(root / "prior.json"),
+                    "--source-sha", "a" * 40, "--output", str(output), "--root", str(root), "--write"]
+            with mock.patch.object(refresh.sys, "argv", args), mock.patch.object(refresh, "prepare") as prepare, mock.patch.object(refresh.sys, "stderr", io.StringIO()), self.assertRaises(SystemExit) as missing:
+                refresh.main()
+            self.assertEqual(missing.exception.code, 2)
+            prepare.assert_not_called()
+            self.assertFalse(output.exists())
+            def timed_out(attempt, seconds, command, report):
+                self.assertEqual(attempt, expected)
+                self.assertEqual(seconds, 600)
+                self.assertEqual(command.count("--assemble-worker"), 1)
+                self.assertIn("--attempt", command)
+                self.assertIn("--attempt-sha256", command)
+                output.mkdir()
+                (output / "source.partial").write_bytes(b"diagnostic partial bytes")
+                refresh.bounded.write_report(report, {**attempt, "status": "fail", "forced_kill": True, "started_at": "2026-10-14T00:10:00Z", "finished_at": "2026-10-14T00:20:00Z"})
+                return 1
+            with mock.patch.object(refresh.sys, "argv", args + ["--attempt", str(root / "attempt.json")]), mock.patch.object(refresh, "attempt_inputs", return_value=(expected, "f" * 64)), mock.patch.object(refresh.bounded, "run_bounded", side_effect=timed_out) as run, self.assertRaises(SystemExit) as stopped:
+                refresh.main()
+            self.assertEqual(stopped.exception.code, 1)
+            run.assert_called_once()
+            report = refresh.bounded.read(output / "ASSEMBLY.json")
+            self.assertEqual(report["status"], "fail")
+            self.assertTrue(report["forced_kill"])
+            self.assertEqual(report["freeze_started_at"], expected["freeze_started_at"])
+            self.assertEqual(report["attempt_sha256"], "f" * 64)
+            self.assertEqual(report["diagnostic_files"], [{"name": "source.partial", "bytes": 24}])
+            self.assertEqual((output / "source.partial").read_bytes(), b"diagnostic partial bytes")
+            # A different output path cannot restart source assembly for this freeze.
+            with self.assertRaisesRegex(ValueError, "one source assembly"):
+                refresh.reserve_assembly(root, expected, "f" * 64, root / "different-output")
+            revised = {**expected, "freeze_started_at": "2026-10-14T01:00:00Z", "deadline_at": "2026-10-14T01:30:00Z"}
+            refresh.reserve_assembly(root, revised, "1" * 64, root / "later-attempt")
+
+    def test_successful_assembly_review_binds_exact_original_attempt_receipt(self):
+        refresh = helper_module("refresh-source")
+        expected = {"schema": 1, "stage": "B", "source_sha": "a" * 40, "build_inputs_sha256": "b" * 64,
+                    "freeze_started_at": "2026-10-14T00:00:00Z", "deadline_at": "2026-10-14T00:30:00Z"}
+        with tempfile.TemporaryDirectory() as folder:
+            root = Path(folder)
+            output = root / "material"
+            args = ["refresh-source.py", "--prior-archive", str(root / release.SOURCE_ASSET), "--prior-review", str(root / "prior.json"),
+                    "--source-sha", "a" * 40, "--output", str(output), "--root", str(root), "--write", "--attempt", str(root / "attempt.json")]
+            def completed(attempt, seconds, command, report):
+                output.mkdir()
+                (output / "REFRESH.json").write_text(json.dumps({"status": "assembled-awaiting-review", "deadline_exceeded": False}))
+                (output / release.SOURCE_REVIEW).write_text(json.dumps({"status": "assembled-awaiting-review", "sha256": "c" * 64}))
+                refresh.bounded.write_report(report, {**attempt, "status": "pass", "forced_kill": False,
+                                                     "started_at": "2026-10-14T00:10:00Z", "finished_at": "2026-10-14T00:11:00Z"})
+                return 0
+            with mock.patch.object(refresh.sys, "argv", args), mock.patch.object(refresh, "attempt_inputs", return_value=(expected, "f" * 64)), mock.patch.object(refresh.bounded, "validate_deadline"), mock.patch.object(refresh.bounded, "run_bounded", side_effect=completed) as run, self.assertRaises(SystemExit) as finished:
+                refresh.main()
+            self.assertEqual(finished.exception.code, 0)
+            run.assert_called_once()
+            plan = json.loads((output / release.SOURCE_REVIEW).read_text())
+            receipt = plan["assembly_attempt"]
+            self.assertEqual(receipt["status"], "pass")
+            self.assertFalse(receipt["forced_kill"])
+            for key in ("source_sha", "build_inputs_sha256", "freeze_started_at", "deadline_at"):
+                self.assertEqual(receipt[key], expected[key])
+            self.assertEqual(receipt["attempt_sha256"], "f" * 64)
+            self.assertEqual(receipt["archive_sha256"], plan["sha256"])
+            self.assertEqual(receipt["refresh_receipt_sha256"], release.digest(output / "REFRESH.json"))
+            self.assertEqual(plan["status"], "assembled-awaiting-review")
+
+    def test_expired_finished_assembly_preserves_bytes_but_never_ready_review(self):
+        refresh = helper_module("refresh-source")
+        expected = {"schema": 1, "stage": "B", "source_sha": "a" * 40, "build_inputs_sha256": "b" * 64,
+                    "freeze_started_at": "2026-10-14T00:00:00Z", "deadline_at": "2026-10-14T00:30:00Z"}
+        with tempfile.TemporaryDirectory() as folder:
+            root = Path(folder)
+            prior = root / release.SOURCE_ASSET
+            prior.write_bytes(b"tiny prior fixture")
+            output = root / "material"
+            args = SimpleNamespace(prior_archive=prior, prior_review=root / "prior.json", root=root, source_sha="a" * 40,
+                                   output=output, write=True, timeout=600, xz_preset=0)
+            generated = {"SOURCE-MANIFEST.json": b'{"refresh":{"changed_application_files":[]}}'}
+            review = {"schema": 1, "status": "assembled-awaiting-review", "sha256": None}
+            def write_tiny(archive, destination, *args):
+                destination.write_bytes(b"preserved completed fixture")
+                return {"sha256": release.digest(destination)}
+            with mock.patch.object(refresh, "prepare", return_value=(generated, {}, set(), review)), mock.patch.object(refresh, "write_archive", side_effect=write_tiny), mock.patch.object(refresh.bounded, "deadline_remaining", return_value=30), mock.patch.object(refresh.bounded, "validate_deadline", side_effect=[None, ValueError("deadline exceeded")]), mock.patch.object(refresh.bounded, "timestamp", side_effect=["2026-10-14T00:29:30Z", "2026-10-14T00:29:31Z", "2026-10-14T00:30:01Z"]), self.assertRaisesRegex(ValueError, "deadline exceeded"):
+                refresh.assemble(args, expected, "f" * 64)
+            self.assertEqual((output / release.SOURCE_ASSET).read_bytes(), b"preserved completed fixture")
+            self.assertEqual(json.loads((output / release.SOURCE_REVIEW).read_text())["status"], "assembled-awaiting-review")
+            receipt = json.loads((output / "REFRESH.json").read_text())
+            self.assertEqual(receipt["status"], "fail")
+            self.assertTrue(receipt["deadline_exceeded"])
+            self.assertEqual(receipt["sha256"], release.digest(output / release.SOURCE_ASSET))
 
 
 class ReleaseTests(unittest.TestCase):

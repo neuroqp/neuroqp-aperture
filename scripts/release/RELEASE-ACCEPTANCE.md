@@ -1,159 +1,55 @@
-# Desktop acceptance for release candidates
+# Validation and package smoke
 
-Use this checklist with [RELEASING.md](../../RELEASING.md). Test the exact candidate
-assets, with hashes recorded before launch. A required check passes only when its
-expected behavior is observed. Automated source and worker tests remain mandatory,
-but do not replace native desktop acceptance.
+Use with [RELEASING.md](../../RELEASING.md). Stage A establishes application behavior. Stage C establishes that the final packages launch and contain the expected runtime. Neither CI success nor a typed approval substitutes for observed native results.
 
-## Prepare the test lab separately
+## Stage A functional validation
 
-Keep licensed Windows 11 and Linux VM snapshots ready with initialized desktops,
-a standard-user account, sufficient RAM/disk and no pending restart. Record the
-snapshot date and exact OS build. Update and maintain these environments between
-releases. Revert to a clean baseline for installation, portable extraction and
-upgrade tests; keep development tools and system image libraries out of it.
-Install observer tools separately and never elevate Aperture to make a test pass.
+Run full automated frontend, Rust, release-helper and actual-worker regressions before final packaging. Development compilation is allowed and necessary. Use the compiled native development app on the affected operating systems, with pinned native libraries/runtime. Browser previews alone do not establish native dialogs or filesystem behavior.
 
-Use disposable generated fixtures and owned output folders. Never save into real
-microscopy source datasets. Keep VM disks, caches and generated evidence out of
-Git; place the summarized report and essential evidence in a durable release PR
-comment or associated GitHub record. CI artifacts expire after 14 days.
+| Behavior | Meaningful pre-freeze observations |
+| --- | --- |
+| Viewing | Supported formats and relevant TIFF/BigTIFF variants render correct dimensions/pixels; navigation, pan, zoom and display controls work |
+| Saving | Annotation save/reopen retains points; independent decoded pixels and encoded image data remain unchanged; failures preserve edits and destination |
+| Unsaved work | Real Save/Discard/Cancel branches preserve or discard the intended edits |
+| Lifecycle | Replacement/cancellation leaves no stale results or surviving workers; normal close exits without forced cleanup |
+| Multiple instances | Independent processes, edits and caches; shared/changed-file advisory Cancel/Save as/Overwrite choices; one window closes without breaking others |
+| Updates/installers | Applicable installer admission, startup exclusion, signature/version rejection, preferences, worker shutdown and upgrade failure paths |
 
-Aim for 30 to 60 minutes of routine acceptance after candidates and environments
-are ready. This is a planning target, excluding builds, source-material assembly,
-lab maintenance and expanded checks. Do not drop required checks to meet it.
-If environments or observer tools are unavailable, report the block before
-spending hours repairing the lab during a release.
+Select changed-area tests before freeze. Expand codec, large-file, scratch-space, display/GPU or native-library coverage when those inputs change. Reuse valid unchanged-component results with their original input hashes and limitations. Do not repeat every format on every desktop merely because another package is being built.
 
-## Routine checks for every candidate
+Previous-stable upgrade fixtures are reusable development inputs. Record baseline source/version, production public key, transport/configuration deltas and fixture hashes. Do not rebuild an unchanged baseline for each attempt. Actual signed final payload signatures and feed identities remain mandatory in Stage B/C; detailed upgrade behavior belongs here.
 
-Run these shared desktop checks for Windows Setup, Windows portable and each
-listed Linux distribution. Use small fixtures with known dimensions and pixels.
+Prepare the lab, native helpers and fixed small TIFF before readiness approval. Pin fixture SHA-256 and dimensions, helper SHA-256, native desktop backend, tools and readiness expiry for each required environment. A crash/forced-kill result fails readiness. Keep real datasets and generated evidence out of Git.
 
-| Check                    | Required observation                                                                                                                                                                                       |
-| ------------------------ | ---------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
-| Launch and native open   | The default launch reaches a usable viewer. The native file chooser opens a representative PNG and TIFF, including a filename with non-ASCII text, spaces and brackets.                                    |
-| Viewing and navigation   | Actual image pixels appear with correct dimensions; pan, zoom, fit, folder navigation and display adjustment respond.                                                                                      |
-| Annotation save          | Add points to an owned TIFF copy, save and reopen it. Independently verify retained points and unchanged image pixels. A screenshot or reported file size alone is insufficient.                           |
-| Unsaved-work guard       | Cancel a replacement/close with edits and observe retained edits. Discard through the real dialog and observe the requested operation complete. Exercise Save during the upgrade check.                    |
-| Cancellation and closure | Close naturally and observe the application exit. Exercise processing cancellation and close during processing on Windows and Linux, and verify owned workers exit. Do not count a forced kill as success. |
-| Restart and persistence  | Relaunch the same bytes and verify saved preferences and normal warm-cache operation.                                                                                                                      |
+### Readiness record
 
-Complete the full PNG/JPEG/BMP/TIFF/BigTIFF opening set once on Windows Setup and
-once on Linux. Portable and the remaining Linux desktops still require the
-representative PNG/TIFF and all shared checks above. The editions share viewer
-code; this avoids repeating the entire format matrix on identical payloads.
-Shared heavy-worker checks may use one Linux desktop with those same AppImage
-bytes, with the environment and reason recorded. Each desktop still requires
-natural closure and its ordinary cancellation/unsaved-work checks.
+`bounded.py identity` records the source and Git input identities. Combine trusted **Native validation** automated records with two native-functional records, Linux and Windows, and six prepared-lab records. A native record includes `suite: native-functional`, tested `areas`, evidence references, development-binary hash, component identities, source SHA, `status` and `forced_kill`. Unchanged component evidence may reference an older source explicitly; current-source native tests must match the automated development binary.
 
-| Edition/environment                    | Additional required checks                                                                                                                                                                                                                                                                                                                            |
-| -------------------------------------- | ----------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
-| Windows 11 x64 Setup, standard user    | Clean per-user install, shortcut launch and uninstall without elevation; image files remain untouched. Verify bundled Fixed WebView2 processes. Disconnect networking for launch and image viewing. Record any stock Evergreen runtime.                                                                                                               |
-| Windows 11 x64 portable, standard user | With no extracted payload, launch the public executable without arguments while offline and observe first extraction plus rendered pixels. Test warm launch and writable local data with the executable in a read-only location. Check its browser download action after promotion using the previous stable portable executable, as described below. |
-| Debian 12 and Ubuntu 24                | Same AppImage, native desktop session, normal FUSE launch and `--appimage-extract-and-run` fallback. Observe viewer functionality on both launch paths.                                                                                                                                                                                               |
-| Arch/Omarchy and Fedora                | Same AppImage and native desktop checks. Record X11 or Wayland; cover both session types across the matrix, including native Wayland on Fedora. Exercise FUSE/fallback where supported and record the actual path.                                                                                                                                    |
+The labs are `windows11-setup`, `windows11-portable`, `debian12`, `ubuntu24`, `arch-omarchy` and `fedora-wayland`. Each records fixed TIFF/helper hashes, dimensions, native desktop/tools with exact paths and SHA-256 values, expiry and a pass. All six
+environments use the same fixed TIFF bytes and dimensions. Windows 10 is unverified; publisher signing remains pending.
 
-Record exact current distro versions rather than claiming support for every
-version of a distribution. Windows 10 is unverified; adding it to the supported
-matrix needs a licensed test environment and acceptance evidence. Windows
-publisher signing is pending and is a disclosed limitation, not a passed check.
+Submit JSON through **Release evidence**, stage A, with the trusted validation run ID. Download its `release-readiness` artifact. Freeze only after it validates against the exact reviewed checkout. Script `--help` and the workflow inputs define the executable commands; preserve exact file bytes when submitting JSON with `gh workflow run --field report_json=@file`.
 
-## Upgrade acceptance
+## Stage B identity and source preparation
 
-Every candidate requires an actual signed Windows installed upgrade and Linux
-AppImage upgrade, with retained preferences, annotations and successful restart.
-One representative Linux desktop is sufficient for the routine upgrade; expand
-that coverage when the updater, runtime or native dependencies change.
+`bounded.py freeze READINESS.json frozen-attempt.json --readiness-run-id RUN_ID` starts the single 30-minute clock. Submit the original receipt through **Release evidence**, stage B. Source preparation/review takes place after this freeze; it does not alter the frozen commit or start a second clock.
 
-Use the previous stable version as the baseline after the first release. Because
-candidates are outside latest, the normal production feed cannot offer them.
-Arrange an isolated test transport before tagging. If this requires rebuilding
-the prior application with a loopback feed, use the previous stable source,
-retain its version, production public key and signed-version checks, and record
-all configuration deltas and provenance. Call that evidence a prior-code fixture
-upgrade, not an upgrade from the untouched published prior binary. Deliver the
-exact incoming candidate bytes and signature. Do not alter public downloads,
-production client configuration or production feeds for this test.
+Provide the reviewed corresponding-source JSON and its exact SHA-256 to **Release candidate**, together with the frozen-attempt record identity. Prepare its archive once and transfer it. The source gate compares required coverage, lock/native identities and archived application files with the frozen Git tree. Final package jobs sign updater assets and record BUILDINFO and hashes. They do not rerun this functional checklist.
 
-The existing Windows fixture helper and
-[Linux fixture recipe](LINUX-UPGRADE-FIXTURE.md) only bootstrap `0.1.1` from a
-`0.0.9` fixture. There is no generic committed recipe for every subsequent stable
-baseline. An operator must arrange and review that fixture/transport, or stop
-and report the gap. Direct installation of the new Setup is not updater evidence.
+## Stage C fixed desktop smoke
 
-Observe update availability, notes and progress; save pending annotation edits
-through the real dialog; install and restart into the candidate version. Verify
-workers stop before replacement/installer start and preferences survive. Check
-the previous release reports no update against its ordinary production feed.
-Portable remains browser-download-only; it does not run the installer updater.
-Its download action requires a newer version in the stable feed, so it cannot be
-exercised from the candidate before promotion. After promotion, launch the
-previous stable portable executable unchanged, check the production feed, and
-verify its action opens the new release's exact portable URL without starting
-an installer. This uses the published prior executable, with no additional
-fixture build. Record it with the other post-promotion production-feed checks
-in [RELEASING.md](../../RELEASING.md#5-verify-production-and-announce).
+Use `smoke-desktop-linux.py` and `smoke-desktop-windows.ps1` with the downloaded candidate identity, exact asset/hash and prepared tiny TIFF. Supply existing observer endpoints/native screenshot tools. Missing tooling or a non-native desktop fails readiness; do not install or repair it inside the attempt.
 
-## Expanded checks selected before tagging
+The fixed cases are launch, render and clean exit. Windows Setup also performs a standard-user install as part of launch. Portable launch starts with the specific incoming payload absent. Linux uses the same AppImage bytes across all four desktops. Debian and Ubuntu add one equally small fallback launch/render/close. Fedora must prove native Wayland, not merely an environment variable.
 
-Review the diff since the previous stable version and record the applicable rows.
-When multiple areas change, use the union of their checks. Give a reason for each
-non-applicable row. A broad runtime/library change can require the full matrix.
+Rendering requires actual ready image state without an error, expected dimensions and observed image pixels in an owned native window. Preview pixels alone can remain visible after loading fails. Observe normal closure and actual exit 0; a cleanup kill never passes.
 
-| Changed area                                                                           | Additional acceptance                                                                                                                                                                                                                                                                                                                            |
-| -------------------------------------------------------------------------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------ |
-| TIFF reading, writing or annotation persistence                                        | Relevant compression, byte order, tiled/stripped, pixel type, BigTIFF and multipage cases; ImageJ interoperability; independent pixel preservation; corrupt-file recovery; a representative large-file save and scratch-space failure.                                                                                                           |
-| Updater, signing, installation, portable launcher, Tauri, WebView2 or native libraries | Save/Discard/Cancel, opt-out/deferral/no-update/offline/error paths, tampered payload and signed-version rejection, read-only/permission failures, concurrent extraction, full cold offline launch, worker-before-replacement ordering and upgrades across affected environments. Include second-drive/network-share paths and uninstall safety. |
-| Rendering, caching or performance                                                      | Representative changed image types, display/GPU/session paths, cold/warm cache and measured preview/save behavior against the previous stable baseline.                                                                                                                                                                                          |
-| File dialogs, navigation or worker lifecycle                                           | Real chooser/dialog behavior, unsaved-work branches, processing replacement/cancellation and absence of stale results or surviving workers on affected platforms.                                                                                                                                                                                |
+Use fixed per-step timeouts and the frozen overall deadline. Record each start/finish/duration, source/input/checksum identities, asset/fixture/helper hashes, OS/user/backend, screenshot SHA-256 and process outcome. A second attempt must retain the first failed record, unchanged-byte identity and a specific transient-lab reason. No third attempt, repaired helper, weakened assertion or restarted deadline is accepted.
 
-## Automation and evidence rules
+A required fail/inconclusive/timeout or missing environment ends the attempt. Return repair to Stage A. Preserve the failed candidate and report; published assets remain immutable. Submit six passing reports through **Release evidence**, stage C. Promotion validates this compact record and the exact candidate identities before changing Latest.
 
-Codex should reuse reviewed scripts and existing native tools, then inspect the
-critical rendered screens and independent file/process results. Every result
-must identify the helper revision and any mocked input or observation limitation.
+Do not perform annotation/save/pixel-preservation suites, full formats, cancellation/concurrency/performance or GUI upgrades here. Any exceptional final-byte check requires a small reviewed workflow change before freeze; keep its evidence separately named so it cannot silently expand this fixed suite.
 
-- `scripts/release/smoke-linux.sh` proves bundled tools/worker behavior, not the desktop.
-- `scripts/release/smoke-windows.ps1` provides package/runtime evidence on Windows
-  Server. Its window cleanup can force-kill after a timeout, so it does not prove
-  natural closure or standard-user Windows 11 behavior.
-- `scripts/native-appimage-update.py` exercises real signatures and replacement,
-  but supplies chooser/confirmation responses. Combine it with actual native
-  dialog checks; it is not complete native-dialog acceptance by itself.
-- Other local first-release helpers in ignored `artifacts/` are optional evidence,
-  not a portable committed test suite. Record and review them before reuse.
+## Evidence retention
 
-Use pass, fail or inconclusive. A missing observation is inconclusive. If a helper
-fails, diagnose it and allow at most one retry of the unchanged bytes after a
-specific tool/environment correction. Retain the failed result and correction.
-Persistent failure blocks the release. Product failures require a new reviewed
-fix and higher candidate version; never weaken assertions or edit binaries.
-
-Use this template in the release PR or associated durable GitHub record:
-
-```text
-Candidate tag:
-Source commit:
-SHA256SUMS SHA-256:
-Individual application hashes:
-Previous stable version and upgrade fixture/transport provenance:
-Diff reviewed and expanded rows selected, with non-applicable reasons:
-Operator/date:
-
-Environment | Edition/launch path | Test | Pass/fail/inconclusive | Evidence
-Include exact OS build, X11/Wayland, user privilege, fixture/helper revision,
-source/saved-file verification and natural process/worker exit observations.
-
-Limitations and retained tool-failure/retry records:
-Acceptance decision and report reviewer:
-Promotion run:
-Post-promotion public-download hashes and production-update observations:
-QA cleanup:
-```
-
-All required pre-promotion checks need a pass and evidence before the operator
-sets `desktop_acceptance=accepted`. Complete and record the separate production
-checks after promotion and before announcing success. The workflow verifies
-artifact identity, not this report. CI success, a typed confirmation or an expiring
-screenshot alone does not establish acceptance. Keep the record linked from the finalized release notes.
+Put the compact result and essential observations in a durable GitHub PR/release record. Link it from concise final release notes. CI artifacts expire; retain current/previous relevant package identities and compact reports independently. Record every helper/environment failure honestly. Detailed lab preparation, VM cleanup and crash recovery belong in [LAB.md](LAB.md), outside release execution.

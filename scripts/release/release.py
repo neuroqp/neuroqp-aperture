@@ -13,7 +13,7 @@ import subprocess
 import tarfile
 import tempfile
 import urllib.request
-from pathlib import Path
+from pathlib import Path, PurePosixPath
 
 ROOT = Path(__file__).resolve().parents[2]
 ASSETS = {
@@ -26,6 +26,7 @@ SOURCE_ASSET = "Aperture-Corresponding-Source.tar.xz"
 SOURCE_REVIEW = "Aperture-Corresponding-Source.json"
 LOCKFILES = ("pnpm-lock.yaml", "src-tauri/Cargo.lock")
 SOURCE_INVENTORY = "application/source-inventory.json"
+SOURCE_PUBLICATION = "scripts/release/corresponding-source.json"
 
 
 def digest(path):
@@ -49,8 +50,12 @@ def verify_application_locks(root, plan):
         raise ValueError("Corresponding source does not match the checkout application lockfiles; review refreshed material")
 
 
-def source_plan(path):
-    plan = json.loads(path.read_text(encoding="utf-8"))
+def source_plan(path, trusted_sha256=None):
+    body = path.read_bytes()
+    if trusted_sha256 is not None:
+        if not re.fullmatch(r"[0-9a-f]{64}", trusted_sha256) or hashlib.sha256(body).hexdigest() != trusted_sha256:
+            raise ValueError("External corresponding-source review differs from its trusted SHA-256")
+    plan = json.loads(body)
     if plan.get("schema") != 1 or plan.get("status") != "ready":
         raise ValueError("Corresponding-source publication blocked: assemble and review the actual source/build material first")
     hashes = plan.get("native_dependencies_sha256", {})
@@ -61,41 +66,119 @@ def source_plan(path):
         raise ValueError("Corresponding-source review must pin both application lockfiles and their archived source inventory")
     if not re.fullmatch(r"https://github.com/neuroqp/neuroqp-aperture/releases/download/[A-Za-z0-9._-]+/Aperture-Corresponding-Source\.tar\.xz", plan.get("url") or ""):
         raise ValueError("Source archive must have a versioned source-repository release URL; its downloaded bytes are verified")
+    if "application_source_sha" in plan and not re.fullmatch(r"[0-9a-f]{40}", plan["application_source_sha"] or ""):
+        raise ValueError("Reviewed application source SHA must be a full Git commit ID")
     return plan
 
 
-def verify_source_material(directory, plan, builds=False, platform=None, fixture_locks=None):
+def application_snapshot(root, source_sha):
+    if not re.fullmatch(r"[0-9a-f]{40}", source_sha or ""):
+        raise ValueError("Source SHA must be a full Git commit ID")
+    if subprocess.check_output(["git", "cat-file", "-t", source_sha], cwd=root).strip() != b"commit":
+        raise ValueError("Frozen source SHA must identify a Git commit")
+    # Read raw Git objects so export-ignore/export-subst cannot alter the tree.
+    tree = subprocess.check_output(["git", "ls-tree", "-rz", source_sha], cwd=root)
+    entries = []
+    for row in tree.split(b"\0"):
+        if not row:
+            continue
+        identity, name = row.split(b"\t", 1)
+        mode, kind, object_sha = identity.split()
+        name = name.decode("utf-8")
+        if name == SOURCE_PUBLICATION:
+            continue
+        if kind != b"blob" or mode not in (b"100644", b"100755"):
+            raise ValueError(f"Frozen application tree requires regular files: {name}")
+        entries.append((name, int(mode[-3:], 8), object_sha))
+    objects = subprocess.check_output(["git", "cat-file", "--batch"], cwd=root,
+                                      input=b"".join(object_sha + b"\n" for _, _, object_sha in entries))
+    files, offset = {}, 0
+    for name, mode, object_sha in entries:
+        end = objects.index(b"\n", offset)
+        found_sha, kind, size = objects[offset:end].split()
+        if found_sha != object_sha or kind != b"blob":
+            raise ValueError("Git application snapshot returned a different object")
+        start, size = end + 1, int(size)
+        files[name] = (objects[start:start + size], mode)
+        offset = start + size + 1
+    return files
+
+
+def reviewed_plan(root, plan_path=None, plan_sha256=None, source_sha=None):
+    if (plan_path is None) != (plan_sha256 is None):
+        raise ValueError("External review requires both --plan and --plan-sha256")
+    if plan_path is not None and not re.fullmatch(r"[0-9a-f]{40}", source_sha or ""):
+        raise ValueError("External review requires a frozen full --source-sha")
+    path = plan_path if plan_path is not None else root / SOURCE_PUBLICATION
+    plan = source_plan(path, plan_sha256)
+    if plan_path is not None and plan.get("application_source_sha") != source_sha:
+        raise ValueError("External review must pin the frozen application source SHA")
+    return path, plan
+
+
+def verify_source_material(directory, plan, builds=False, platform=None, fixture_locks=None, root=None, source_sha=None):
     archive = directory / SOURCE_ASSET
     if not archive.is_file() or digest(archive) != plan["sha256"]:
         raise ValueError("Corresponding-source archive missing or different from the reviewed bytes")
-    # Read bounded identity records in place, never extract or execute content.
-    inventory_bytes = None
+    inventory_bytes, members, seen = None, {}, set()
+    # Stream the full reviewed archive; never extract or execute its contents.
     with tarfile.open(archive, "r|xz") as source:
         first = source.next()
         if not first or not first.isfile() or first.name != "SOURCE-MANIFEST.json" or first.size > 65536:
             raise ValueError("Source archive must start with a bounded SOURCE-MANIFEST.json identity record")
         record = json.load(source.extractfile(first))
-        for member in source:
-            if member.name == SOURCE_INVENTORY:
-                if not member.isfile() or member.size > 65536:
+        if record.get("schema") != 1 or record.get("native_dependencies_sha256") != plan["native_dependencies_sha256"]:
+            raise ValueError("Source archive identity differs from its reviewed dependency identities")
+        if record.get("inventory_sha256", {}).get(SOURCE_INVENTORY) != plan["application_source_inventory_sha256"]:
+            raise ValueError("Source archive application inventory differs from its reviewed identity")
+        seen.add(first.name)
+        for member in iter(source.next, None):
+            name = member.name
+            if name.startswith("/") or ".." in PurePosixPath(name).parts or str(PurePosixPath(name)) != name or name in seen or not member.isfile():
+                raise ValueError(f"Unsafe or duplicate source archive member: {name}")
+            seen.add(name)
+            if name == SOURCE_INVENTORY:
+                if member.size > 65536:
                     raise ValueError("Source archive must contain a bounded application source inventory")
                 inventory_bytes = source.extractfile(member).read()
-                break
-    if record.get("schema") != 1 or record.get("native_dependencies_sha256") != plan["native_dependencies_sha256"]:
-        raise ValueError("Source archive identity differs from its reviewed dependency identities")
-    if record.get("inventory_sha256", {}).get(SOURCE_INVENTORY) != plan["application_source_inventory_sha256"]:
-        raise ValueError("Source archive application inventory differs from its reviewed identity")
+            elif name.startswith("application/source/"):
+                result = hashlib.sha256()
+                reader = source.extractfile(member)
+                for block in iter(lambda: reader.read(1024 * 1024), b""):
+                    result.update(block)
+                members[name.removeprefix("application/source/")] = {
+                    "sha256": result.hexdigest(), "size": member.size,
+                    "mode": 0o755 if member.mode & 0o111 else 0o644}
     if inventory_bytes is None or hashlib.sha256(inventory_bytes).hexdigest() != plan["application_source_inventory_sha256"]:
         raise ValueError("Source archive application inventory bytes differ from their reviewed hash")
     inventory = json.loads(inventory_bytes)
     lock_entries = [entry for entry in inventory.get("files", []) if entry.get("path") in LOCKFILES]
     if inventory.get("schema") != 1 or len(lock_entries) != len(LOCKFILES) or {entry["path"]: entry.get("sha256") for entry in lock_entries} != plan["application_lockfiles_sha256"]:
         raise ValueError("Source archive application lockfiles differ from the reviewed plan")
+    entries = {}
+    for entry in inventory.get("files", []):
+        name = entry.get("path", "")
+        if not name or name.startswith("/") or ".." in PurePosixPath(name).parts or str(PurePosixPath(name)) != name or name in entries or not re.fullmatch(r"[0-9a-f]{64}", entry.get("sha256") or ""):
+            raise ValueError("Unsafe or duplicate application source inventory entry")
+        entries[name] = {key: entry[key] for key in ("sha256", "size", "mode") if key in entry}
+    if set(entries) != set(members) or any(any(members[name][key] != value for key, value in entry.items()) for name, entry in entries.items()):
+        raise ValueError("Source archive application members differ from their inventory")
+    frozen_sha = source_sha or plan.get("application_source_sha")
+    if frozen_sha is not None:
+        if not re.fullmatch(r"[0-9a-f]{40}", frozen_sha) or plan.get("application_source_sha", frozen_sha) != frozen_sha or inventory.get("gitBaseSha") != frozen_sha or inventory.get("trackedChanges") != [] or inventory.get("includedUntracked") != [] or inventory.get("excludedPublicationRecord") != SOURCE_PUBLICATION or inventory.get("workingTreePatchSha256") != hashlib.sha256(b"").hexdigest():
+            raise ValueError("Source archive is not a clean snapshot of the frozen source SHA")
+        if root is not None:
+            expected = {name: {"sha256": hashlib.sha256(body).hexdigest(), "size": len(body), "mode": mode}
+                        for name, (body, mode) in application_snapshot(root, frozen_sha).items()}
+            if entries != expected:
+                raise ValueError("Source archive application inventory differs from the frozen Git tree")
     platforms = ("linux", "windows") if builds else ((platform,) if platform else ())
     for platform in platforms:
         info = json.loads((directory / f"BUILDINFO-{platform}.json").read_text(encoding="utf-8"))
         if native_identity(info["native_dependencies"]) != plan["native_dependencies_sha256"][platform]:
             raise ValueError(f"Corresponding source does not match the shipped {platform} native dependency identity")
+        if frozen_sha is not None and info.get("source_sha") != frozen_sha:
+            raise ValueError(f"Corresponding source does not match the shipped {platform} frozen source SHA")
         expected_locks = fixture_locks if fixture_locks is not None else plan["application_lockfiles_sha256"]
         if info.get("lockfiles") != expected_locks:
             raise ValueError(f"Corresponding source does not match the shipped {platform} application lockfiles")
@@ -114,9 +197,8 @@ def upgrade_fixture_locks(directory, root, plan):
     return {**plan["application_lockfiles_sha256"], "src-tauri/Cargo.lock": digest(delta)}
 
 
-def source_material(directory, fetch=False, root=ROOT, platform=None, upgrade_fixture=False):
-    review = root / "scripts/release/corresponding-source.json"
-    plan = source_plan(review)
+def source_material(directory, fetch=False, root=ROOT, platform=None, upgrade_fixture=False, plan_path=None, plan_sha256=None, source_sha=None, cache=None):
+    review, plan = reviewed_plan(root, plan_path, plan_sha256, source_sha)
     verify_application_locks(root, plan)
     fixture_locks = None
     if upgrade_fixture:
@@ -125,7 +207,10 @@ def source_material(directory, fetch=False, root=ROOT, platform=None, upgrade_fi
         fixture_locks = upgrade_fixture_locks(directory, root, plan)
     directory.mkdir(parents=True, exist_ok=True)
     archive = directory / SOURCE_ASSET
-    if fetch:
+    cached = cache / (plan["sha256"] + ".tar.xz") if cache is not None else None
+    if (not archive.is_file() or digest(archive) != plan["sha256"]) and cached is not None and cached.is_file() and digest(cached) == plan["sha256"]:
+        shutil.copyfile(cached, archive)
+    if fetch and (not archive.is_file() or digest(archive) != plan["sha256"]):
         temporary = archive.with_suffix(".partial")
         try:
             with urllib.request.urlopen(plan["url"], timeout=60) as source, temporary.open("wb") as output:
@@ -137,8 +222,18 @@ def source_material(directory, fetch=False, root=ROOT, platform=None, upgrade_fi
             temporary.replace(archive)
         finally:
             temporary.unlink(missing_ok=True)
-    verify_source_material(directory, plan, platform=platform, fixture_locks=fixture_locks)
-    shutil.copyfile(review, directory / SOURCE_REVIEW)
+    verify_source_material(directory, plan, platform=platform, fixture_locks=fixture_locks,
+                           root=root if plan_path is not None else None, source_sha=source_sha)
+    if cached is not None and (not cached.is_file() or digest(cached) != plan["sha256"]):
+        cache.mkdir(parents=True, exist_ok=True)
+        temporary = cached.with_suffix(".partial")
+        try:
+            shutil.copyfile(archive, temporary)
+            temporary.replace(cached)
+        finally:
+            temporary.unlink(missing_ok=True)
+    if review.resolve() != (directory / SOURCE_REVIEW).resolve():
+        shutil.copyfile(review, directory / SOURCE_REVIEW)
 
 
 def current_version(root=ROOT):
@@ -179,14 +274,17 @@ def set_version(version, root=ROOT):
     current_version(root)
 
 
-def manifest(directory, version, repository, source_sha, published_at, signed=True, root=ROOT):
+def manifest(directory, version, repository, source_sha, published_at, signed=True, root=ROOT, plan_path=None, plan_sha256=None):
     if not re.fullmatch(r"[0-9a-f]{40}", source_sha):
         raise ValueError("Source SHA must be a full Git commit ID")
     if repository != "neuroqp/neuroqp-aperture":
         raise ValueError("Release assets belong in neuroqp/neuroqp-aperture")
-    plan = source_plan(root / "scripts/release/corresponding-source.json")
+    _, plan = reviewed_plan(root, plan_path, plan_sha256, source_sha)
     verify_application_locks(root, plan)
-    verify_source_material(directory, plan, builds=True)
+    verify_source_material(directory, plan, builds=True, root=root if plan_path is not None else None,
+                           source_sha=source_sha if plan_path is not None else None)
+    if plan_path is not None and digest(directory / SOURCE_REVIEW) != plan_sha256:
+        raise ValueError("Transferred source review differs from its trusted SHA-256")
     if json.loads((directory / SOURCE_REVIEW).read_text(encoding="utf-8")) != plan:
         raise ValueError("Source material review differs from the release commit's reviewed plan")
     platforms = {}
@@ -211,10 +309,10 @@ def manifest(directory, version, repository, source_sha, published_at, signed=Tr
             raise ValueError(f"Missing third-party notices for {platform}")
     checksums = "".join(f"{digest(path)}  {path.name}\n" for path in sorted(directory.iterdir()) if path.is_file() and path.name != "SHA256SUMS")
     (directory / "SHA256SUMS").write_text(checksums, encoding="utf-8")
-    verify(directory, version, source_sha, signed)
+    verify(directory, version, source_sha, signed, root=root)
 
 
-def verify(directory, version, source_sha, signed=True):
+def verify(directory, version, source_sha, signed=True, root=None):
     expected = set(ASSETS.values()) | {"BUILDINFO-linux.json", "BUILDINFO-windows.json", "THIRD-PARTY-NOTICES-linux.txt", "THIRD-PARTY-NOTICES-windows.txt", SOURCE_ASSET, SOURCE_REVIEW}
     if signed:
         expected |= {name + ".sig" for name in ASSETS.values()} | {"latest.json"}
@@ -233,7 +331,10 @@ def verify(directory, version, source_sha, signed=True):
         info = json.loads((directory / f"BUILDINFO-{platform}.json").read_text(encoding="utf-8"))
         if info["version"] != version or info["source_sha"] != source_sha:
             raise ValueError("Build identity mismatch")
-    verify_source_material(directory, source_plan(directory / SOURCE_REVIEW), builds=True)
+    plan = source_plan(directory / SOURCE_REVIEW)
+    if plan.get("application_source_sha") not in (None, source_sha):
+        raise ValueError("Reviewed application source SHA differs from the build identity")
+    verify_source_material(directory, plan, builds=True, root=root)
     if signed:
         feed = json.loads((directory / "latest.json").read_text(encoding="utf-8"))
         if feed["version"] != version or set(feed["platforms"]) != set(ASSETS):
@@ -284,6 +385,10 @@ def main():
     sources = commands.add_parser("source-material")
     sources.add_argument("directory", type=Path)
     sources.add_argument("--fetch", action="store_true")
+    sources.add_argument("--plan", type=Path)
+    sources.add_argument("--plan-sha256")
+    sources.add_argument("--source-sha")
+    sources.add_argument("--cache", type=Path, help="Optional local cache keyed by the reviewed archive SHA-256")
     sources.add_argument("--platform", choices=("linux", "windows"))
     sources.add_argument("--upgrade-fixture", action="store_true", help="Verify the separate unsigned 0.0.9 Windows fixture root-version delta")
     version = commands.add_parser("version")
@@ -299,6 +404,8 @@ def main():
         if command == "verify":
             child.add_argument("--cryptographic", action="store_true")
         if command == "metadata":
+            child.add_argument("--plan", type=Path)
+            child.add_argument("--plan-sha256")
             child.add_argument("--repository", default="neuroqp/neuroqp-aperture")
             child.add_argument("--published-at", default=datetime.datetime.now(datetime.timezone.utc).isoformat().replace("+00:00", "Z"))
     info = commands.add_parser("buildinfo")
@@ -310,15 +417,15 @@ def main():
         print(current_version())
         notes(current_version())
     elif args.command == "source-material":
-        source_material(args.directory, args.fetch, platform=args.platform, upgrade_fixture=args.upgrade_fixture)
+        source_material(args.directory, args.fetch, platform=args.platform, upgrade_fixture=args.upgrade_fixture, plan_path=args.plan, plan_sha256=args.plan_sha256, source_sha=args.source_sha, cache=args.cache)
     elif args.command == "version":
         set_version(args.version)
     elif args.command == "notes":
         print(notes(args.version or current_version()), end="")
     elif args.command == "metadata":
-        manifest(args.directory, args.version, args.repository, args.source_sha, args.published_at, not args.unsigned)
+        manifest(args.directory, args.version, args.repository, args.source_sha, args.published_at, not args.unsigned, plan_path=args.plan, plan_sha256=args.plan_sha256)
     elif args.command == "verify":
-        verify(args.directory, args.version, args.source_sha, not args.unsigned)
+        verify(args.directory, args.version, args.source_sha, not args.unsigned, root=ROOT)
         if args.cryptographic:
             if args.unsigned:
                 raise ValueError("Unsigned validation has no signatures to verify")

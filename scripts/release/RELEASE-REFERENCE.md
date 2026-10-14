@@ -6,17 +6,23 @@ paths below are relative to the repository root.
 
 ## Build environments
 
-The reusable `package-build.yml` builds Windows on `windows-2022` and Linux in the
-pinned Debian 12 container on an Ubuntu runner. It runs frontend build/tests,
-Rust tests with a real worker executable, and Clippy before optimized packaging.
-Windows Server runner evidence does not establish Windows 11 standard-user
-behavior. Prepare native desktop environments separately.
+`native-validation.yml` is Stage A. It compiles development binaries with their
+pinned native runtimes, runs the automated functional/regression suites and
+produces reusable development evidence. Prepare native Windows/Linux desktops
+and perform changed-area functional validation here. Optional prior-version
+fixtures are development inputs; reuse verified ones while their baseline and
+configuration stay applicable.
 
-`native-validation.yml` calls the same package workflow without updater secrets
-or signatures. Its packages cannot be promoted. Use it before release when
-packaging, platform code, toolchains or native libraries change. A routine release
-need not duplicate the full unsigned build immediately before the signed build;
-the candidate workflow runs the source checks again before packaging.
+`package-build.yml` is Stage B. It builds updater-signed final packages once,
+Windows on `windows-2022` and Linux in the pinned Debian 12 container on an Ubuntu
+runner. It consumes trusted Stage A and frozen-source evidence. It does not rerun
+frontend/Rust/worker functional suites or build an unsigned optimized edition first.
+
+The short CI `smoke-linux.sh` and `smoke-windows.ps1` check payload structure,
+bundled runtime and build identity. The versioned `smoke-desktop-*` adapters perform
+Stage C's fixed native launch/one-TIFF/render/normal-exit cases. Windows Server
+payload evidence does not establish Windows 11 standard-user behavior. Observer
+tools and every native desktop must already be ready before freeze.
 
 Pinned downloads have SHA-256 checks. Changes to toolchains, library versions,
 checksums, workflow code or release scripts require source review.
@@ -91,79 +97,29 @@ and verifies the archive, then compares its identities against actual BUILDINFO.
 Checkout lock changes block source preflight before downloading.
 An identity mismatch blocks binary uploads and requires refreshed material.
 
-Unsigned native builds and package smoke tests remain available. Immediately
-before either platform uploads binary artifacts, the workflow downloads and
-verifies reviewed source material against that platform's actual BUILDINFO.
-If source material is missing or fails verification, the job stops at this upload
-gate after builds and smoke checks; no binary artifacts, including failed packages,
-are uploaded. Windows screenshots, process JSON, and text diagnostics can still
-be retained. Public binary CI downloads require source material too; signing or
-calling a build validation does not establish redistribution compliance.
+Development binaries and optional upgrade fixtures receive no updater signing
+secrets. Their source-material requirements still apply before public binary
+artifact uploads. Final packages use the reviewed external source plan pinned by
+SHA-256 and frozen Git identity. Missing or mismatched coverage, lockfiles, native
+identities or BUILDINFO blocks uploads. Do not weaken this gate to speed a release.
 
-Unsigned package sets include the verified source archive and its review record
-in `SHA256SUMS`, and aggregate metadata checks both native identities and each
-build's application lock hashes.
-The gate does not assemble sources or certify their distribution.
+Corresponding-source preparation happens once after source freeze. See
+[SOURCE-MATERIAL.md](SOURCE-MATERIAL.md) for the reviewed refresh command, exact-byte
+transfer/cache reuse, and the separately deferred dependency/archive split. Do not
+assemble locally and then assemble the same material again on a publisher runner.
+An external manifest avoids changing the frozen commit merely to update source
+publication metadata. Source-material tags and assets remain immutable.
 
-The current gate pins exact lockfile bytes. A version-only bump changes
-`src-tauri/Cargo.lock` and therefore also requires refreshed reviewed material and
-pins. Do this before tagging. Archive assembly is a reviewed manual step; the gate
-does not assemble it, and unchanged native dependencies do not bypass it.
+## Historical bootstrap upgrade fixtures
 
-To refresh the source artifact when version or dependency locks change:
+The retained `0.0.9` recipes were first-release bootstrap tests for `0.1.1`.
+They are not the previous-stable baseline for later releases and are not called
+by Stage B or C. [LINUX-UPGRADE-FIXTURE.md](LINUX-UPGRADE-FIXTURE.md) and
+`build-windows-upgrade-fixture.ps1` preserve that historical evidence only.
 
-1. Assemble `Aperture-Corresponding-Source.tar.xz` with the applicable exact-version
-   sources, build recipes/configuration, patches, and license material for the
-   libraries actually bundled on both platforms, including relevant statically
-   incorporated dependencies. The Windows inventory is a starting point, not a
-   complete source archive. Check Linux's actual bundled libraries against the
-   Debian versions in BUILDINFO. This completeness review remains human work.
-2. Put `SOURCE-MANIFEST.json` first in the tar archive. It must be a regular file
-   of at most 64 KiB with `schema: 1` and `native_dependencies_sha256` containing
-   `linux` and `windows` identity hashes. Each hash is SHA-256 of that platform's
-   BUILDINFO `native_dependencies` serialized with Python
-   `json.dumps(value, sort_keys=True, separators=(",", ":"), ensure_ascii=True)`
-   and encoded as UTF-8. Dependency changes require fresh material and review.
-3. Publish the reviewed archive under a fixed source-material tag in this source
-   repository, outside latest, then update `corresponding-source.json` through a
-   PR with `status: "ready"`, its version-tag asset URL, the archive's SHA-256,
-   both native identity hashes, `application_lockfiles_sha256` for `pnpm-lock.yaml`
-   and `src-tauri/Cargo.lock`, and `application_source_inventory_sha256`. Verify
-   those exact lock bytes against the archived application source inventory,
-   which the first manifest must pin under `inventory_sha256`. Use a new
-   source-material tag and preserve published
-   bytes. The workflow downloads actual bytes, checks their pinned hash and identity
-   record, then compares native identities and lock hashes against both completed
-   binary builds.
-
-The separate unsigned prior-version fixture must use `source-material --platform
-windows --upgrade-fixture`. Its preserved `test-deltas/src-tauri/Cargo.lock` may
-change only the aperture root version from `0.1.1` to `0.0.9`; its actual BUILDINFO must hash
-that exact file. Production upload and metadata gates have no fixture exception.
-
-The gate checks reviewed byte/dependency identities. It does not determine
-license obligations or prove that the archive's contents are complete or
-rebuildable; those claims require the source/material review above.
-
-## First-release upgrade fixtures
-
-These are historical bootstrap recipes for `0.1.1`, not a command for upgrading
-from every later stable version. The Windows helper is version-specific.
-For later releases, arrange the previous stable baseline and any isolated test
-feed fixture before tagging, following [upgrade acceptance](RELEASE-ACCEPTANCE.md#upgrade-acceptance).
-
-For first-release Windows upgrade testing, dispatch **Native validation** with
-`build_upgrade_fixture: true`. After preserving the normal unsigned packages and
-verifying corresponding source, the Windows job builds a separate `0.0.9` Setup
-fixture. Its loopback feed retains the production public key and signed-version
-checks. The `windows-upgrade-fixture` artifact contains the installer, exact test
-deltas, build identity, notices and verified source material. It receives no
-signing secrets and cannot be enabled in a signed release build. Use it only in
-an isolated desktop VM with the actual candidate installer and signature.
-
-For the first-release Linux upgrade test, follow the
-[local prior-AppImage recipe](LINUX-UPGRADE-FIXTURE.md). It builds
-an unsigned `0.0.9` fixture in a separate QA checkout with the production public
-key and a test-only loopback feed, records its provenance and version deltas,
-then runs the native updater harness against the exact signed candidate.
-Keep this fixture local; it is not a release or CI download asset.
+For new Stage A updater work, reuse a verified fixture based on the actual
+previous stable source/version and its production key. Rebuild it only when that
+baseline or test transport changes. Keep its configuration delta, source/runtime
+identities and package hashes with the development record. A direct new Setup
+install is not proof of an upgrade. Detailed upgrade testing never becomes an
+automatic post-package matrix.
