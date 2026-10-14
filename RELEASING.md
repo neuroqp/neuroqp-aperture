@@ -139,9 +139,14 @@ After promotion, complete these checks before announcing success:
    routes without authentication. Verify complete download hashes against the
    accepted set; confirm the feed version and immutable asset URLs.
 3. In a released Windows installed app and Linux AppImage, perform a real manual
-   check against the production feed and observe the up-to-date result. Verify
-   the portable check uses the portable edition. Test feeds cannot prove this step.
-4. Append production results to the acceptance record and stop owned QA processes,
+   check against the production feed and observe the up-to-date result. Test feeds
+   cannot prove this step.
+4. Launch the previous stable portable executable unchanged and check the
+   production feed. Verify its update action opens the new release's exact
+   portable download URL without starting an installer. Record the observed URL
+   and absence of an installer; complete download hashes are covered in step 2.
+   No additional portable fixture build is required.
+5. Append production results to the acceptance record and stop owned QA processes,
    feeds and VMs. Restore temporary test settings.
 
 If production verification fails, pause announcements, remove latest status or

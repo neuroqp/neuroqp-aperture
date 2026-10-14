@@ -47,12 +47,12 @@ Shared heavy-worker checks may use one Linux desktop with those same AppImage
 bytes, with the environment and reason recorded. Each desktop still requires
 natural closure and its ordinary cancellation/unsaved-work checks.
 
-| Edition/environment                    | Additional required checks                                                                                                                                                                                                                                                                                           |
-| -------------------------------------- | -------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
-| Windows 11 x64 Setup, standard user    | Clean per-user install, shortcut launch and uninstall without elevation; image files remain untouched. Verify bundled Fixed WebView2 processes. Disconnect networking for launch and image viewing. Record any stock Evergreen runtime.                                                                              |
-| Windows 11 x64 portable, standard user | With no extracted payload, launch the public executable without arguments while offline and observe first extraction plus rendered pixels. Test warm launch and writable local data with the executable in a read-only location. Verify update action invokes only the exact portable download URL and no installer. |
-| Debian 12 and Ubuntu 24                | Same AppImage, native desktop session, normal FUSE launch and `--appimage-extract-and-run` fallback. Observe viewer functionality on both launch paths.                                                                                                                                                              |
-| Arch/Omarchy and Fedora                | Same AppImage and native desktop checks. Record X11 or Wayland; cover both session types across the matrix, including native Wayland on Fedora. Exercise FUSE/fallback where supported and record the actual path.                                                                                                   |
+| Edition/environment                    | Additional required checks                                                                                                                                                                                                                                                                                                                            |
+| -------------------------------------- | ----------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| Windows 11 x64 Setup, standard user    | Clean per-user install, shortcut launch and uninstall without elevation; image files remain untouched. Verify bundled Fixed WebView2 processes. Disconnect networking for launch and image viewing. Record any stock Evergreen runtime.                                                                                                               |
+| Windows 11 x64 portable, standard user | With no extracted payload, launch the public executable without arguments while offline and observe first extraction plus rendered pixels. Test warm launch and writable local data with the executable in a read-only location. Check its browser download action after promotion using the previous stable portable executable, as described below. |
+| Debian 12 and Ubuntu 24                | Same AppImage, native desktop session, normal FUSE launch and `--appimage-extract-and-run` fallback. Observe viewer functionality on both launch paths.                                                                                                                                                                                               |
+| Arch/Omarchy and Fedora                | Same AppImage and native desktop checks. Record X11 or Wayland; cover both session types across the matrix, including native Wayland on Fedora. Exercise FUSE/fallback where supported and record the actual path.                                                                                                                                    |
 
 Record exact current distro versions rather than claiming support for every
 version of a distribution. Windows 10 is unverified; adding it to the supported
@@ -87,7 +87,13 @@ through the real dialog; install and restart into the candidate version. Verify
 workers stop before replacement/installer start and preferences survive. Check
 the previous release reports no update against its ordinary production feed.
 Portable remains browser-download-only; it does not run the installer updater.
-Post-promotion production-feed checks are a separate required step.
+Its download action requires a newer version in the stable feed, so it cannot be
+exercised from the candidate before promotion. After promotion, launch the
+previous stable portable executable unchanged, check the production feed, and
+verify its action opens the new release's exact portable URL without starting
+an installer. This uses the published prior executable, with no additional
+fixture build. Record it with the other post-promotion production-feed checks
+in [RELEASING.md](../../RELEASING.md#5-verify-production-and-announce).
 
 ## Expanded checks selected before tagging
 
@@ -146,7 +152,8 @@ Post-promotion public-download hashes and production-update observations:
 QA cleanup:
 ```
 
-All required checks need a pass and evidence before the operator sets
-`desktop_acceptance=accepted`. The workflow verifies artifact identity, not this
-report. CI success, a typed confirmation or an expiring screenshot alone does not
-establish acceptance. Keep the record linked from the finalized release notes.
+All required pre-promotion checks need a pass and evidence before the operator
+sets `desktop_acceptance=accepted`. Complete and record the separate production
+checks after promotion and before announcing success. The workflow verifies
+artifact identity, not this report. CI success, a typed confirmation or an expiring
+screenshot alone does not establish acceptance. Keep the record linked from the finalized release notes.
