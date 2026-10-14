@@ -259,7 +259,7 @@ and does not block the first release; do not describe it as validated.
    be unsigned; its incoming update must pass production signature and version
    checks. Never weaken those checks or point production clients at a test feed.
 
-The first release still needs these platform acceptance results. Automated
+Record these platform acceptance results for every release candidate. Automated
 compile and worker checks are useful evidence, but cannot establish the behavior
 of a Windows desktop session or an upgrade from a released package.
 
