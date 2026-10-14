@@ -1318,6 +1318,9 @@ fn read_channel_asset(job: &Arc<Job>, asset: Asset) -> Result<Vec<u8>, (u16, Str
         if state.phase == "error" {
             return Err((500, state.error.unwrap_or_default()));
         }
+        // Windows cannot move a directory while a descendant file is open.
+        // Keep path selection and each short read inside the promotion guard.
+        let access = job.cache_access.lock().unwrap();
         let dir = job.dir.lock().unwrap().clone();
         let path = match asset {
             Asset::ChannelPreview { channel } => dir
@@ -1331,6 +1334,7 @@ fn read_channel_asset(job: &Arc<Job>, asset: Asset) -> Result<Vec<u8>, (u16, Str
                 y,
             } => {
                 if !job.native.lock().unwrap().is_empty() {
+                    drop(access);
                     return native_channel_tile(job, channel, level, x, y)
                         .map_err(|error| (500, error));
                 }
@@ -1346,6 +1350,10 @@ fn read_channel_asset(job: &Arc<Job>, asset: Asset) -> Result<Vec<u8>, (u16, Str
             if bytes.starts_with(b"\x89PNG\r\n\x1a\n") && bytes.ends_with(b"IEND\xaeB`\x82") {
                 return Ok(bytes);
             }
+        }
+        drop(access);
+        if *job.dir.lock().unwrap() != dir {
+            continue;
         }
         if state.phase == "ready" {
             return Err((404, "Channel tile unavailable.".into()));
@@ -1384,6 +1392,7 @@ fn native_channel_tile(
         .get(channel as usize)
         .cloned()
         .ok_or("Invalid image channel.")?;
+    let access = job.cache_access.lock().unwrap();
     let tiles = job
         .dir
         .lock()
@@ -1396,6 +1405,7 @@ fn native_channel_tile(
     if let Ok(bytes) = fs::read(&destination) {
         return Ok(bytes);
     }
+    drop(access);
     let number = job.process_number.fetch_add(1, Ordering::Relaxed);
     let resized = job.work.join(format!("channel-tile-{number}.v"));
     let partial = job.work.join(format!("channel-tile-{number}.png"));
@@ -1440,6 +1450,16 @@ fn native_channel_tile(
         if job.cancel.load(Ordering::Relaxed) {
             return Err("Loading cancelled.".into());
         }
+        let _access = job.cache_access.lock().unwrap();
+        let tiles = job
+            .dir
+            .lock()
+            .unwrap()
+            .join("channels")
+            .join(channel.to_string())
+            .join("native_tiles");
+        fs::create_dir_all(&tiles).map_err(|e| e.to_string())?;
+        let destination = tiles.join(format!("{level}-{x}-{y}.png"));
         fs::rename(&partial, &destination).map_err(|e| e.to_string())?;
         fs::read(&destination).map_err(|e| e.to_string())
     })();
@@ -1704,6 +1724,9 @@ pub fn read_asset(job: &Arc<Job>, asset: Asset) -> Result<Vec<u8>, (u16, String)
             return Err((410, "Image replaced or cancelled.".into()));
         }
         let state = job.state.lock().unwrap().clone();
+        // Windows cannot move a directory while a descendant file is open.
+        // Keep path selection and each short read inside the promotion guard.
+        let access = job.cache_access.lock().unwrap();
         let dir = job.dir.lock().unwrap().clone();
         let path = match asset {
             Asset::Preview => dir.join("preview.jpg"),
@@ -1713,6 +1736,7 @@ pub fn read_asset(job: &Arc<Job>, asset: Asset) -> Result<Vec<u8>, (u16, String)
                     if state.phase == "error" {
                         return Err((500, state.error.unwrap_or_default()));
                     }
+                    drop(access);
                     return native_tile(job, level, x, y).map_err(|error| {
                         job.update(|s| {
                             s.phase = "error".into();
@@ -1742,6 +1766,7 @@ pub fn read_asset(job: &Arc<Job>, asset: Asset) -> Result<Vec<u8>, (u16, String)
                 return Ok(bytes);
             }
         }
+        drop(access);
         if *job.dir.lock().unwrap() != dir {
             continue;
         }
@@ -1772,6 +1797,7 @@ fn native_tile(job: &Job, level: u32, x: u32, y: u32) -> Result<Vec<u8>, String>
         .unwrap_or(&levels[0])
         .clone();
     drop(levels);
+    let access = job.cache_access.lock().unwrap();
     let dir = job.dir.lock().unwrap().clone();
     let tiles = dir.join("native_tiles");
     fs::create_dir_all(&tiles).map_err(|e| e.to_string())?;
@@ -1779,6 +1805,7 @@ fn native_tile(job: &Job, level: u32, x: u32, y: u32) -> Result<Vec<u8>, String>
     if let Ok(bytes) = fs::read(&destination) {
         return Ok(bytes);
     }
+    drop(access);
     let number = job.process_number.fetch_add(1, Ordering::Relaxed);
     let partial = job.work.join(format!("tile-{number}.partial.jpg"));
     let tile_width = TILE_SIZE.min(target_width - x * TILE_SIZE);
@@ -1825,6 +1852,10 @@ fn native_tile(job: &Job, level: u32, x: u32, y: u32) -> Result<Vec<u8>, String>
         let _ = fs::remove_file(&partial);
         return Err("Display cache limit reached.".into());
     }
+    let _access = job.cache_access.lock().unwrap();
+    let tiles = job.dir.lock().unwrap().join("native_tiles");
+    fs::create_dir_all(&tiles).map_err(|e| e.to_string())?;
+    let destination = tiles.join(format!("{level}-{x}-{y}.jpg"));
     fs::rename(&partial, &destination).map_err(|e| e.to_string())?;
     fs::read(destination).map_err(|e| e.to_string())
 }
@@ -1879,6 +1910,98 @@ fn prune_except(root: &Path, limit: u64, protected: Option<&Path>) -> Result<(),
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[cfg(windows)]
+    #[test]
+    fn windows_directory_promotion_waits_for_open_descendant_to_close() {
+        let root = std::env::temp_dir().join(format!(
+            "aperture-directory-promotion-{}-{}",
+            std::process::id(),
+            NEXT_ID.fetch_add(1, Ordering::Relaxed)
+        ));
+        let tiles = root.join("tiles_files");
+        fs::create_dir_all(&tiles).unwrap();
+        let tile = tiles.join("tile.jpg");
+        fs::write(&tile, b"tile").unwrap();
+        let reader = File::open(&tile).unwrap();
+        let published = root.join("published_tiles");
+        assert_eq!(
+            fs::rename(&tiles, &published).unwrap_err().raw_os_error(),
+            Some(5)
+        );
+        drop(reader);
+        fs::rename(&tiles, &published).unwrap();
+        assert_eq!(fs::read(published.join("tile.jpg")).unwrap(), b"tile");
+        fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn stored_asset_reads_wait_for_promotion_and_use_the_published_directory() {
+        let root = std::env::temp_dir().join(format!(
+            "aperture-read-promotion-{}-{}",
+            std::process::id(),
+            NEXT_ID.fetch_add(1, Ordering::Relaxed)
+        ));
+        fs::create_dir_all(&root).unwrap();
+        let source = root.join("source.png");
+        fs::write(&source, []).unwrap();
+        let backend = Backend::new(root.join("cache")).unwrap();
+        backend.open(&source).unwrap();
+        backend.shutdown();
+        let job = backend.current.lock().unwrap().clone().unwrap();
+        job.cancel.store(false, Ordering::Relaxed);
+        job.state.lock().unwrap().phase = "ready".into();
+        for (number, asset, relative, old, published_bytes) in [
+            (
+                0,
+                Asset::Tile {
+                    level: 0,
+                    x: 0,
+                    y: 0,
+                },
+                "tiles_files/0/0_0.jpg",
+                vec![0xff, 0xd8, 1, 0xff, 0xd9],
+                vec![0xff, 0xd8, 2, 0xff, 0xd9],
+            ),
+            (
+                1,
+                Asset::ChannelPreview { channel: 0 },
+                "channels/0/preview.png",
+                b"\x89PNG\r\n\x1a\noldIEND\xaeB`\x82".to_vec(),
+                b"\x89PNG\r\n\x1a\nnewIEND\xaeB`\x82".to_vec(),
+            ),
+        ] {
+            let work = root.join(format!("work-{number}"));
+            let published = root.join(format!("published-{number}"));
+            for (dir, bytes) in [(&work, &old), (&published, &published_bytes)] {
+                let path = dir.join(relative);
+                fs::create_dir_all(path.parent().unwrap()).unwrap();
+                fs::write(path, bytes).unwrap();
+            }
+            *job.dir.lock().unwrap() = work;
+            let guard = job.cache_access.lock().unwrap();
+            let (started_send, started_receive) = std::sync::mpsc::channel();
+            let (done_send, done_receive) = std::sync::mpsc::channel();
+            let reading = job.clone();
+            let reader = thread::spawn(move || {
+                started_send.send(()).unwrap();
+                done_send.send(read_asset(&reading, asset)).unwrap();
+            });
+            started_receive.recv().unwrap();
+            let blocked = done_receive.recv_timeout(Duration::from_millis(50));
+            *job.dir.lock().unwrap() = published;
+            drop(guard);
+            let result = match blocked {
+                Err(std::sync::mpsc::RecvTimeoutError::Timeout) => {
+                    done_receive.recv_timeout(Duration::from_secs(5)).unwrap()
+                }
+                result => panic!("Asset read crossed the held promotion guard: {result:?}"),
+            };
+            assert_eq!(result.unwrap(), published_bytes);
+            reader.join().unwrap();
+        }
+        fs::remove_dir_all(root).unwrap();
+    }
 
     #[cfg(unix)]
     #[test]
