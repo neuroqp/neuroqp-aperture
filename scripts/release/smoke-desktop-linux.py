@@ -23,17 +23,7 @@ from urllib.request import Request, urlopen
 from urllib.parse import urlsplit
 
 STEP_SECONDS = {"launch": 90, "render": 60, "clean-exit": 30, "fuse-fallback": 180}
-DIALOG_INPUT = "prepared fixed TIFF chooser response"
-OPEN_TIFF = """const api=window.__TAURI_INTERNALS__, original=api.invoke, path=arguments[0];
-window.__apertureSmokeChooser={restored:false};
-api.invoke=function(command){
-  if(command==='plugin:dialog|open'){
-    api.invoke=original;window.__apertureSmokeChooser.restored=true;
-    return Promise.resolve(path);
-  }
-  return original.apply(this,arguments);
-};
-document.getElementById('open-button').click();return true;"""
+IMAGE_INPUT = "startup image command line"
 
 
 def utc():
@@ -129,6 +119,17 @@ def assert_rendered(observation, identity):
 def assert_exited(result, pid):
     if result.get("pid") != pid or result.get("exit_code") != 0 or Path("/proc", str(pid)).exists():
         raise ValueError("Native close did not exit normally with code 0")
+
+
+def display_sockets(rows, pid):
+    """Client sockets are unnamed; correlate their reciprocal connected peers."""
+    owned = [row for row in rows if re.search(r"\bpid=" + str(pid) + r"\b", row)]
+    pairs = {tuple(row.split()[5:8:2]) for row in owned if len(row.split()) >= 8}
+    peers = [row for row in rows if len(row.split()) >= 8 and tuple(row.split()[5:8:2])[::-1] in pairs]
+    observed = owned + peers
+    wayland = any("/wayland-" in row for row in observed)
+    x11 = any(".X11-unix/" in row for row in observed)
+    return observed, wayland, x11
 
 
 def ppm_spread(path, rect):
@@ -334,7 +335,7 @@ def main():
             raise ValueError("Fallback is confined to Debian/Ubuntu")
         if not request("GET", "/status")["ready"]:
             raise ValueError("Prepared native driver unavailable")
-        launch_args = ["--launcher", "--identity", str(args.identity.resolve()), "--report", str(receipt.resolve())]
+        launch_args = ["--launcher", "--identity", str(args.identity.resolve()), "--report", str(receipt.resolve()), identity["tiny_tiff_path"]]
         if identity.get("extract_and_run"):
             launch_args.append("--extract-and-run")
         session = request("POST", "/session", {"capabilities": {"alwaysMatch": {"browserName": "wry", "webkitgtk:browserOptions": {"binary": str(Path(__file__).resolve()), "args": launch_args}}}})
@@ -349,36 +350,40 @@ def main():
         launcher_pid = wait(launched_pid)
         pid, process_identity, nodes = wait(lambda: application_process(launcher_pid, identity, time.monotonic() + remaining()))
         rows = subprocess.run([shutil.which("ss"), "-xnp"], check=True, capture_output=True, text=True, timeout=max(.1, remaining())).stdout.splitlines()
-        peers = [line for line in rows if re.search(r"\bpid=" + str(pid) + r"\b", line)]
-        wayland = any("/wayland-" in line for line in peers)
-        x11 = any(".X11-unix/" in line for line in peers)
+        peers, wayland, x11 = display_sockets(rows, pid)
         if args.environment in ("fedora-wayland", "arch-omarchy") and not (wayland and not x11):
             raise ValueError("Actual native Wayland socket proof absent or mixed")
-        current_launch = dict(pid=pid, launcher_pid=launcher_pid, launch_method="extract-and-run" if identity.get("extract_and_run") else "FUSE", process_identity=process_identity, native_windows=[row for _, row in nodes], socket_rows=peers, backend="wayland" if wayland and not x11 else "x11" if x11 and not wayland else "unproven")
+        current_launch = dict(pid=pid, launcher_pid=launcher_pid, launch_method="extract-and-run" if identity.get("extract_and_run") else "FUSE", image_argument=identity["tiny_tiff_path"], process_identity=process_identity, native_windows=[row for _, row in nodes], socket_rows=peers, backend="wayland" if wayland and not x11 else "x11" if x11 and not wayland else "unproven")
         return current_launch
     def render():
-        request("POST", route + "/execute/sync", {"script": OPEN_TIFF, "args": [identity["tiny_tiff_path"]]})
-        expression = "const done=arguments[arguments.length-1];window.__TAURI_INTERNALS__.invoke('image_state').then(state=>{const canvas=document.querySelector('#viewer canvas')?.getBoundingClientRect();done({state,phase:document.querySelector('#viewer')?.dataset.phase??null,error:document.querySelector('#status')?.classList.contains('error')??false,chooser_restored:window.__apertureSmokeChooser?.restored===true,rendered_canvas:!!canvas&&canvas.width>0&&canvas.height>0});}).catch(e=>done({error:String(e)}));"
+        expression = "const done=arguments[arguments.length-1];window.__TAURI_INTERNALS__.invoke('image_state').then(state=>{const canvas=document.querySelector('#viewer canvas')?.getBoundingClientRect();done({state,phase:document.querySelector('#viewer')?.dataset.phase??null,error:document.querySelector('#status')?.classList.contains('error')??false,rendered_canvas:!!canvas&&canvas.width>0&&canvas.height>0});}).catch(e=>done({error:String(e)}));"
         def observation():
             value = request("POST", route + "/execute/async", {"script": expression, "args": []})
-            return value if assert_rendered(value, identity) and value.get("chooser_restored") and value.get("rendered_canvas") else None
+            return value if assert_rendered(value, identity) and value.get("rendered_canvas") else None
         state = wait(observation)
         pid = current_launch["pid"]
         def active_window():
             nodes = native_nodes(pid, time.monotonic() + remaining())
             return next((row for _, row in nodes if row["role"] in ("frame", "window") and row["active"]), None)
+        # A prepared owned-window capture adapter may activate only this process.
+        capture = receipt.with_suffix(".ppm")
+        command = [arg.replace("{output}", str(capture)).replace("{pid}", str(pid)) for arg in identity["screenshot_command"]]
+        if identity.get("screenshot_scope") == "owned-window":
+            subprocess.run(command, check=True, timeout=max(.1, remaining()))
         foreground = wait(active_window)
         viewer = wait(lambda: next((row for _, row in native_nodes(pid, time.monotonic() + remaining()) if row["name"] == "Image viewer" and row["rect"]), None))
-        capture = receipt.with_suffix(".ppm")
-        command = [arg.replace("{output}", str(capture)) for arg in identity["screenshot_command"]]
+        rect = viewer["rect"]
+        if identity.get("screenshot_scope") == "owned-window":
+            frame = foreground["rect"]
+            rect = [rect[0] - frame[0], rect[1] - frame[1], rect[2], rect[3]]
         def visible_pixels():
             subprocess.run(command, check=True, timeout=max(.1, remaining()))
-            pixels = ppm_spread(capture, viewer["rect"])
+            pixels = ppm_spread(capture, rect)
             return pixels if pixels["spread"] >= 35 else None
         pixels = wait(visible_pixels)
         if not active_window():
             raise ValueError("Owned native window lost foreground during capture")
-        return dict(observation=state, screenshot=str(capture), screenshot_sha256=sha(capture), pixel_observation=pixels, foreground_window=foreground, dialog_input=DIALOG_INPUT)
+        return dict(observation=state, screenshot=str(capture), screenshot_sha256=sha(capture), pixel_observation=pixels, foreground_window=foreground, image_input=IMAGE_INPUT)
     def close():
         pid = current_launch["pid"]
         if owned_process(pid, identity) != current_launch["process_identity"]:

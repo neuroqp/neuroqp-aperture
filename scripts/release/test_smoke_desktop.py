@@ -15,6 +15,20 @@ spec.loader.exec_module(smoke)
 
 
 class DesktopSmokeTests(unittest.TestCase):
+    def test_display_backend_uses_only_reciprocal_socket_peers(self):
+        rows = [
+            'u_str ESTAB 0 0 * 101 * 202 users:(("aperture",pid=42,fd=5))',
+            'u_str ESTAB 0 0 /run/user/1000/wayland-1 202 * 101 users:(("Hyprland",pid=7,fd=8))',
+            'u_str ESTAB 0 0 /tmp/.X11-unix/X0 303 * 404 users:(("Xwayland",pid=8,fd=9))',
+        ]
+        observed, wayland, x11 = smoke.display_sockets(rows, 42)
+        self.assertEqual(observed, rows[:2])
+        self.assertTrue(wayland)
+        self.assertFalse(x11)
+        self.assertEqual(smoke.display_sockets(rows, 43), ([], False, False))
+        rows[1] = rows[1].replace('/run/user/1000/wayland-1', '/tmp/.X11-unix/X0')
+        self.assertEqual(smoke.display_sockets(rows, 42)[1:], (False, True))
+
     @unittest.skipUnless(hasattr(smoke.signal, "SIGALRM") and hasattr(smoke.signal, "setitimer"), "POSIX observer timer")
     def test_step_guard_interrupts_blocking_action_and_restores_alarm(self):
         handler = smoke.signal.getsignal(smoke.signal.SIGALRM)
@@ -71,27 +85,6 @@ class DesktopSmokeTests(unittest.TestCase):
             smoke.assert_os("fedora-wayland", dict(ID="omarchy", ID_LIKE="arch"))
         with self.assertRaisesRegex(ValueError, "Actual OS differs"):
             smoke.assert_os("debian12", dict(ID="debian", VERSION_ID="13"))
-
-    def test_one_shot_chooser_restores_real_invoke_and_only_supplies_path(self):
-        script = """
-const assert=require('node:assert/strict'),calls=[];
-const original=function(command){calls.push(command);return Promise.resolve('actual '+command);};
-global.window={__TAURI_INTERNALS__:{invoke:original}};
-let choice;
-global.document={getElementById:id=>{assert.equal(id,'open-button');return {click:()=>{
-  const api=window.__TAURI_INTERNALS__;
-  api.invoke('image_extensions');choice=api.invoke('plugin:dialog|open');
-}};}};
-new Function(SCRIPT)('/prepared/tiny.tif');
-choice.then(async path=>{
-  assert.equal(path,'/prepared/tiny.tif');
-  assert.equal(window.__TAURI_INTERNALS__.invoke,original);
-  assert.equal(window.__apertureSmokeChooser.restored,true);
-  assert.equal(await window.__TAURI_INTERNALS__.invoke('image_state'),'actual image_state');
-  assert.deepEqual(calls,['image_extensions','image_state']);
-}).catch(error=>{console.error(error);process.exitCode=1;});
-""".replace("SCRIPT", json.dumps(smoke.OPEN_TIFF))
-        subprocess.run(["node", "-e", script], check=True, timeout=5)
 
     def test_normal_exit_requires_same_pid_zero_and_absent_process(self):
         with patch.object(smoke.Path, "exists", return_value=False):
@@ -180,12 +173,13 @@ choice.then(async path=>{
                 receipt = Path(folder) / "exit.json"
                 child = SimpleNamespace(pid=42, wait=lambda: 0)
                 with patch.object(smoke, "verify_inputs"), patch.object(smoke.subprocess, "Popen", return_value=child) as launch, patch.dict(smoke.os.environ, {"APPIMAGE_EXTRACT_AND_RUN": "1", "APPIMAGE_EXTRACT_AND_RUN_DEFAULT": "1"}):
-                    self.assertEqual(smoke.launcher(dict(asset_path="/prepared/AppImage", extract_and_run=fallback), receipt, []), 0)
+                    self.assertEqual(smoke.launcher(dict(asset_path="/prepared/AppImage", extract_and_run=fallback), receipt, ["/prepared/tiny.tif"]), 0)
                     command = launch.call_args.args[0]
                     environment = launch.call_args.kwargs["env"]
                     self.assertNotIn("APPIMAGE_EXTRACT_AND_RUN", environment)
                     self.assertNotIn("APPIMAGE_EXTRACT_AND_RUN_DEFAULT", environment)
                     self.assertEqual("--appimage-extract-and-run" in command, fallback)
+                    self.assertEqual(command[-1], "/prepared/tiny.tif")
 
     @unittest.skipUnless(hasattr(smoke.os, "getuid"), "Linux native driver UID validation")
     def test_driver_requires_owned_pinned_native_listener(self):
