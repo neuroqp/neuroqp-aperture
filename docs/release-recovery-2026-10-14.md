@@ -13,7 +13,7 @@ This records the stopped attempt, not acceptance of a new release. The table rec
 | Remaining build jobs      | No running GitHub build jobs found                                                                                                                                                            |
 | Test VM                   | Owned Windows QEMU exited on systemd SIGTERM at 18:56 UTC; QEMU, TPM processes and QA ports are absent. Guest graceful closure was not observed                                               |
 
-The multi-instance changes, advisory save choices, staged-destination race fix and cache-read fix received independent GPT-6.1-Sol source review. GitHub Codex review exhausted its account allowance; the user approved independent review. At `8f36`, automated checks passed: 70 frontend tests, 69 Windows and 74 Linux Rust tests with actual workers, release/source helpers, formatting and Clippy. The backend changed afterward, so the full Rust/native cache regression results do not apply to `1aad733`. Unchanged frontend, annotation-writing and packaging observations can be reused with their input identities; they do not establish final-package acceptance.
+The multi-instance changes, advisory save choices, staged-destination race fix and cache-read fix received independent GPT-6.1-Sol source review. GitHub Codex review exhausted its account allowance; the user approved independent review. At `8f36`, automated checks passed: 70 frontend tests, 69 Windows and 74 Linux Rust tests with actual workers, release/source helpers, formatting and Clippy. The backend changed afterward, so the full Rust/native cache regression results do not apply to `1aad733`. The fast [Check run on `1aad733`](https://github.com/neuroqp/neuroqp-aperture/actions/runs/38633452895) passed frontend/type/format/source-helper checks; it did not rerun the full Rust or native functional suites. Unchanged frontend, annotation-writing and packaging observations can be reused with their input identities; they do not establish final-package acceptance.
 
 Focused Debian native checks passed at `8f36`. Windows installation, registered TIFF opening, independent processes/caches, all advisory save choices, changed-source handling, natural closure and update admission observations passed. Independent TIFF decoding and encoded-tile comparison confirmed unchanged pixels. Windows then exposed a real cache-publication defect: a parent tile directory cannot be moved while a descendant tile file is open, even with delete sharing. A native Windows probe reproduced error 5; the fix adds short reads to the existing publication mutex. The exact-source old-fail/new-pass harness was reported by the implementation agent, but its `/tmp` files were lost during host cleanup. A recovered receipt labels that limitation; committed regressions and native validation remain required.
 
@@ -89,6 +89,14 @@ still has 1.557 GiB of exclusive sectors. Linux live ISOs total 11.434 GiB.
 Offline conversion with full logical-sector comparison, followed by retiring the
 proven rollback, remains separate maintenance. No compaction or base freeze was
 performed during this bounded rehearsal.
+
+One later bounded offline compaction attempt stopped before conversion because
+the existing QEMU wrapper used a missing `/lab` mount point inside a read-only
+root filesystem. It created no temporary disk and changed no retained image.
+The wrapper now uses the existing `/work` mount point with a focused regression;
+the maintenance attempt was not retried. A successful offline compaction and
+base registration remain unverified Stage A work, with the original disk and
+rollback preserved. `compaction.log` retains the exact failure.
 
 Keep one verified sparse base and small disposable CoW overlays per required OS,
 current/previous relevant packages and fixtures, and compact durable reports.

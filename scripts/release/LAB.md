@@ -127,3 +127,31 @@ Run the disposable safety checks with:
 ```sh
 python3 -m unittest discover -s scripts/release -p test_lab.py -v
 ```
+
+The resumed 2026-10-14 session observed a licensed disk-only Windows 11 desktop,
+natural native app Close with exit zero, then `shutdown /s /t 0`. QMP recorded
+guest SHUTDOWN without SUSPEND_DISK and QEMU exited zero. The owned controller,
+HTTP server, QEMU and TPM processes stopped. This certifies full cold closure of
+the original disk; the retained base is not registered or frozen.
+
+Reviewed cleanup then removed the single owned Windows 11 installer ISO,
+7.660435 GiB, and replaced the standalone candidate source archive with a
+verified canonical hardlink, preserving its pathname and SHA256, 1.649719 GiB.
+Together with the earlier Windows 10 cleanup, exact removed inode allocation
+sums to 24.089603 GiB. Guest writes and growing exclusive rollback extents mean
+this sum is not net retained storage or host free space. Btrfs exclusive plus
+set-shared extents measured the resumed whole lab at 74.967 GiB before boot
+and 67.429 GiB after cleanup; environments measured 62.950 and 57.061 GiB.
+The current Windows disk remains 41.336 GiB allocated; the rollback is retained.
+
+One approved offline compaction attempt failed before conversion because the
+existing-tool wrapper tried to mount at missing `/lab` on its read-only rootfs.
+No temporary image was created and disk, TPM, UEFI and private credential file
+identities remained unchanged. The wrapper now uses the existing `/work`
+mountpoint and a focused regression passes. Compaction was not retried, no
+savings from compression were measured, and no base was frozen. The 40-50 GiB
+retained-lab target remains blocked pending separately bounded offline
+compaction, sector comparison and reviewed retirement of the rollback.
+Durable receipts are under `artifacts/bounded-process-resume-lab-20261014`;
+Linux still has verified live installer ISOs and no prepared persistent desktop
+bases.

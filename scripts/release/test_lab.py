@@ -196,6 +196,18 @@ class LabTests(unittest.TestCase):
         self.assertEqual(lab.identity(disk), original)
         self.assertTrue((self.root / (lab.DISK + ".compact.tmp")).exists())
 
+    def test_existing_tool_wrapper_uses_prepared_work_mountpoint(self):
+        disk = self.file(lab.DISK)
+        self.file("environments/debian12/rootfs/usr/bin/qemu-img")
+        (self.root / "environments/debian12/rootfs/work").mkdir()
+        with patch.object(lab.shutil, "which", side_effect=lambda name: "/usr/bin/bwrap" if name == "bwrap" else None), \
+                patch.object(lab.subprocess, "check_output", return_value="{}") as run:
+            lab.qemu(self.root, ["info", "--output=json", disk])
+        argv = run.call_args.args[0]
+        self.assertIn("/work", argv)
+        self.assertIn("/work/" + lab.DISK, argv)
+        self.assertNotIn("/lab", argv)
+
 
 if __name__ == "__main__":
     unittest.main()

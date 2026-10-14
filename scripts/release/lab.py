@@ -119,7 +119,7 @@ def inventory(root, extents=False):
                                                                if key.startswith("environments/")),
               "groups": dict(sorted(groups.items(), key=lambda row: -row[1])), "images": images,
               "largest_unique_files": sorted(unique_files, key=lambda row: -row["allocated"])[:30],
-              "readiness": {"windows11": "blocked: observed full cold guest shutdown required before base freeze",
+              "readiness": {"windows11": "blocked: base not registered; full cold receipt and clean standalone disk check required",
                             "linux": "blocked: verified live ISOs exist, persistent prepared desktops/tools do not"},
               "reclaimed_bytes_claimed": 0}
     base = inside(root, STATE + "/windows11-base.json")
@@ -215,14 +215,14 @@ def qemu(root, args, mutate=False, timeout=180):
         command = [tool, *args]
     else:
         rootfs = inside(root, "environments/debian12/rootfs")
-        if not (rootfs / "usr/bin/qemu-img").is_file() or not shutil.which("bwrap"):
+        if not (rootfs / "usr/bin/qemu-img").is_file() or not (rootfs / "work").is_dir() or not shutil.which("bwrap"):
             raise ValueError("Existing qemu-img tool unavailable; no downloads or lab reconstruction")
         def guest(value):
             value = str(value)
-            return "/lab/" + str(Path(value).relative_to(root)) if value.startswith(str(root) + "/") else value
+            return "/work/" + str(Path(value).relative_to(root)) if value.startswith(str(root) + "/") else value
         command = ["bwrap", "--unshare-user", "--uid", str(os.getuid()), "--gid", str(os.getgid()),
                    "--ro-bind", str(rootfs), "/", "--proc", "/proc", "--dev", "/dev", "--tmpfs", "/tmp",
-                   "--bind" if mutate else "--ro-bind", str(root), "/lab", "/usr/bin/qemu-img", *map(guest, args)]
+                   "--bind" if mutate else "--ro-bind", str(root), "/work", "/usr/bin/qemu-img", *map(guest, args)]
     return subprocess.check_output(list(map(str, command)), text=True, timeout=timeout)
 
 
