@@ -5,7 +5,7 @@ $helper=Join-Path $PSScriptRoot 'smoke-desktop-windows.ps1'
 $tokens=$null;$errors=$null
 $ast=[Management.Automation.Language.Parser]::ParseFile($helper,[ref]$tokens,[ref]$errors)
 if ($errors.Count) { throw ($errors|Out-String) }
-foreach ($name in @('Verify-Inputs','Assert-Rendered','Remaining','Step','Save-Progress','Supervise-Observer')) {
+foreach ($name in @('Verify-Inputs','Assert-Rendered','Remaining','Wait-Until','Step','Save-Progress','Supervise-Observer')) {
     $definition=$ast.Find({param($node) $node -is [Management.Automation.Language.FunctionDefinitionAst] -and $node.Name -eq $name},$true)
     if (-not $definition) { throw "Missing helper $name" }
     Invoke-Expression $definition.Extent.Text
@@ -34,6 +34,16 @@ $i|Add-Member source_sha ('b'*40)
 $observer=[Diagnostics.Process]::GetCurrentProcess().MainModule.FileName
 $i|Add-Member readiness ([pscustomobject]@{ready=$true;helper_sha256=$r.helper_sha256;source_sha=('b'*40);environment=$Environment;tools=@([pscustomobject]@{name='PowerShell observer';path=$observer;sha256=(Get-FileHash -LiteralPath $observer).Hash.ToLowerInvariant()})})
 $i|Add-Member deadline_at ([DateTime]::UtcNow.AddMinutes(30).ToString('o'))
+$script:stepEnd=[DateTime]::UtcNow.AddSeconds(5)
+$owned=[IntPtr]123
+$script:foreground=[IntPtr]456
+$script:foregroundPolls=0
+$matched=Wait-Until {
+    $script:foregroundPolls++
+    if ($script:foregroundPolls -eq 3) { $script:foreground=$owned }
+    $script:foreground -eq $owned
+}
+if (-not $matched -or $script:foregroundPolls -ne 3 -or $script:foreground -ne $owned) { throw 'Delayed exact owned foreground was not awaited' }
 $progress=Join-Path ([IO.Path]::GetTempPath()) ('aperture-step-'+[Guid]::NewGuid().ToString('N')+'.json')
 Step 'launch' { return 'cold launch seam' }
 if ($r.steps[-1].timeout_seconds -ne 600 -or $r.steps[-1].status -ne 'pass') { throw 'Portable cold launch cap incorrect' }
@@ -85,4 +95,4 @@ try {
         if (-not $sleeping.HasExited -or $clock.Elapsed.TotalSeconds -gt 5 -or $failure.status -ne 'fail' -or -not $failure.timed_out -or -not $failure.helper_forced_termination) { throw 'Watchdog did not bound and fail blocked observer' }
     } finally { if (-not $sleeping.HasExited) {$sleeping.Kill();$sleeping.WaitForExit()} }
 } finally { Remove-Item -LiteralPath $temp -Recurse -Force }
-Write-Output 'Adapter parser, pre-ready/ready/error/dimension/hash and hard-watchdog seams passed. No GUI proof claimed.'
+Write-Output 'Adapter parser, pre-ready/ready/error/dimension/hash, delayed foreground and hard-watchdog seams passed. No GUI proof claimed.'

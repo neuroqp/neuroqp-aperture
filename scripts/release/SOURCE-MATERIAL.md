@@ -37,6 +37,13 @@ the original receipt bytes. Reformatting or recreating that file changes its ide
 
 ## Development runtime coverage
 
+The reviewed `0.2.0` development baseline is `source-v0.2.0-r3`, pinned by the
+tracked `corresponding-source.json`. It retains 522 Cargo crates after removal of
+the single-instance plugin, all 60 npm archives and the reviewed native sources.
+Its application snapshot predates the cache-publication fix and Stage A/B/C
+workflow changes. Development coverage therefore identifies the current public
+Git commit separately; Stage B refreshes the exact frozen application snapshot.
+
 Stage A uses `release.py development-source` before uploading development runtimes.
 It verifies the immutable baseline archive once, actual native BUILDINFO and notices,
 and the current public Git source. It emits a small `DEVELOPMENT-SOURCE.json` into

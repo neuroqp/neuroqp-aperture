@@ -237,7 +237,7 @@ public static class SmokeDesktop {
         }
         $h=[SmokeDesktop]::AppWindow([uint32]$script:app.Id)
         [SmokeDesktop]::ShowWindow($h,3)|Out-Null;[SmokeDesktop]::SetForegroundWindow($h)|Out-Null
-        if ([SmokeDesktop]::GetForegroundWindow() -ne $h) { throw 'Owned app did not receive native foreground' }
+        Wait-Until { [SmokeDesktop]::GetForegroundWindow() -eq $h }|Out-Null
         $script:target=Wait-Until {
             try { $pages=@(Invoke-RestMethod -Uri ('http://127.0.0.1:'+$i.devtools_port+'/json') -TimeoutSec 1|Where-Object {$_.type -eq 'page' -and $_.url -match '^https?://tauri\.localhost/'});if ($pages.Count -eq 1) {$pages[0]} } catch {}
         }

@@ -27,6 +27,56 @@ def helper_module(name):
     return module
 
 
+class PreviousCodeFixtureTests(unittest.TestCase):
+    def test_fixed_baseline_retains_version_production_key_and_signature_checks(self):
+        fixture = helper_module("previous-upgrade-fixture")
+        updater = {"pubkey": "production-test-key", "requireSignedVersion": True}
+        with mock.patch.dict(release.os.environ, {}, clear=True):
+            fixture.validate_baseline(fixture.PRIOR_SHA, "0.1.1", updater, updater["pubkey"])
+            for sha, version, config, key, signed in (
+                ("0" * 40, "0.1.1", updater, updater["pubkey"], False),
+                (fixture.PRIOR_SHA, "0.0.9", updater, updater["pubkey"], False),
+                (fixture.PRIOR_SHA, "0.1.1", {**updater, "requireSignedVersion": False}, updater["pubkey"], False),
+                (fixture.PRIOR_SHA, "0.1.1", updater, "different-key", False),
+                (fixture.PRIOR_SHA, "0.1.1", updater, updater["pubkey"], True),
+            ):
+                with self.assertRaises(ValueError):
+                    fixture.validate_baseline(sha, version, config, key, signed)
+            with mock.patch.dict(release.os.environ, {"TAURI_SIGNING_PRIVATE_KEY": "synthetic-test-only"}):
+                with self.assertRaisesRegex(ValueError, "unsigned context"):
+                    fixture.validate_baseline(fixture.PRIOR_SHA, "0.1.1", updater, updater["pubkey"])
+
+    def test_windows_builder_pins_the_same_baseline_and_ordinary_source_gate(self):
+        fixture = helper_module("previous-upgrade-fixture")
+        builder = Path(__file__).with_name("build-previous-windows-upgrade-fixture.ps1").read_text()
+        self.assertIn("refs/tags/" + fixture.PRIOR_TAG, builder)
+        self.assertIn(fixture.PRIOR_SHA, builder)
+        self.assertIn("'--fetch', '--platform', 'windows'", builder)
+        self.assertNotIn("--upgrade-fixture", builder)
+        self.assertNotIn("'version'", builder)
+        self.assertIn("$env:TAURI_SIGNING_PRIVATE_KEY", builder)
+        self.assertIn("$env:APERTURE_NATIVE_DIR = $oldNative", builder)
+        self.assertIn("$env:PATH = $oldPath", builder)
+
+    def test_linux_builder_pins_the_same_baseline_and_restores_original_bundle(self):
+        fixture = helper_module("previous-upgrade-fixture")
+        builder = Path(__file__).with_name("build-previous-linux-upgrade-fixture.sh").read_text()
+        self.assertIn("refs/tags/" + fixture.PRIOR_TAG, builder)
+        self.assertIn(fixture.PRIOR_SHA, builder)
+        self.assertIn("--fetch --platform linux", builder)
+        self.assertNotIn("--upgrade-fixture", builder)
+        self.assertIn("TAURI_SIGNING_PRIVATE_KEY", builder)
+        self.assertIn("trap restore EXIT", builder)
+        self.assertIn('mv "$scratch/original" "$bundle"', builder)
+        self.assertIn('cmp "$scratch/production-before.sha256" "$scratch/production-after.sha256"', builder)
+        if release.os.name != "nt":
+            path = str(Path(__file__).with_name("build-previous-linux-upgrade-fixture.sh"))
+            release.subprocess.run(["bash", "-n", path], check=True)
+            guarded = release.subprocess.run(["bash", path], env={**release.os.environ, "SIGNED": "true"}, capture_output=True, text=True)
+            self.assertNotEqual(guarded.returncode, 0)
+            self.assertIn("unsigned context", guarded.stderr)
+
+
 class SourceRefreshTests(unittest.TestCase):
     def test_refresh_preserves_native_bytes_binds_current_locks_and_drops_unused_crates(self):
         refresh = helper_module("refresh-source")

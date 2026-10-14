@@ -2,6 +2,12 @@
 
 ## [Unreleased]
 
+## [0.2.0] - 2026-10-14
+
+- Open images in separate Aperture windows, including from your file manager.
+- Warn before overwriting images open elsewhere or changed on disk.
+- Keep concurrent image caches and application updates coordinated.
+
 ## [0.1.1] - 2026-10-13
 
 - Initial Aperture desktop viewer release.

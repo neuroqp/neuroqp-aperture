@@ -8,7 +8,20 @@ preview as soon as possible, and stays responsive while loading large images.
 - Develop on Linux and ship Windows x64 and Linux x86_64 packages. Windows uses
   a per-user NSIS installer and a single-file portable launcher; Linux uses
   AppImage. Defer macOS, ARM, app stores, and distro-specific packages.
-- Display one image at a time.
+- Display one image per window. Allow independent application processes for
+  side-by-side viewing. Launching an image path opens it in a new process;
+  Open and folder navigation replace the image in the current window.
+- Give each process a reusable cache directory with exclusive ownership. Cleanup
+  must never remove another running process's working files or display cache.
+- Before overwriting, warn if the destination is open in another Aperture process
+  or has changed on disk. Offer Cancel, Save as and Overwrite anyway. All windows
+  remain editable; presence is advisory and tracks the selected source until
+  replacement or window closure. Cancelled or failed background processing can
+  retain a usable preview or loaded annotations, so it does not release presence.
+  Serialize only the final destination check and atomic replacement. Preserve
+  edits on cancellation or failed saves.
+- Install updates only after other Aperture processes close. Block new starts
+  during replacement and retain the existing unsaved-work warning.
 - Start with standard image formats, including JPEG/JPG, PNG, BMP, and TIFF/TIF.
 - Support ordinary images and large TIFFs, including BigTIFF. Exact compression,
   pixel-type, and multi-page coverage must be documented as support is added.

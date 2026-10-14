@@ -143,8 +143,8 @@ the bundled library versions. Linux BUILDINFO records the Debian package version
 and libvips source hash. Notices and source links alone are not presented as a
 completed corresponding-source distribution.
 
-The reviewed first-release archive is published under
-[`source-v0.1.1`](https://github.com/neuroqp/neuroqp-aperture/releases/tag/source-v0.1.1),
+The reviewed development baseline for `0.2.0` is published under
+[`source-v0.2.0-r3`](https://github.com/neuroqp/neuroqp-aperture/releases/tag/source-v0.2.0-r3),
 separate from application releases and excluded from latest.
 `scripts/release/corresponding-source.json` pins its checksum, both native
 dependency identities, exact Cargo/pnpm lock hashes and the archived application
