@@ -58,12 +58,20 @@ fn open_image_path(
         .set_image(None)
         .map_err(|e| e.to_string())?;
     let source = path_key(path).map_err(|e| e.to_string())?;
-    let initial = fingerprint(&source).map_err(|e| e.to_string())?;
-    // Publish presence before opening starts the worker or exposes image state.
-    session
-        .instances
-        .set_image(Some(&source))
-        .map_err(|e| e.to_string())?;
+    let initial = {
+        // Publish presence under the write lock so it cannot race a save's
+        // final warning check. Release the lock before starting image work.
+        let _writing = session
+            .instances
+            .save_lock(&source)
+            .map_err(|e| e.to_string())?;
+        let initial = fingerprint(&source).map_err(|e| e.to_string())?;
+        session
+            .instances
+            .set_image(Some(&source))
+            .map_err(|e| e.to_string())?;
+        initial
+    };
     let state = match backend.open(path) {
         Ok(state) => state,
         Err(error) => {

@@ -83,7 +83,7 @@ and libvips source hash. Notices and source links alone are not presented as a
 completed corresponding-source distribution.
 
 The reviewed archive for this release is published under
-[`source-v0.2.0`](https://github.com/neuroqp/neuroqp-aperture/releases/tag/source-v0.2.0),
+[`source-v0.2.0-r1`](https://github.com/neuroqp/neuroqp-aperture/releases/tag/source-v0.2.0-r1),
 separate from application releases and excluded from latest.
 `scripts/release/corresponding-source.json` pins its checksum, both native
 dependency identities, exact Cargo/pnpm lock hashes and the archived application

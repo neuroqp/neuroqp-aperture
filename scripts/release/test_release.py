@@ -152,6 +152,52 @@ class SourceRefreshTests(unittest.TestCase):
                     refresh.prepare(archive, review_path, directory, "5" * 40)
 
 
+class SourcePublicationTests(unittest.TestCase):
+    def test_source_publication_requires_manual_repo_scope_and_unpublished_source_draft(self):
+        publisher = helper_module("publish-reviewed-source")
+        context = {"GITHUB_REPOSITORY": "neuroqp/neuroqp-aperture", "GITHUB_EVENT_NAME": "workflow_dispatch", "PREPARE_SOURCE": "true"}
+        publisher.publication_context("1" * 40, context)
+        for changed in ({"GITHUB_REPOSITORY": "other/repository"}, {"GITHUB_EVENT_NAME": "push"}, {"PREPARE_SOURCE": "false"}, {"BUILD_UPGRADE_FIXTURE": "true"}, {"TAURI_SIGNING_PRIVATE_KEY": "synthetic-only"}):
+            with self.assertRaises(ValueError):
+                publisher.publication_context("1" * 40, {**context, **changed})
+        with self.assertRaises(ValueError):
+            publisher.publication_context("main", context)
+        plan = {"url": "https://github.com/neuroqp/neuroqp-aperture/releases/download/source-v0.2.0-r1/Aperture-Corresponding-Source.tar.xz"}
+        tag = publisher.source_tag(plan)
+        self.assertEqual(tag, "source-v0.2.0-r1")
+        candidate = {"tag_name": tag, "draft": True, "published_at": None, "assets": []}
+        publisher.draft(candidate, tag)
+        for changed in ({"draft": False}, {"published_at": "2026-10-14"}, {"tag_name": "v0.2.0"}, {"assets": [{"name": "Aperture-Setup-x64.exe"}]}):
+            with self.assertRaises(ValueError):
+                publisher.draft({**candidate, **changed}, tag)
+
+    def test_source_publication_refuses_incomplete_or_different_existing_archive(self):
+        publisher = helper_module("publish-reviewed-source")
+        with tempfile.TemporaryDirectory() as folder:
+            directory = Path(folder)
+            archive = directory / release.SOURCE_ASSET
+            archive.write_bytes(b"exact reviewed synthetic source archive")
+            asset = {"id": 1, "name": release.SOURCE_ASSET, "state": "uploaded", "size": archive.stat().st_size, "digest": "sha256:" + release.digest(archive)}
+            candidate = {"tag_name": "source-v0.2.0-r1", "draft": True, "published_at": None, "assets": [asset]}
+            publisher.check_assets(candidate, candidate["tag_name"], directory)
+            for changed in ({"state": "starter"}, {"digest": None}, {"digest": "sha256:" + "0" * 64}, {"size": 1}):
+                with self.assertRaises(ValueError):
+                    publisher.check_assets({**candidate, "assets": [{**asset, **changed}]}, candidate["tag_name"], directory)
+        code = Path(__file__).with_name("publish-reviewed-source.py").read_text()
+        self.assertIn('":(exclude)scripts/release/corresponding-source.json"', code)
+        self.assertNotIn("--clobber", code)
+        self.assertIn('"--latest=false"', code)
+
+    def test_changed_source_tree_blocks_before_any_release_api_call(self):
+        publisher = helper_module("publish-reviewed-source")
+        context = {"GITHUB_REPOSITORY": "neuroqp/neuroqp-aperture", "GITHUB_EVENT_NAME": "workflow_dispatch", "PREPARE_SOURCE": "true", "SOURCE_SHA": "1" * 40}
+        stale = release.subprocess.CalledProcessError(1, ["git", "diff", "--quiet"])
+        with mock.patch.dict(publisher.os.environ, context, clear=True), mock.patch.object(publisher.subprocess, "run", side_effect=[None, None, stale]), mock.patch.object(publisher, "gh") as api:
+            with self.assertRaises(release.subprocess.CalledProcessError):
+                publisher.main()
+            api.assert_not_called()
+
+
 def reviewed_source(directory, root, version="0.1.0"):
     (root / "scripts/release").mkdir(parents=True)
     (root / "CHANGELOG.md").write_text((release.ROOT / "CHANGELOG.md").read_text(encoding="utf-8"), encoding="utf-8")

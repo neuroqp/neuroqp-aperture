@@ -2,7 +2,7 @@
 
 ## Aperture 0.2.0 refresh
 
-The `source-v0.2.0` archive refreshes the application snapshot and Cargo root
+The `source-v0.2.0-r1` archive refreshes the application snapshot and Cargo root
 version from the reviewed `0.1.1` material. The removed single-instance plugin
 reduces the Cargo registry closure to 522 crates and 26,992 vendor files. All
 60 npm archives and the Windows/Linux native sources, patches and build inputs
@@ -16,6 +16,14 @@ receipt and dependency closure before changing the plan to ready and publishing.
 The final publication plan is excluded from its own application inventory to
 avoid a checksum cycle. Binary uploads still require exact application lock and
 native dependency identities from each actual build.
+
+For a slow local upload, **Native validation** can reproduce and publish already
+reviewed source bytes on a GitHub runner. Select its source-only mode with the
+full reviewed snapshot SHA after pinning the ready plan. The snapshot must match
+the current tree except for that publication plan, and the rebuilt archive must
+match every pinned identity. The job only completes an existing draft source
+release; it cannot overwrite assets or modify a published release. This is a
+manual transport step after source review, not automatic source approval.
 
 Previous-stable upgrade fixtures retain the released `0.1.1` application source,
 version, locks and verification key. Their loopback transport overlay is separate

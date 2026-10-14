@@ -1,8 +1,8 @@
 {
   "schema": 1,
-  "status": "ready",
+  "status": "assembled-awaiting-review",
   "asset": "Aperture-Corresponding-Source.tar.xz",
-  "url": "https://github.com/neuroqp/neuroqp-aperture/releases/download/source-v0.2.0/Aperture-Corresponding-Source.tar.xz",
+  "url": "https://github.com/neuroqp/neuroqp-aperture/releases/download/source-v0.2.0-r1/Aperture-Corresponding-Source.tar.xz",
   "sha256": "ff7c724ba066e622feb363e501c99e3da17418d69d0e6baa43d479d86afa048c",
   "native_dependencies_sha256": {
     "linux": "1b13443ba7fcea076e5b8b9c0b2c38c890a025a24a70e98098ef84576d6ee461",

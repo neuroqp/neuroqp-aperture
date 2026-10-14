@@ -3,6 +3,14 @@ name: Native validation
 on:
   workflow_dispatch:
     inputs:
+      prepare_source:
+        description: Reproduce the reviewed source archive and publish its existing source-only draft
+        type: boolean
+        default: false
+      source_sha:
+        description: Full reviewed application snapshot commit for source-only publication
+        type: string
+        default: ""
       build_upgrade_fixture:
         description: Build isolated v0.1.1 prior-code Windows Setup and Linux AppImage upgrade fixtures
         type: boolean
@@ -13,8 +21,30 @@ permissions:
 
 jobs:
   packages:
+    if: ${{ !inputs.prepare_source }}
     uses: ./.github/workflows/package-build.yml
     with:
       source_sha: ${{ github.sha }}
       signed: false
       build_upgrade_fixture: ${{ inputs.build_upgrade_fixture }}
+
+  reviewed-source:
+    if: ${{ inputs.prepare_source && github.repository == 'neuroqp/neuroqp-aperture' && github.event_name == 'workflow_dispatch' }}
+    runs-on: ubuntu-24.04
+    timeout-minutes: 30
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+        with:
+          ref: ${{ github.sha }}
+          fetch-depth: 0
+          persist-credentials: false
+      - run: python3 scripts/release/test_release.py
+      - name: Reproduce and publish only exact reviewed source bytes
+        env:
+          GH_TOKEN: ${{ github.token }}
+          SOURCE_SHA: ${{ inputs.source_sha }}
+          PREPARE_SOURCE: ${{ inputs.prepare_source }}
+          BUILD_UPGRADE_FIXTURE: ${{ inputs.build_upgrade_fixture }}
+        run: python3 scripts/release/publish-reviewed-source.py
