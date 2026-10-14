@@ -182,6 +182,23 @@ class LabTests(unittest.TestCase):
                 lab.compact(self.root, self.recovery(disk))
             self.assertTrue(all(call.args[1][0] == "info" for call in qemu.call_args_list))
 
+    def test_compaction_comparison_overrun_preserves_original(self):
+        disk = self.file(lab.DISK, b"original disk")
+        original = lab.identity(disk)
+        def qemu(root, args, **kwargs):
+            if args[0] == "convert":
+                Path(args[-1]).write_bytes(b"unverified temporary")
+            return "{}" if args[0] == "info" else ""
+        with patch.object(lab, "qemu", side_effect=qemu), patch.object(lab.shutil, "disk_usage") as usage, \
+                patch.object(lab.time, "monotonic", side_effect=[0, 0, 0, 1799.9, 1801]), \
+                patch.object(lab.os, "replace") as replace:
+            usage.return_value.free = 100 * lab.GIB
+            with self.assertRaisesRegex(ValueError, "deadline reached after comparison"):
+                lab.compact(self.root, self.recovery(disk))
+            replace.assert_not_called()
+        self.assertEqual(lab.identity(disk), original)
+        self.assertTrue((self.root / (lab.DISK + ".compact.tmp")).exists())
+
     def test_compaction_deadline_keeps_original_and_never_starts_compare(self):
         disk = self.file(lab.DISK)
         original = lab.identity(disk)

@@ -334,10 +334,14 @@ def compact(root, receipt):
                 raise ValueError("Compaction maintenance deadline reached; original retained")
             comparison = qemu(root, ["compare", "-f", "qcow2", "-F", "qcow2", disk, temporary],
                               timeout=max(1, deadline - time.monotonic()))
+            if time.monotonic() >= deadline:
+                raise ValueError("Compaction maintenance deadline reached after comparison; original retained")
             inactive()
             if identity(disk) != before or identity(temporary)["allocated"] >= before["allocated"]:
                 raise ValueError("Original changed or compaction saved no space; original retained")
             temporary.chmod(disk.stat().st_mode)
+            if time.monotonic() >= deadline:
+                raise ValueError("Compaction maintenance deadline reached before replacement; original retained")
             os.replace(temporary, disk)
         except Exception:
             # Failed output stays for diagnosis; never replace an unverified image.
