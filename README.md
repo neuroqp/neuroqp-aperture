@@ -19,13 +19,15 @@ initial theme follows the system.
 ## Downloads and updates
 
 Release packages are published on [GitHub Releases](https://github.com/neuroqp/neuroqp-aperture/releases).
-The first release is pending validation. Supported packages are:
+Available packages are:
 
-| Platform          | Download                    | Installation and updates                                                                                                                              |
-| ----------------- | --------------------------- | ----------------------------------------------------------------------------------------------------------------------------------------------------- |
-| Windows 10/11 x64 | `Aperture-Setup-x64.exe`    | Installs for your user without administrator access; updates from the app.                                                                            |
-| Windows 10/11 x64 | `Aperture-Portable-x64.exe` | Run the downloaded file; it extracts its bundled runtime into your local application-data directory. Download and replace the executable for updates. |
-| Linux x86_64      | `Aperture-x86_64.AppImage`  | Mark executable and run from a writable folder; updates from the app.                                                                                 |
+| Platform     | Download                    | Installation and updates                                                                                                                              |
+| ------------ | --------------------------- | ----------------------------------------------------------------------------------------------------------------------------------------------------- |
+| Windows x64  | `Aperture-Setup-x64.exe`    | Installs for your user without administrator access; updates from the app.                                                                            |
+| Windows x64  | `Aperture-Portable-x64.exe` | Run the downloaded file; it extracts its bundled runtime into your local application-data directory. Download and replace the executable for updates. |
+| Linux x86_64 | `Aperture-x86_64.AppImage`  | Mark executable and run from a writable folder; updates from the app.                                                                                 |
+
+Release validation targets Windows 11. Windows 10 compatibility is unverified.
 
 Both Windows editions include their image libraries and a fixed WebView2 runtime.
 No separate runtime download is needed. Publisher signing is pending, so Windows
