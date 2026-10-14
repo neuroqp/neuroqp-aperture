@@ -191,11 +191,26 @@ choice.then(async path=>{
     def test_driver_requires_owned_pinned_native_listener(self):
         identity = dict(driver_url="http://127.0.0.1:4445", readiness=dict(tools=[dict(path="/prepared/WebKitWebDriver")]))
         row = 'LISTEN 0 5 127.0.0.1:4445 0.0.0.0:* users:(("WebKitWebDrive",pid=42,fd=7))'
-        with patch.object(smoke.subprocess, "run", return_value=type("Result", (), {"stdout": row})()), patch.object(smoke.Path, "resolve", return_value=Path("/prepared/WebKitWebDriver")), patch.object(smoke.Path, "stat", return_value=type("Stat", (), {"st_uid": 1000})()), patch.object(smoke.os, "getuid", return_value=1000):
+        executable = Path("/prepared/WebKitWebDriver")
+        result = SimpleNamespace(stdout=row)
+        stat = SimpleNamespace(st_uid=1000)
+        with patch.object(smoke.subprocess, "run", return_value=result), patch.object(smoke.Path, "resolve", autospec=True, side_effect=lambda path: executable if str(path) == "/proc/42/exe" else path), patch.object(smoke.Path, "stat", return_value=stat), patch.object(smoke.os, "getuid", return_value=1000):
             self.assertEqual(smoke.verify_driver(identity, 1)["pid"], 42)
-            identity["driver_url"] = "http://remote.example:4445"
-            with self.assertRaisesRegex(ValueError, "loopback"):
+            for executable in (Path("/prepared/tauri-driver"), Path("/unpinned/WebKitWebDriver")):
+                with self.subTest(executable=executable), self.assertRaisesRegex(ValueError, "WebKitWebDriver listener directly"):
+                    smoke.verify_driver(identity, 1)
+            executable = Path("/prepared/WebKitWebDriver")
+            stat.st_uid = 2000
+            with self.assertRaisesRegex(ValueError, "owned"):
                 smoke.verify_driver(identity, 1)
+            stat.st_uid = 1000
+            for result.stdout in ("", row.replace("4445", "4446"), row + '\n' + row.replace("pid=42", "pid=43")):
+                with self.subTest(listeners=result.stdout), self.assertRaisesRegex(ValueError, "Exactly one"):
+                    smoke.verify_driver(identity, 1)
+            result.stdout = row
+            for identity["driver_url"] in ("http://remote.example:4445", "http://127.0.0.1:4445/session", "http://user@127.0.0.1:4445"):
+                with self.subTest(endpoint=identity["driver_url"]), self.assertRaisesRegex(ValueError, "loopback"):
+                    smoke.verify_driver(identity, 1)
 
 
 if __name__ == "__main__":

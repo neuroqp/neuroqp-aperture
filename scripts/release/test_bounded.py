@@ -83,9 +83,19 @@ class BoundedTests(unittest.TestCase):
         expected = identity(); now = bounded.timestamp()
         automated = [{**expected, "platform": platform, "status": "pass", "forced_kill": False, "binary_sha256": "4" * 64} for platform in ("linux", "windows")]
         native = [{**row, "suite": "native-functional", "areas": ["changed areas"], "evidence": ["receipt.json"]} for row in automated]
-        labs = [{"environment": name, "status": "pass", "forced_kill": False, "native_desktop": True, "tools": [{"name": "native smoke helper", "path": "C:/observer.exe" if name.startswith("windows") else "/usr/bin/observer", "sha256": "2" * 64}], "expires_at": expected["deadline_at"], **{key: expected["assets"][name][key] for key in ("tiny_tiff_sha256", "helper_sha256", "tiny_tiff_width", "tiny_tiff_height")}} for name in bounded.ENVIRONMENTS]
+        labs = [{"environment": name, "ready": True, "source_sha": expected["source_sha"], "status": "pass", "forced_kill": False, "native_desktop": True, "tools": [{"name": "native smoke helper", "path": "C:/observer.exe" if name.startswith("windows") else "/usr/bin/observer", "sha256": "2" * 64}], "expires_at": expected["deadline_at"], **{key: expected["assets"][name][key] for key in ("tiny_tiff_sha256", "helper_sha256", "tiny_tiff_width", "tiny_tiff_height")}} for name in bounded.ENVIRONMENTS]
         report = {**expected, "stage": "A", "status": "pass", "forced_kill": False, "completed_at": now, "automated": automated, "native_functional": native, "labs": labs}
         bounded.validate_readiness(report, expected)
+        for index, lab in enumerate(labs):
+            for key, value in (("ready", None), ("ready", False), ("ready", 1), ("source_sha", None), ("source_sha", "9" * 40), ("environment", "other-desktop")):
+                with self.subTest(environment=lab["environment"], field=key, value=value):
+                    invalid = copy.deepcopy(report)
+                    if value is None:
+                        del invalid["labs"][index][key]
+                    else:
+                        invalid["labs"][index][key] = value
+                    with self.assertRaisesRegex(ValueError, "lab readiness|six native desktop"):
+                        bounded.validate_readiness(invalid, expected)
         native[0]["source_sha"] = "9" * 40
         bounded.validate_readiness(report, expected)  # Unchanged component evidence can be reused.
         native[0]["component_inputs"] = {"frontend": "9" * 64, "backend": "d" * 64}

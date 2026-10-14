@@ -25,7 +25,7 @@ Prepare the lab, native helpers and fixed small TIFF before readiness approval. 
 
 `bounded.py identity` records the source and Git input identities. Combine trusted **Stage A development validation** automated records with two native-functional records, Linux and Windows, and six prepared-lab records. A native record includes `suite: native-functional`, tested `areas`, evidence references, development-binary hash, component identities, source SHA, `status` and `forced_kill`. Unchanged component evidence may reference an older source explicitly; current-source native tests must match the automated development binary.
 
-The labs are `windows11-setup`, `windows11-portable`, `debian12`, `ubuntu24`, `arch-omarchy` and `fedora-wayland`. Each records fixed TIFF/helper hashes, dimensions, native desktop/tools with exact paths and SHA-256 values, expiry and a pass. All six
+The labs are `windows11-setup`, `windows11-portable`, `debian12`, `ubuntu24`, `arch-omarchy` and `fedora-wayland`. Each records `ready: true`, the exact reviewed `source_sha`, its `environment`, fixed TIFF/helper hashes, dimensions, native desktop/tools with exact paths and SHA-256 values, expiry and a pass. All six
 environments use the same fixed TIFF bytes and dimensions. Windows 10 is unverified; publisher signing remains pending.
 
 Submit JSON through **Release evidence**, stage A, with the trusted validation run ID. Download its `release-readiness` artifact. Freeze only after it validates against the exact reviewed checkout. Script `--help` and the workflow inputs define the executable commands; preserve exact file bytes when submitting JSON with `gh workflow run --field report_json=@file`.
@@ -39,6 +39,8 @@ Provide the reviewed corresponding-source JSON and its exact SHA-256 to **Stage 
 ## Stage C fixed desktop smoke
 
 Use `smoke-desktop-linux.py` and `smoke-desktop-windows.ps1` with the downloaded candidate identity, exact asset/hash and prepared tiny TIFF. Supply existing observer endpoints/native screenshot tools. Missing tooling or a non-native desktop fails readiness; do not install or repair it inside the attempt.
+
+Prepare Linux Stage C with a direct `WebKitWebDriver` listener in Stage A, running as the desktop user on the same desktop bus and display. For example, start the pinned executable with `WebKitWebDriver --host=127.0.0.1 --port=4471` and record `driver_url: http://127.0.0.1:4471` in the candidate identity. Pin its resolved executable path and SHA-256 in that lab's `tools`. The helper uses native `webkitgtk:browserOptions` and verifies the listener process itself. The `tauri-driver` proxy in [LINUX-UPGRADE-FIXTURE.md](LINUX-UPGRADE-FIXTURE.md) belongs to Stage A upgrade testing and cannot be supplied as this Stage C endpoint. Verify direct session creation, native accessibility and screenshot observation before declaring the lab ready.
 
 The fixed cases are launch, render and clean exit. Windows Setup also performs a standard-user install as part of launch. Portable launch starts with the specific incoming payload absent. Linux uses the same AppImage bytes across all four desktops. Debian and Ubuntu add one equally small fallback launch/render/close. Fedora must prove native Wayland, not merely an environment variable.
 

@@ -1,8 +1,9 @@
 #!/usr/bin/env python3
 """Stage C only: exact AppImage, one prepared TIFF, native pixels and normal close.
 
-Stage A supplies the active desktop, WebKitWebDriver, GI/AT-SPI and screenshot
-command. No dependency installation, desktop repair or package rebuilding here.
+Stage A supplies the active desktop, a direct WebKitWebDriver endpoint, GI/AT-SPI
+and screenshot command. See RELEASE-ACCEPTANCE.md for this prepared mode.
+No dependency installation, desktop repair or package rebuilding here.
 """
 
 import argparse
@@ -102,7 +103,7 @@ def verify_driver(identity, timeout):
     proc = Path("/proc", str(pids.pop()))
     executable = (proc / "exe").resolve()
     if proc.stat().st_uid != os.getuid() or executable.name != "WebKitWebDriver" or executable not in {Path(tool["path"]).resolve() for tool in identity["readiness"]["tools"]}:
-        raise ValueError("Actual driver listener is not the Stage A pinned WebKitWebDriver")
+        raise ValueError("Stage C requires the owned Stage A pinned WebKitWebDriver listener directly; prepare its endpoint before freeze as described in RELEASE-ACCEPTANCE.md")
     return {"pid": int(proc.name), "path": str(executable), "endpoint": identity["driver_url"]}
 
 

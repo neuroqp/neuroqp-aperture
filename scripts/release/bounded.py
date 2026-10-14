@@ -114,6 +114,8 @@ def validate_readiness(report, expected, now=None):
     current = parsed(now or timestamp())
     for row in labs:
         passing(row)
+        if row.get("ready") is not True or row.get("source_sha") != expected["source_sha"]:
+            raise ValueError("Stage A lab readiness must be ready for the frozen source")
         if row.get("native_desktop") is not True or not row.get("tools"):
             raise ValueError("Native desktop, fixed tiny TIFF and tools must be ready before freeze")
         if any(not isinstance(tool, dict) or not tool.get("name") or not re.fullmatch(r"[0-9a-f]{64}", tool.get("sha256", "")) for tool in row["tools"]):
