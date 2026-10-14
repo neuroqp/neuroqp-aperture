@@ -311,7 +311,7 @@ def main():
             report.update(status="fail", error=str(exc))
     if review_path.exists():
         review = json.loads(review_path.read_bytes())
-        review["assembly_attempt"] = {key: report[key] for key in ("source_sha", "build_inputs_sha256", "freeze_started_at", "deadline_at", "started_at", "finished_at", "status", "forced_kill")}
+        review["assembly_attempt"] = {key: report[key] for key in ("schema", "stage", "source_sha", "build_inputs_sha256", "freeze_started_at", "deadline_at", "started_at", "finished_at", "status", "forced_kill")}
         review["assembly_attempt"].update(attempt_sha256=attempt_sha256, archive_sha256=review.get("sha256"))
         if (args.output / "REFRESH.json").exists():
             review["assembly_attempt"]["refresh_receipt_sha256"] = release.digest(args.output / "REFRESH.json")

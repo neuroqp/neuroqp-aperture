@@ -4,6 +4,8 @@ import json
 from pathlib import Path
 import subprocess
 import tempfile
+import time
+from types import SimpleNamespace
 import unittest
 from unittest.mock import patch
 
@@ -13,6 +15,63 @@ spec.loader.exec_module(smoke)
 
 
 class DesktopSmokeTests(unittest.TestCase):
+    @unittest.skipUnless(hasattr(smoke.signal, "SIGALRM") and hasattr(smoke.signal, "setitimer"), "POSIX observer timer")
+    def test_step_guard_interrupts_blocking_action_and_restores_alarm(self):
+        handler = smoke.signal.getsignal(smoke.signal.SIGALRM)
+        started = time.monotonic()
+        with self.assertRaisesRegex(TimeoutError, "deadline"):
+            with smoke.bounded_action(.02):
+                time.sleep(2)
+        self.assertLess(time.monotonic() - started, .5)
+        self.assertEqual(smoke.signal.getsignal(smoke.signal.SIGALRM), handler)
+        self.assertEqual(smoke.signal.getitimer(smoke.signal.ITIMER_REAL), (0, 0))
+        with self.assertRaisesRegex(TimeoutError, "deadline"):
+            with smoke.bounded_action(0):
+                self.fail("Expired action executed")
+        smoke.signal.setitimer(smoke.signal.ITIMER_REAL, 2, 3)
+        try:
+            with smoke.bounded_action(.02):
+                time.sleep(.005)
+            delay, interval = smoke.signal.getitimer(smoke.signal.ITIMER_REAL)
+            self.assertGreater(delay, 1.5)
+            self.assertLess(delay, 2)
+            self.assertEqual(interval, 3)
+            self.assertEqual(smoke.signal.getsignal(smoke.signal.SIGALRM), handler)
+        finally:
+            smoke.signal.setitimer(smoke.signal.ITIMER_REAL, 0)
+
+    def test_hidden_accessibility_nodes_count_toward_traversal_cap(self):
+        class Node:
+            def __init__(self, children=()):
+                self.children = children
+            def get_state_set(self):
+                return SimpleNamespace(contains=lambda state: False)
+            def get_child_count(self):
+                return len(self.children)
+            def get_child_at_index(self, index):
+                return self.children[index]
+            def get_process_id(self):
+                return 42
+        app = Node([Node() for _ in range(501)])
+        atspi = SimpleNamespace(set_timeout=lambda *args: None, get_desktop=lambda index: Node([app]), StateType=SimpleNamespace(SHOWING=1))
+        modules = {"gi": SimpleNamespace(require_version=lambda *args: None), "gi.repository": SimpleNamespace(Atspi=atspi)}
+        with patch.dict(smoke.sys.modules, modules):
+            with self.assertRaisesRegex(ValueError, "500 visited"):
+                smoke.native_nodes(42, time.monotonic() + 1)
+            with self.assertRaisesRegex(TimeoutError, "deadline"):
+                smoke.native_nodes(42, time.monotonic() - 1)
+
+    def test_arch_desktop_accepts_arch_and_arch_based_omarchy_only(self):
+        smoke.assert_os("arch-omarchy", dict(ID="arch"))
+        smoke.assert_os("arch-omarchy", dict(ID="omarchy", ID_LIKE="arch", VERSION_ID="4.0.4"))
+        for actual in (dict(ID="omarchy"), dict(ID="omarchy", ID_LIKE="debian"), dict(ID="other", ID_LIKE="arch")):
+            with self.assertRaisesRegex(ValueError, "Actual OS differs"):
+                smoke.assert_os("arch-omarchy", actual)
+        with self.assertRaisesRegex(ValueError, "Actual OS differs"):
+            smoke.assert_os("fedora-wayland", dict(ID="omarchy", ID_LIKE="arch"))
+        with self.assertRaisesRegex(ValueError, "Actual OS differs"):
+            smoke.assert_os("debian12", dict(ID="debian", VERSION_ID="13"))
+
     def test_one_shot_chooser_restores_real_invoke_and_only_supplies_path(self):
         script = """
 const assert=require('node:assert/strict'),calls=[];
@@ -45,6 +104,8 @@ choice.then(async path=>{
 
     def test_ready_is_required_even_with_preview_and_pixels(self):
         identity = dict(tiny_tiff_path="/prepared/tiny.tif", tiny_tiff_width=65, tiny_tiff_height=49)
+        for observation in ({}, dict(state=None), dict(state={}, phase=None, error=False)):
+            self.assertFalse(smoke.assert_rendered(observation, identity))
         state = dict(path=identity["tiny_tiff_path"], width=65, height=49, phase="preview", previewReady=True)
         observation = dict(state=state, phase="preview", error=False)
         self.assertFalse(smoke.assert_rendered(observation, identity))
@@ -68,16 +129,26 @@ choice.then(async path=>{
             capture.write_bytes(b"P6\n200 150\n255\n" + bytes([44] * 200 * 150 * 3))
             self.assertEqual(smoke.ppm_spread(capture, [10, 10, 180, 120])["spread"], 0)
 
+    @unittest.skipUnless(hasattr(smoke.os, "getuid"), "Linux executable and UID validation")
     def test_asset_and_helper_identity_verified_before_launch(self):
         with tempfile.TemporaryDirectory() as folder:
             asset, image = Path(folder) / "incoming.AppImage", Path(folder) / "tiny.tif"
             asset.write_bytes(b"exact candidate")
+            asset.chmod(0o700)
             image.write_bytes(b"source fixture")
             tool = Path(folder) / "prepared-observer"
             tool.write_bytes(b"fixed observer")
-            identity = dict(asset_path=str(asset), asset_sha256=smoke.sha(asset), tiny_tiff_path=str(image), tiny_tiff_sha256=smoke.sha(image), readiness=dict(ready=True, helper_sha256=smoke.sha(smoke.__file__), tools=[dict(name="observer", path=str(tool), sha256=smoke.sha(tool))]))
-            with patch.object(smoke.os, "getuid", return_value=1000):
+            identity = dict(asset_path=str(asset), asset_sha256=smoke.sha(asset), tiny_tiff_path=str(image), tiny_tiff_sha256=smoke.sha(image), screenshot_command=[str(tool), "{output}"], readiness=dict(ready=True, helper_sha256=smoke.sha(smoke.__file__), tools=[dict(name="observer", path=str(tool), sha256=smoke.sha(tool))]))
+            with patch.object(smoke.os, "getuid", return_value=1000), patch.object(smoke.sys, "executable", str(tool)), patch.object(smoke.shutil, "which", return_value=str(tool)):
                 smoke.verify_inputs(identity)
+                asset.chmod(0o600)
+                with self.assertRaisesRegex(ValueError, "chmod \\+x"):
+                    smoke.verify_inputs(identity)
+                asset.chmod(0o700)
+                identity["screenshot_command"][0] = "/unpinned/screenshot"
+                with self.assertRaisesRegex(ValueError, "not Stage A pinned"):
+                    smoke.verify_inputs(identity)
+                identity["screenshot_command"][0] = str(tool)
                 identity["readiness"]["helper_sha256"] = "0" * 64
                 with self.assertRaisesRegex(ValueError, "helper changed"):
                     smoke.verify_inputs(identity)
@@ -89,6 +160,42 @@ choice.then(async path=>{
                 asset.write_bytes(b"changed bytes")
                 with self.assertRaisesRegex(ValueError, "asset SHA256"):
                     smoke.verify_inputs(identity)
+
+    def test_launcher_os_error_records_failure_receipt_and_log(self):
+        with tempfile.TemporaryDirectory() as folder:
+            receipt = Path(folder) / "exit.json"
+            error = PermissionError(13, "Permission denied", "/prepared/AppImage")
+            with patch.object(smoke, "verify_inputs"), patch.object(smoke.subprocess, "Popen", side_effect=error):
+                self.assertEqual(smoke.launcher(dict(asset_path="/prepared/AppImage"), receipt, []), 1)
+            result = json.loads(receipt.read_text())
+            self.assertEqual(result["exit_code"], 1)
+            self.assertIsNone(result["pid"])
+            self.assertIn("Permission denied", result["error"])
+            self.assertIn("Permission denied", Path(str(receipt) + ".log").read_text())
+            self.assertFalse(Path(str(receipt) + ".pid").exists())
+
+    def test_launcher_clears_inherited_extract_mode_and_uses_explicit_fallback(self):
+        for fallback in (False, True):
+            with tempfile.TemporaryDirectory() as folder:
+                receipt = Path(folder) / "exit.json"
+                child = SimpleNamespace(pid=42, wait=lambda: 0)
+                with patch.object(smoke, "verify_inputs"), patch.object(smoke.subprocess, "Popen", return_value=child) as launch, patch.dict(smoke.os.environ, {"APPIMAGE_EXTRACT_AND_RUN": "1", "APPIMAGE_EXTRACT_AND_RUN_DEFAULT": "1"}):
+                    self.assertEqual(smoke.launcher(dict(asset_path="/prepared/AppImage", extract_and_run=fallback), receipt, []), 0)
+                    command = launch.call_args.args[0]
+                    environment = launch.call_args.kwargs["env"]
+                    self.assertNotIn("APPIMAGE_EXTRACT_AND_RUN", environment)
+                    self.assertNotIn("APPIMAGE_EXTRACT_AND_RUN_DEFAULT", environment)
+                    self.assertEqual("--appimage-extract-and-run" in command, fallback)
+
+    @unittest.skipUnless(hasattr(smoke.os, "getuid"), "Linux native driver UID validation")
+    def test_driver_requires_owned_pinned_native_listener(self):
+        identity = dict(driver_url="http://127.0.0.1:4445", readiness=dict(tools=[dict(path="/prepared/WebKitWebDriver")]))
+        row = 'LISTEN 0 5 127.0.0.1:4445 0.0.0.0:* users:(("WebKitWebDrive",pid=42,fd=7))'
+        with patch.object(smoke.subprocess, "run", return_value=type("Result", (), {"stdout": row})()), patch.object(smoke.Path, "resolve", return_value=Path("/prepared/WebKitWebDriver")), patch.object(smoke.Path, "stat", return_value=type("Stat", (), {"st_uid": 1000})()), patch.object(smoke.os, "getuid", return_value=1000):
+            self.assertEqual(smoke.verify_driver(identity, 1)["pid"], 42)
+            identity["driver_url"] = "http://remote.example:4445"
+            with self.assertRaisesRegex(ValueError, "loopback"):
+                smoke.verify_driver(identity, 1)
 
 
 if __name__ == "__main__":

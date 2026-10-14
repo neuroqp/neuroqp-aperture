@@ -52,6 +52,10 @@ jobs:
         env:
           APERTURE_WORKER_EXECUTABLE: ${{ github.workspace }}/src-tauri/target/debug/aperture
       - run: cargo clippy --manifest-path src-tauri/Cargo.toml --all-targets --locked -- -D warnings
+      - uses: actions/cache@0057852bfaa89a56745cba8c7296529d2fc39830 # v4
+        with:
+          path: build/source-baseline
+          key: development-source-${{ runner.os }}-${{ hashFiles('scripts/release/corresponding-source.json') }}
       - name: Stage native development runtime
         run: |
           mkdir -p build/evidence build/development/linux/bin build/development/linux/lib
@@ -59,6 +63,12 @@ jobs:
           # The Stage A Debian desktop already supplies GTK/WebKit and system codecs.
           cp -L /usr/lib/x86_64-linux-gnu/libvips.so.42 build/development/linux/lib/
           cp build/linux/dependencies.json build/development/linux/
+          cp LICENSE build/development/linux/LICENSE.txt
+          python3 scripts/release/release.py buildinfo linux build/development/linux build/linux/dependencies.json
+          python3 scripts/release/notices.py linux build/linux/native-notices.txt build/development/linux/THIRD-PARTY-NOTICES-linux.txt
+          # Reuse reviewed native/vendor bytes and current public Git source.
+          # Baseline sources stay outside the development artifact; no new archive assembly.
+          python3 scripts/release/release.py development-source --platform linux --source-sha "$(git rev-parse HEAD)" --directory build/development/linux --baseline-directory build/source-baseline --fetch
           tar -czf build/evidence/development-linux.tar.gz -C build/development linux
       - name: Record successful development validation
         run: python3 scripts/release/bounded.py automated linux src-tauri/target/debug/aperture build/evidence/stage-a-linux.json
@@ -128,11 +138,23 @@ jobs:
         env:
           APERTURE_WORKER_EXECUTABLE: ${{ github.workspace }}\src-tauri\target\x86_64-pc-windows-msvc\debug\aperture.exe
       - run: cargo clippy --manifest-path src-tauri/Cargo.toml --target x86_64-pc-windows-msvc --all-targets --locked -- -D warnings
+      - uses: actions/cache@0057852bfaa89a56745cba8c7296529d2fc39830 # v4
+        with:
+          path: build/source-baseline
+          key: development-source-${{ runner.os }}-${{ hashFiles('scripts/release/corresponding-source.json') }}
       - name: Stage native development runtime
         run: |
           Copy-Item src-tauri/target/x86_64-pc-windows-msvc/debug/aperture.exe build/windows/payload/aperture.exe
+          python scripts/release/release.py buildinfo windows build/windows/payload build/windows/dependencies.json
+          if ($LASTEXITCODE) { exit $LASTEXITCODE }
+          python scripts/release/notices.py windows build/windows/native-notices.txt build/windows/payload/THIRD-PARTY-NOTICES-windows.txt
+          if ($LASTEXITCODE) { exit $LASTEXITCODE }
+          # The source baseline is verified once here and never enters this runtime ZIP.
+          python scripts/release/release.py development-source --platform windows --source-sha (git rev-parse HEAD) --directory build/windows/payload --baseline-directory build/source-baseline --fetch
+          if ($LASTEXITCODE) { exit $LASTEXITCODE }
           # Runtime files, development executable and pinned dependency identities travel together.
           python -c "import shutil; shutil.make_archive('build/evidence/development-windows', 'zip', 'build/windows/payload')"
+          if ($LASTEXITCODE) { exit $LASTEXITCODE }
       - name: Record successful development validation
         run: python scripts/release/bounded.py automated windows src-tauri/target/x86_64-pc-windows-msvc/debug/aperture.exe build/evidence/stage-a-windows.json
       - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4

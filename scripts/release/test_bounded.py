@@ -19,9 +19,9 @@ def smoke(expected, environment):
     now = bounded.timestamp()
     result = {**{key: expected[key] for key in ("schema", "source_sha", "build_inputs_sha256", "checksums_sha256", "freeze_started_at", "deadline_at")}, "stage": "C", "status": "pass", "forced_kill": False, "environment": environment, "asset_sha256": "f" * 64, "tiny_tiff_sha256": "1" * 64, "helper_sha256": "2" * 64, "attempts": 1, "started_at": now, "finished_at": now, "observer_tools": expected["assets"][environment]["tools"], "steps": [{"name": name, "status": "pass", "forced_kill": False, "started_at": now, "finished_at": now, "timeout_seconds": bounded.STEP_LIMITS[name], "detail": {}} for name in bounded.SMOKE_STEPS]}
     result.update(uid=1000, os={"Caption": "Windows 11"}, privilege={"is_admin": False, "session_id": 1})
-    result["steps"][0]["detail"] = {"native_windows": [{}], "backend": "native-Windows-WebView2" if environment.startswith("windows") else "wayland", "installer_exit_code": 0, "installed_marker_verified": True, "cold_baseline": True, "incoming_payload_id": "5" * 64}
-    result["steps"][1]["detail"] = {"dialog_input": "prepared fixed TIFF chooser response", "observation": {"phase": "ready", "error": False, "chooser_restored": True, "rendered_tiles": True, "state": {"phase": "ready", "previewReady": True, "width": 16, "height": 16}}, "pixel_observation": {"spread": 100}, "screenshot_sha256": "3" * 64}
-    result["steps"][2]["detail"] = {"exit_code": 0}
+    result["steps"][0]["detail"] = {"pid": 123, "launcher_pid": 122, "hwnd": 1234, "native_windows": [{"role": "frame"}], "process_identity": {"buildinfo": {"source_sha": expected["source_sha"]}}, "embedded_buildinfo": {"source_sha": expected["source_sha"]}, "backend": "native-Windows-WebView2" if environment.startswith("windows") else "wayland", "installer_exit_code": 0, "installed_marker_verified": True, "cold_baseline": True, "incoming_payload_id": "5" * 64}
+    result["steps"][1]["detail"] = {"dialog_input": "prepared fixed TIFF chooser response", "observation": {"phase": "ready", "error": False, "chooser_restored": True, "rendered_canvas": True, "state": {"phase": "ready", "previewReady": True, "width": 16, "height": 16}}, "pixel_observation": {"spread": 100}, "screenshot_sha256": "3" * 64}
+    result["steps"][2]["detail"] = {"pid": 123 if environment.startswith("windows") else 122, "exit_code": 0, "app_pid": 123, "app_exited": True, "exit_code_source": "exact AppImage launcher wait", "forced_cleanup": False, "action": "actual mouse SendInput"}
     return result
 
 
@@ -41,6 +41,10 @@ class BoundedTests(unittest.TestCase):
         with self.assertRaisesRegex(ValueError, "visible pixels"): bounded.validate_smoke_report(changed, expected)
         changed = copy.deepcopy(rows[0]); changed["steps"][2]["detail"]["exit_code"] = 1
         with self.assertRaisesRegex(ValueError, "exit code"): bounded.validate_smoke_report(changed, expected)
+        changed = copy.deepcopy(rows[0]); changed["finished_at"] = (bounded.parsed(bounded.timestamp()) + dt.timedelta(seconds=1)).isoformat()
+        with self.assertRaisesRegex(ValueError, "future"): bounded.validate_smoke_report(changed, expected)
+        changed = copy.deepcopy(rows[0]); changed["timed_out"] = True
+        with self.assertRaisesRegex(ValueError, "blocks release"): bounded.validate_smoke_report(changed, expected)
 
     def test_original_deadline_cannot_reset_at_promotion(self):
         expected = identity()
@@ -102,23 +106,42 @@ class BoundedTests(unittest.TestCase):
         with self.assertRaisesRegex(ValueError, "retained failed"):
             bounded.validate_smoke_report(rows[0], expected)
 
+    def test_transient_label_cannot_retry_forced_or_timed_out_attempt(self):
+        expected = identity(); row = smoke(expected, "debian12")
+        prior = copy.deepcopy(row); prior["status"] = "fail"
+        row.update(attempts=2, retry_reason="transient-lab", transient_diagnosis="Prepared observer briefly busy", prior_attempt=prior)
+        bounded.validate_smoke_report(row, expected)
+        for field in ("forced_kill", "timed_out", "deadline_exceeded", "helper_forced_termination"):
+            changed = copy.deepcopy(row); changed["prior_attempt"][field] = True
+            with self.subTest(field=field), self.assertRaisesRegex(ValueError, "cannot be retried"):
+                bounded.validate_smoke_report(changed, expected)
+        for field in ("forced_kill", "timed_out"):
+            changed = copy.deepcopy(row); changed["prior_attempt"]["steps"][0][field] = True
+            with self.subTest(step_field=field), self.assertRaisesRegex(ValueError, "cannot be retried"):
+                bounded.validate_smoke_report(changed, expected)
+        changed = copy.deepcopy(row)
+        step = changed["prior_attempt"]["steps"][0]
+        step["finished_at"] = (bounded.parsed(step["started_at"]) + dt.timedelta(seconds=step["timeout_seconds"])).isoformat()
+        with self.assertRaisesRegex(ValueError, "cannot be retried"):
+            bounded.validate_smoke_report(changed, expected)
+
     def test_fallback_must_really_render_and_exit_zero(self):
         expected = identity(); expected["assets"]["debian12"]["fuse_fallback_required"] = True
         report = smoke(expected, "debian12")
         fallback = copy.deepcopy(report["steps"][0])
-        fallback.update(name="fuse-fallback", timeout_seconds=180, detail={"launch": {"launch_method": "extract-and-run", "native_windows": [{}]}, "render": copy.deepcopy(report["steps"][1]["detail"]), "clean-exit": {"exit_code": 0}})
+        fallback.update(name="fuse-fallback", timeout_seconds=180, detail={"launch": {**copy.deepcopy(report["steps"][0]["detail"]), "launch_method": "extract-and-run"}, "render": copy.deepcopy(report["steps"][1]["detail"]), "clean-exit": copy.deepcopy(report["steps"][2]["detail"])})
         report["steps"].append(fallback)
         bounded.validate_smoke_report(report, expected)
         fallback["detail"]["clean-exit"]["exit_code"] = -9
-        with self.assertRaisesRegex(ValueError, "close naturally"):
+        with self.assertRaisesRegex(ValueError, "exit code"):
             bounded.validate_smoke_report(report, expected)
 
     def test_source_assembly_is_bound_to_archive_and_original_deadline(self):
-        expected = identity(); now = bounded.timestamp()
-        proof = {**expected, "status": "pass", "forced_kill": False, "started_at": now, "finished_at": now, "attempt_sha256": "6" * 64, "archive_sha256": "7" * 64, "refresh_receipt_sha256": "8" * 64}
+        expected = {**identity(), "stage": "B"}; now = bounded.timestamp()
+        proof = {**expected, "stage": "B", "status": "pass", "forced_kill": False, "started_at": now, "finished_at": now, "attempt_sha256": "6" * 64, "archive_sha256": "7" * 64, "refresh_receipt_sha256": "8" * 64}
         plan = {"sha256": "7" * 64, "assembly_attempt": proof}
         bounded.validate_source_receipt(plan, expected, "6" * 64)
-        for key, value in (("archive_sha256", "9" * 64), ("attempt_sha256", "9" * 64), ("status", "fail"), ("forced_kill", True), ("freeze_started_at", "2020-01-01T00:00:00Z")):
+        for key, value in (("schema", 2), ("stage", "A"), ("source_sha", "9" * 40), ("build_inputs_sha256", "9" * 64), ("archive_sha256", "9" * 64), ("attempt_sha256", "9" * 64), ("status", "fail"), ("forced_kill", True), ("freeze_started_at", "2020-01-01T00:00:00Z"), ("deadline_at", "2020-01-01T00:30:00Z"), ("started_at", "2020-01-01T00:00:00Z"), ("refresh_receipt_sha256", "")):
             changed = copy.deepcopy(plan); changed["assembly_attempt"][key] = value
             with self.subTest(key=key), self.assertRaises(ValueError):
                 bounded.validate_source_receipt(changed, expected, "6" * 64)
@@ -129,11 +152,17 @@ class BoundedTests(unittest.TestCase):
             root = Path(folder)
             for environment in bounded.ENVIRONMENTS:
                 row = smoke(expected, environment)
-                row["steps"][0]["detail"]["native_windows"] = [{"name": "Frame", "role": "frame"}] * 500
+                row["steps"][0]["detail"]["native_windows"] = [{"name": "App", "role": "application"}] + [{"name": "Frame", "role": "frame"}] * 500
+                if environment in ("debian12", "ubuntu24"):
+                    expected["assets"][environment]["fuse_fallback_required"] = True
+                    fallback = copy.deepcopy(row["steps"][0])
+                    fallback.update(name="fuse-fallback", timeout_seconds=180, detail={"launch": {**copy.deepcopy(row["steps"][0]["detail"]), "launch_method": "extract-and-run"}, "render": copy.deepcopy(row["steps"][1]["detail"]), "clean-exit": copy.deepcopy(row["steps"][2]["detail"])})
+                    row["steps"].append(fallback)
                 bounded.write_report(root / f"{environment}.json", row)
             compact = bounded.compact_reports(expected, root)
             self.assertEqual(len(compact), 6)
             self.assertEqual(len(compact[0]["steps"][0]["detail"]["native_windows"]), 1)
+            self.assertEqual(compact[2]["steps"][3]["detail"]["launch"]["native_windows"][0]["role"], "frame")
             self.assertRegex(compact[0]["raw_report_sha256"], "^[0-9a-f]{64}$")
             broken = bounded.read(root / "debian12.json")
             broken["steps"][2]["detail"]["exit_code"] = -9
@@ -141,9 +170,23 @@ class BoundedTests(unittest.TestCase):
             with self.assertRaisesRegex(ValueError, "exit code"):
                 bounded.compact_reports(expected, root)
 
+    def test_native_receipt_cannot_substitute_canvas_or_process_outcome(self):
+        expected = identity()
+        for environment in ("windows11-setup", "debian12"):
+            report = smoke(expected, environment)
+            mutations = [(1, "observation", {**report["steps"][1]["detail"]["observation"], "rendered_canvas": False, "rendered_tiles": True}), (1, "observation", {**report["steps"][1]["detail"]["observation"], "error": None}), (1, "pixel_observation", {"spread": float("nan")}), (2, "exit_code", False), (2, "pid", 999)]
+            if environment.startswith("windows"):
+                mutations.append((2, "forced_cleanup", True))
+            else:
+                mutations.extend(((2, "app_pid", 999), (2, "app_exited", False), (2, "exit_code_source", "PID absent")))
+            for step, key, value in mutations:
+                changed = copy.deepcopy(report); changed["steps"][step]["detail"][key] = value
+                with self.subTest(environment=environment, key=key), self.assertRaises(ValueError):
+                    bounded.validate_smoke_report(changed, expected)
+
     def test_trusted_run_rejects_wrong_repository_workflow_and_source(self):
         import json
-        run = {"repository": {"full_name": "neuroqp/neuroqp-aperture"}, "conclusion": "success", "event": "workflow_dispatch", "path": ".github/workflows/native-validation.yml", "head_sha": "a" * 40}
+        run = {"repository": {"full_name": "neuroqp/neuroqp-aperture"}, "conclusion": "success", "event": "workflow_dispatch", "path": ".github/workflows/native-validation.yml", "head_sha": "a" * 40, "head_branch": "feature-reviewed"}
         with patch.object(bounded.subprocess, "check_output", return_value=json.dumps(run)):
             bounded.trusted_run("123", "native-validation.yml", "a" * 40)
             with self.assertRaisesRegex(ValueError, "another source"):
@@ -151,6 +194,16 @@ class BoundedTests(unittest.TestCase):
         for changed in ({**run, "repository": {"full_name": "other/fork"}}, {**run, "conclusion": "failure"}, {**run, "event": "pull_request"}):
             with patch.object(bounded.subprocess, "check_output", return_value=json.dumps(changed)), self.assertRaises(ValueError):
                 bounded.trusted_run("123", "native-validation.yml")
+        for workflow in ("release.yml", "release-evidence.yml"):
+            main = {**run, "head_branch": "main", "path": f".github/workflows/{workflow}", "run_attempt": 1}
+            with patch.object(bounded.subprocess, "check_output", return_value=json.dumps(main)):
+                bounded.trusted_run("123", workflow)
+            for changed in ({**main, "head_branch": "feature-reviewed"}, {**main, "head_branch": None}):
+                with patch.object(bounded.subprocess, "check_output", return_value=json.dumps(changed)), self.assertRaisesRegex(ValueError, "trusted main"):
+                    bounded.trusted_run("123", workflow)
+            if workflow == "release.yml":
+                with patch.object(bounded.subprocess, "check_output", return_value=json.dumps({**main, "run_attempt": 2})), self.assertRaisesRegex(ValueError, "reruns"):
+                    bounded.trusted_run("123", workflow)
 
     def test_final_package_workflow_never_runs_functional_matrix(self):
         root = Path(__file__).resolve().parents[2]
@@ -164,6 +217,18 @@ class BoundedTests(unittest.TestCase):
         self.assertIn("cargo test", development)
         self.assertNotIn("tauri build", development)
         self.assertNotIn("package-linux.sh", development)
+        for platform, job in zip(("linux", "windows"), development.split("  windows:\n")):
+            # Public development bytes must pass source coverage before archive/upload.
+            gate = job.index("release.py development-source")
+            archived = job.index("tar -czf" if platform == "linux" else "shutil.make_archive")
+            upload = job.index("actions/upload-artifact")
+            self.assertLess(job.index("release.py buildinfo"), gate)
+            self.assertLess(job.index("release/notices.py"), gate)
+            self.assertLess(gate, archived)
+            self.assertLess(archived, upload)
+            self.assertEqual(job.count("release.py development-source"), 1)
+            self.assertIn("--baseline-directory build/source-baseline --fetch", job)
+            self.assertNotIn("build/source-baseline", job[upload:])
 
     def test_runner_forced_timeout_is_fail_and_records_evidence(self):
         import sys

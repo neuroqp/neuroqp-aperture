@@ -94,7 +94,7 @@ jobs:
         env:
           SOURCE_REVIEW_SHA256: ${{ inputs.source_review_sha256 }}
           SOURCE_SHA: ${{ inputs.source_sha }}
-        run: python3 scripts/release/release.py source-material build/release --platform linux --plan build/release/Aperture-Corresponding-Source.json --plan-sha256 "$SOURCE_REVIEW_SHA256" --source-sha "$SOURCE_SHA"
+        run: python3 scripts/release/release.py source-material build/release --platform linux --plan build/release/Aperture-Corresponding-Source.json --plan-sha256 "$SOURCE_REVIEW_SHA256" --source-sha "$SOURCE_SHA" --attempt build/evidence/frozen-attempt.json
       - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
         timeout-minutes: 1
         if: always()
@@ -229,7 +229,7 @@ jobs:
         env:
           SOURCE_REVIEW_SHA256: ${{ inputs.source_review_sha256 }}
           SOURCE_SHA: ${{ inputs.source_sha }}
-        run: python scripts/release/release.py source-material build/release --platform windows --plan build/release/Aperture-Corresponding-Source.json --plan-sha256 $env:SOURCE_REVIEW_SHA256 --source-sha $env:SOURCE_SHA
+        run: python scripts/release/release.py source-material build/release --platform windows --plan build/release/Aperture-Corresponding-Source.json --plan-sha256 $env:SOURCE_REVIEW_SHA256 --source-sha $env:SOURCE_SHA --attempt build/evidence/frozen-attempt.json
       - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
         timeout-minutes: 1
         if: always()

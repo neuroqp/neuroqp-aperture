@@ -168,6 +168,17 @@ def frozen_source(directory, root):
                 *(("application/source/" + name, body, mode) for name, (body, mode) in files.items()),
                 ("fixture/source.c", b"preserved dependency source", 0o644)]
     rewrite_archive(directory, plan, replace)
+    started = release.datetime.datetime.now(release.datetime.timezone.utc) - release.datetime.timedelta(seconds=60)
+    stamp = lambda value: value.isoformat().replace("+00:00", "Z")
+    attempt = {**release.bounded.identity(root), "stage": "B", "freeze_started_at": stamp(started),
+               "deadline_at": stamp(started + release.datetime.timedelta(seconds=1800))}
+    attempt_path = root.parent / "attempt.json"
+    attempt_path.write_text(json.dumps(attempt))
+    plan["assembly_attempt"] = {**attempt, "attempt_sha256": release.digest(attempt_path),
+                                "archive_sha256": plan["sha256"], "refresh_receipt_sha256": "e" * 64,
+                                "status": "pass", "forced_kill": False,
+                                "started_at": stamp(started + release.datetime.timedelta(seconds=10)),
+                                "finished_at": stamp(started + release.datetime.timedelta(seconds=11))}
     # Keep the tracked plan bytes untouched after freezing the commit.
     external = root.parent / "external-review.json"
     external.write_text(json.dumps(plan))
@@ -180,6 +191,58 @@ def frozen_source(directory, root):
 
 
 class FrozenSourceTests(unittest.TestCase):
+    def test_external_source_consumers_require_exact_post_freeze_assembly_proof(self):
+        with tempfile.TemporaryDirectory() as folder:
+            directory, root = Path(folder) / "assets", Path(folder) / "root"
+            directory.mkdir()
+            external, source_sha, plan = frozen_source(directory, root)
+            attempt_path = root.parent / "attempt.json"
+            original = attempt_path.read_bytes()
+            expected = json.loads(original)
+            kwargs = {"root": root, "plan_path": external, "source_sha": source_sha, "attempt_path": attempt_path}
+            external.write_text(json.dumps({key: value for key, value in plan.items() if key != "assembly_attempt"}))
+            with self.assertRaises(ValueError):
+                release.source_material(directory, plan_sha256=release.digest(external), **kwargs)
+            mutations = [
+                {"assembly_attempt": None},
+                {"assembly_attempt": {}},
+                *({"assembly_attempt": {**plan["assembly_attempt"], field: value}} for field, value in (
+                    ("schema", 2), ("stage", "A"), ("source_sha", "f" * 40), ("build_inputs_sha256", "f" * 64),
+                    ("freeze_started_at", "2000-01-01T00:00:00Z"), ("deadline_at", "2100-01-01T00:00:00Z"),
+                    ("attempt_sha256", "f" * 64), ("archive_sha256", "f" * 64),
+                    ("refresh_receipt_sha256", "not-a-hash"), ("status", "fail"), ("forced_kill", True),
+                    ("started_at", "2000-01-01T00:00:00Z"), ("finished_at", expected["deadline_at"]),
+                    ("finished_at", (release.datetime.datetime.now(release.datetime.timezone.utc) + release.datetime.timedelta(seconds=60)).isoformat().replace("+00:00", "Z")),
+                    ("started_at", None), ("finished_at", "invalid"),
+                )),
+            ]
+            for index, mutation in enumerate(mutations):
+                external.write_text(json.dumps({**plan, **mutation}))
+                kwargs["plan_sha256"] = release.digest(external)
+                with self.subTest(mutation=index), mock.patch.object(release.urllib.request, "urlopen") as download:
+                    with self.assertRaises(ValueError):
+                        release.source_material(directory, fetch=True, **kwargs)
+                    with self.assertRaises(ValueError):
+                        release.manifest(directory, "0.1.0", "neuroqp/neuroqp-aperture", source_sha,
+                                         "2026-10-14T00:00:00Z", **{key: value for key, value in kwargs.items() if key != "source_sha"})
+                    download.assert_not_called()
+                    self.assertFalse((directory / "latest.json").exists())
+                    self.assertFalse((directory / "SHA256SUMS").exists())
+            external.write_text(json.dumps(plan))
+            kwargs["plan_sha256"] = release.digest(external)
+            with self.assertRaisesRegex(ValueError, "original frozen --attempt"):
+                release.source_material(directory, **{**kwargs, "attempt_path": None})
+            # Equivalent JSON is still different original receipt bytes.
+            attempt_path.write_bytes(original + b"\n")
+            with self.assertRaisesRegex(ValueError, "receipt"):
+                release.source_material(directory, **kwargs)
+            attempt_path.write_bytes(original)
+            with mock.patch.object(release.bounded, "timestamp", return_value=expected["deadline_at"]), self.assertRaisesRegex(ValueError, "deadline exceeded"):
+                release.source_material(directory, **kwargs)
+            attempt_path.write_text(json.dumps({**expected, "build_inputs_sha256": "f" * 64}))
+            with self.assertRaisesRegex(ValueError, "frozen inputs"):
+                release.source_material(directory, **kwargs)
+
     def test_external_plan_hash_is_checked_before_parse_or_network(self):
         with tempfile.TemporaryDirectory() as folder:
             path = Path(folder) / "external.json"
@@ -200,7 +263,7 @@ class FrozenSourceTests(unittest.TestCase):
             tracked = (root / release.SOURCE_PUBLICATION).read_bytes()
             with mock.patch.object(release.urllib.request, "urlopen") as download:
                 release.source_material(directory, fetch=True, root=root, platform="linux", plan_path=external,
-                                        plan_sha256=release.digest(external), source_sha=source_sha)
+                                        plan_sha256=release.digest(external), source_sha=source_sha, attempt_path=root.parent / "attempt.json")
                 download.assert_not_called()
             self.assertEqual((root / release.SOURCE_PUBLICATION).read_bytes(), tracked)
             self.assertEqual((directory / release.SOURCE_REVIEW).read_bytes(), external.read_bytes())
@@ -208,7 +271,7 @@ class FrozenSourceTests(unittest.TestCase):
             wrong = {**plan, "application_source_sha": "f" * 40}
             external.write_text(json.dumps(wrong))
             with self.assertRaisesRegex(ValueError, "pin the frozen"):
-                release.source_material(directory, root=root, plan_path=external, plan_sha256=release.digest(external), source_sha=source_sha)
+                release.source_material(directory, root=root, plan_path=external, plan_sha256=release.digest(external), source_sha=source_sha, attempt_path=root.parent / "attempt.json")
             path = directory / "BUILDINFO-linux.json"
             info = json.loads(path.read_text())
             info["source_sha"] = "f" * 40
@@ -227,9 +290,9 @@ class FrozenSourceTests(unittest.TestCase):
                 (directory / (name + ".sig")).write_text("synthetic signature")
             for platform in ("linux", "windows"):
                 (directory / f"THIRD-PARTY-NOTICES-{platform}.txt").write_text("synthetic notice")
-            release.source_material(directory, root=root, plan_path=external, plan_sha256=release.digest(external), source_sha=source_sha)
+            release.source_material(directory, root=root, plan_path=external, plan_sha256=release.digest(external), source_sha=source_sha, attempt_path=root.parent / "attempt.json")
             release.manifest(directory, "0.1.0", "neuroqp/neuroqp-aperture", source_sha, "2026-10-14T00:00:00Z",
-                             root=root, plan_path=external, plan_sha256=release.digest(external))
+                             root=root, plan_path=external, plan_sha256=release.digest(external), attempt_path=root.parent / "attempt.json")
             release.verify(directory, "0.1.0", source_sha, root=root)
             self.assertEqual((root / release.SOURCE_PUBLICATION).read_bytes(), tracked)
             self.assertEqual(release.digest(directory / release.SOURCE_ASSET), plan["sha256"])
@@ -237,7 +300,7 @@ class FrozenSourceTests(unittest.TestCase):
             copied.write_bytes(copied.read_bytes() + b"\n")
             with self.assertRaisesRegex(ValueError, "Transferred source review"):
                 release.manifest(directory, "0.1.0", "neuroqp/neuroqp-aperture", source_sha, "2026-10-14T00:00:00Z",
-                                 root=root, plan_path=external, plan_sha256=release.digest(external))
+                                 root=root, plan_path=external, plan_sha256=release.digest(external), attempt_path=root.parent / "attempt.json")
 
     def test_snapshot_ignores_export_attributes_and_requires_commit_object(self):
         with tempfile.TemporaryDirectory() as folder:
@@ -316,6 +379,93 @@ class FrozenSourceTests(unittest.TestCase):
                 release.source_material(directory, fetch=True, root=root, cache=cache)
                 download.assert_not_called()
             self.assertEqual((cache / (checksum + ".tar.xz")).read_bytes(), original)
+
+
+def development_fixture(folder, platform="linux", version="0.2.0", mutation=None):
+    root, baseline, runtime = (Path(folder) / name for name in ("repository", "baseline", "runtime"))
+    baseline.mkdir()
+    for target in ("linux", "windows"):
+        (baseline / f"BUILDINFO-{target}.json").write_text(json.dumps({"version": "0.1.0", "source_sha": "a" * 40}))
+    reviewed_source(baseline, root)
+    for name in ("package.json", "src-tauri/tauri.conf.json"):
+        (root / name).write_text('{"version":"0.1.0"}')
+    (root / "src-tauri/Cargo.toml").write_text('[package]\nname = "aperture"\nversion = "0.1.0"\n')
+    release.set_version(version, root)
+    if mutation:
+        mutation(root)
+    release.subprocess.run(["git", "init", "-q", str(root)], check=True)
+    release.subprocess.run(["git", "add", "."], cwd=root, check=True)
+    release.subprocess.run(["git", "-c", "user.name=Fixture", "-c", "user.email=fixture@example.invalid", "commit", "-qm", "Public development source fixture"], cwd=root, check=True)
+    source_sha = release.bounded.identity(root)["source_sha"]
+    runtime.mkdir()
+    info = json.loads((baseline / f"BUILDINFO-{platform}.json").read_text())
+    info.update(platform=platform, version=version, source_sha=source_sha, lockfiles=release.lockfile_hashes(root))
+    (runtime / f"BUILDINFO-{platform}.json").write_text(json.dumps(info))
+    (runtime / f"THIRD-PARTY-NOTICES-{platform}.txt").write_text("Synthetic dependency notices and source provenance.\n")
+    return root, baseline, runtime, source_sha
+
+
+class DevelopmentSourceTests(unittest.TestCase):
+    def test_development_references_baseline_and_current_git_with_exact_root_version_delta(self):
+        for platform in ("linux", "windows"):
+            for version in ("0.1.0", "0.2.0"):
+                with self.subTest(platform=platform, version=version), tempfile.TemporaryDirectory() as folder:
+                    root, baseline, runtime, source_sha = development_fixture(folder, platform, version)
+                    original = release.digest(baseline / release.SOURCE_ASSET)
+                    cache = Path(folder) / "cache"
+                    with mock.patch.object(release.urllib.request, "urlopen") as download:
+                        release.development_source(runtime, baseline, platform, source_sha, fetch=True, cache=cache, root=root)
+                        download.assert_not_called()
+                    record = json.loads((runtime / "DEVELOPMENT-SOURCE.json").read_text())
+                    self.assertEqual(record["stage"], "A")
+                    self.assertTrue(record["application_source_url"].endswith(source_sha))
+                    self.assertEqual(record["baseline"]["sha256"], original)
+                    self.assertEqual(record["cargo_root_version"], {"baseline": "0.1.0", "current": version,
+                                     "change": "unchanged" if version == "0.1.0" else "aperture-root-version-only"})
+                    self.assertEqual(record["application_lockfiles_sha256"], release.lockfile_hashes(root))
+                    self.assertEqual(record["notices"]["sha256"], release.digest(runtime / f"THIRD-PARTY-NOTICES-{platform}.txt"))
+                    self.assertFalse((runtime / release.SOURCE_ASSET).exists())
+                    self.assertEqual(release.digest(baseline / release.SOURCE_ASSET), original)
+                    self.assertEqual(release.digest(cache / (original + ".tar.xz")), original)
+                    if version != "0.1.0":
+                        with self.assertRaisesRegex(ValueError, "checkout application lockfiles"):
+                            release.source_material(baseline, root=root)
+
+    def test_development_dependency_delta_requires_separate_review(self):
+        for filename, before, after in (("src-tauri/Cargo.lock", b'name = "dep"\nversion = "1.0.0"', b'name = "dep"\nversion = "2.0.0"'),
+                                        ("src-tauri/Cargo.lock", b'[[package]]', b'# changed comment\n[[package]]'),
+                                        ("pnpm-lock.yaml", b"lockfileVersion: '9.0'", b"lockfileVersion: '8.0'")):
+            with self.subTest(filename=filename), tempfile.TemporaryDirectory() as folder:
+                def mutate(root):
+                    path = root / filename
+                    path.write_bytes(path.read_bytes().replace(before, after))
+                root, baseline, runtime, source_sha = development_fixture(folder, mutation=mutate)
+                with self.assertRaisesRegex(ValueError, "dependencies"):
+                    release.development_source(runtime, baseline, "linux", source_sha, root=root)
+                self.assertFalse((runtime / "DEVELOPMENT-SOURCE.json").exists())
+
+    def test_development_requires_actual_build_native_identity_notices_and_reviewed_archive(self):
+        for change in ("source", "build-source", "build-lock", "native", "notices", "archive"):
+            with self.subTest(change=change), tempfile.TemporaryDirectory() as folder:
+                root, baseline, runtime, source_sha = development_fixture(folder)
+                path = runtime / "BUILDINFO-linux.json"
+                info = json.loads(path.read_text())
+                if change == "source":
+                    source_sha = "f" * 40
+                elif change == "build-source":
+                    info["source_sha"] = "f" * 40
+                elif change == "build-lock":
+                    info["lockfiles"]["src-tauri/Cargo.lock"] = "f" * 64
+                elif change == "native":
+                    info["native_dependencies"]["libvips"] = "unreviewed"
+                elif change == "notices":
+                    (runtime / "THIRD-PARTY-NOTICES-linux.txt").write_bytes(b"")
+                elif change == "archive":
+                    (baseline / release.SOURCE_ASSET).write_bytes(b"unreviewed source")
+                path.write_text(json.dumps(info))
+                with self.assertRaises(ValueError):
+                    release.development_source(runtime, baseline, "linux", source_sha, root=root)
+                self.assertFalse((runtime / "DEVELOPMENT-SOURCE.json").exists())
 
 
 class SourceAssemblyDeadlineTests(unittest.TestCase):

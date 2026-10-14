@@ -109,12 +109,14 @@ jobs:
           SOURCE_REVIEW_JSON: ${{ inputs.source_review_json }}
         run: python3 -c 'import os; from pathlib import Path; p=Path("build/evidence/source-review.json"); p.write_text(os.environ["SOURCE_REVIEW_JSON"],encoding="utf-8")'
       - name: Require the once-only source assembly inside the original frozen deadline
-        run: python3 scripts/release/bounded.py source-receipt build/evidence/frozen-attempt.json build/evidence/source-review.json
+        env:
+          SOURCE_REVIEW_SHA256: ${{ inputs.source_review_sha256 }}
+        run: python3 scripts/release/bounded.py source-receipt build/evidence/frozen-attempt.json build/evidence/source-review.json --plan-sha256 "$SOURCE_REVIEW_SHA256"
       - name: Fetch reviewed corresponding source once within original frozen deadline
         env:
           SOURCE_SHA: ${{ needs.identity.outputs.source_sha }}
           SOURCE_REVIEW_SHA256: ${{ inputs.source_review_sha256 }}
-        run: python3 scripts/release/bounded.py run build/evidence/frozen-attempt.json build/evidence/source-material.json --seconds 240 -- python3 scripts/release/release.py source-material build/corresponding-source --fetch --plan build/evidence/source-review.json --plan-sha256 "$SOURCE_REVIEW_SHA256" --source-sha "$SOURCE_SHA"
+        run: python3 scripts/release/bounded.py run build/evidence/frozen-attempt.json build/evidence/source-material.json --seconds 240 -- python3 scripts/release/release.py source-material build/corresponding-source --fetch --plan build/evidence/source-review.json --plan-sha256 "$SOURCE_REVIEW_SHA256" --source-sha "$SOURCE_SHA" --attempt build/evidence/frozen-attempt.json
       - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
         if: always()
         with:
@@ -168,7 +170,7 @@ jobs:
           SOURCE_REVIEW_SHA256: ${{ inputs.source_review_sha256 }}
         run: |
           python3 scripts/release/bounded.py deadline build/evidence/frozen-attempt.json
-          python3 scripts/release/release.py metadata build/release --version "$VERSION" --source-sha "$SOURCE_SHA" --plan build/release/Aperture-Corresponding-Source.json --plan-sha256 "$SOURCE_REVIEW_SHA256"
+          python3 scripts/release/release.py metadata build/release --version "$VERSION" --source-sha "$SOURCE_SHA" --plan build/release/Aperture-Corresponding-Source.json --plan-sha256 "$SOURCE_REVIEW_SHA256" --attempt build/evidence/frozen-attempt.json
           python3 scripts/release/release.py verify build/release --version "$VERSION" --source-sha "$SOURCE_SHA" --cryptographic
           python3 scripts/release/bounded.py candidate build/evidence/frozen-attempt.json build/release build/evidence/frozen-candidate.json
           python3 scripts/release/release.py notes "$VERSION" > build/release-notes.md

@@ -31,7 +31,20 @@ class LabTests(unittest.TestCase):
     def recovery(self, disk):
         return self.receipt("recovery.json", {"schema": 1, "licensed": True,
                             "guest_shutdown": "graceful", "qemu_exited": True,
+                            "full_cold_shutdown": True, "suspend_disk_event_before_shutdown": False,
+                            "qemu_exit_code": 0, "forced_termination": False,
                             "disk_identity": lab.identity(disk)})
+
+    def test_hybrid_or_unconfirmed_cold_shutdown_cannot_compact_or_freeze(self):
+        disk = self.file(lab.DISK)
+        receipt = self.recovery(disk)
+        original = lab.read(receipt)
+        for changed in ({"suspend_disk_event_before_shutdown": True}, {"full_cold_shutdown": False},
+                        {"qemu_exit_code": 1}, {"forced_termination": True}):
+            receipt.write_text(json.dumps({**original, **changed}))
+            for action in (lab.compact, lab.freeze_base):
+                with self.assertRaisesRegex(ValueError, "full cold"):
+                    action(self.root, receipt)
 
     def test_inventory_counts_hardlinks_once_and_does_not_follow_symlinks(self):
         disk = self.file(lab.DISK)
@@ -163,6 +176,25 @@ class LabTests(unittest.TestCase):
             with self.assertRaisesRegex(ValueError, "4 GiB"):
                 lab.compact(self.root, self.recovery(disk))
             self.assertTrue(all(call.args[1][0] == "info" for call in qemu.call_args_list))
+
+    def test_compaction_deadline_keeps_original_and_never_starts_compare(self):
+        disk = self.file(lab.DISK)
+        original = lab.identity(disk)
+
+        def qemu(root, args, **kwargs):
+            if args[0] == "info":
+                return "{}"
+            self.assertEqual(args[0], "convert")
+            Path(args[-1]).write_bytes(b"retained output")
+            return ""
+
+        with patch.object(lab, "qemu", side_effect=qemu), patch.object(lab.shutil, "disk_usage") as usage, \
+                patch.object(lab.time, "monotonic", side_effect=[0, 0, 1801]):
+            usage.return_value.free = 100 * lab.GIB
+            with self.assertRaisesRegex(ValueError, "deadline"):
+                lab.compact(self.root, self.recovery(disk))
+        self.assertEqual(lab.identity(disk), original)
+        self.assertTrue((self.root / (lab.DISK + ".compact.tmp")).exists())
 
 
 if __name__ == "__main__":

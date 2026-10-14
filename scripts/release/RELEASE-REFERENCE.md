@@ -27,6 +27,63 @@ tools and every native desktop must already be ready before freeze.
 Pinned downloads have SHA-256 checks. Changes to toolchains, library versions,
 checksums, workflow code or release scripts require source review.
 
+## Operator sequence
+
+Use a clean reviewed checkout. Keep reports and downloads in an ignored evidence
+directory. Workflow dispatches below run from `main`; their `source_sha` identifies
+the exact validated source, not necessarily the current `main` tip.
+
+1. Run `native-validation.yml` on the reviewed feature commit. Complete affected-area
+   native functional tests and all lab-readiness checks. Submit their readiness
+   manifest with the successful validation run ID:
+
+   ```sh
+   gh workflow run release-evidence.yml --ref main -f stage=A \
+     -f source_sha="$release_sha" -f input_run_id="$validation_run" \
+     -F report_json=@readiness-input.json
+   ```
+
+2. After that evidence run succeeds, download its `release-readiness` artifact.
+   Freeze once and upload the exact original receipt:
+
+   ```sh
+   python3 scripts/release/bounded.py freeze release-readiness.json frozen-attempt.json \
+     --readiness-run-id "$readiness_run"
+   gh workflow run release-evidence.yml --ref main -f stage=B \
+     -f source_sha="$release_sha" -f input_run_id="$readiness_run" \
+     -F report_json=@frozen-attempt.json
+   ```
+
+3. Prepare source material once with `refresh-source.py --source-sha "$release_sha"
+--prior-archive PATH --prior-review PATH --attempt frozen-attempt.json
+--output FRESH_DIRECTORY --write --timeout 600`. Review the resulting external
+   manifest and archive, mark the manifest ready with its immutable publication
+   identity, and transfer those exact bytes under a new source-only tag. Validate
+   with `bounded.py source-receipt` as described in [SOURCE-MATERIAL.md](SOURCE-MATERIAL.md).
+   No runner assembles a second archive.
+4. Create and push the annotated application version tag on `$release_sha` after
+   that commit is contained in `main`. Dispatch `release.yml` from `main` with
+   `tag`, `source_sha`, `frozen_run_id`, `frozen_sha256`,
+   `source_review_json=@REVIEW.json` and `source_review_sha256`. Supply file inputs
+   with `-F` and digests with `-f`. Compute digests from exact files using `sha256sum`.
+   Watch the existing attempt; never rerun failed packaging or reset its clock.
+5. Download that candidate into a fresh directory. Run `release.py verify DIRECTORY
+--version VERSION --source-sha "$release_sha" --cryptographic`, then use the
+   prepared native adapters for only the fixed smoke cases. Make an owned AppImage
+   download executable with `chmod +x`; this does not change its byte hash.
+6. Put the six reports in one directory, named `windows11-setup.json`,
+   `windows11-portable.json`, `debian12.json`, `ubuntu24.json`, `arch-omarchy.json`
+   and `fedora-wayland.json`. Run `bounded.py compact frozen-candidate.json
+REPORT_DIRECTORY compact-reports.json`. Preserve raw reports.
+   Submit the compact file to `release-evidence.yml`, stage C, with the candidate
+   run ID. After it passes, dispatch `promote-release.yml` with `tag`, `source_sha`,
+   `candidate_run_id` and `smoke_run_id`. The original deadline must still be live.
+
+Use `gh run view RUN_ID` and `gh run download RUN_ID --name ARTIFACT` to inspect
+and obtain exact workflow artifacts. A failed or inconclusive required result
+ends the attempt; repair belongs to Stage A. These commands are an operator
+sequence, not permission to reconstruct evidence or bypass failed assertions.
+
 ## Package behavior
 
 - **Setup:** `Aperture-Setup-x64.exe` installs under the current user's local

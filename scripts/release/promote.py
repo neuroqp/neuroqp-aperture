@@ -68,6 +68,8 @@ def main():
         if deadline_remaining(FROZEN) < 30:
             raise ValueError("Insufficient original deadline remaining to promote and confirm")
         # This edits release state and title only. Artifact bytes never change.
+        REPORT["publication_requested"] = True
+        REPORT["published"] = None  # A lost response cannot establish that mutation failed.
         gh("release", "edit", tag, "--repo", repo, "--prerelease=false", "--latest", "--title", f"Aperture {tag[1:]}")
         REPORT["published"] = True
         after = json.loads(gh("api", f"repos/{repo}/releases/tags/{tag}"))
@@ -90,7 +92,7 @@ def main():
 
 
 if __name__ == "__main__":
-    REPORT = {"schema": 1, "stage": "C", "status": "fail", "forced_kill": False, "published": False, "started_at": timestamp()}
+    REPORT = {"schema": 1, "stage": "C", "status": "fail", "forced_kill": False, "published": False, "publication_requested": False, "started_at": timestamp()}
     try:
         main()
         REPORT["status"] = "pass"
@@ -98,7 +100,7 @@ if __name__ == "__main__":
         REPORT["error"] = str(error)
         if isinstance(error, subprocess.TimeoutExpired):
             REPORT["forced_kill"] = True
-        if REPORT["published"]:
+        if REPORT["publication_requested"]:
             REPORT["status"] = "inconclusive"
         raise
     finally:

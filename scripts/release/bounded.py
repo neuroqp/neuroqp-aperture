@@ -5,6 +5,7 @@ import argparse
 import datetime as dt
 import hashlib
 import json
+import math
 import os
 from pathlib import Path, PureWindowsPath
 import re
@@ -23,6 +24,8 @@ def timestamp():
 
 
 def parsed(value):
+    if not isinstance(value, str):
+        raise ValueError("Evidence timestamps must be UTC strings")
     result = dt.datetime.fromisoformat(value.replace("Z", "+00:00"))
     if result.utcoffset() != dt.timedelta(0):
         raise ValueError("Evidence timestamps must use UTC")
@@ -63,16 +66,16 @@ def identity(root=ROOT):
 
 
 def same_identity(report, expected):
-    if report.get("schema") != 1:
+    if type(report.get("schema")) is not int or report["schema"] != 1:
         raise ValueError("Unsupported evidence schema")
     for key, size in (("source_sha", 40), ("build_inputs_sha256", 64)):
         value = report.get(key, "")
-        if not re.fullmatch(r"[0-9a-f]{" + str(size) + "}", value) or value != expected.get(key):
+        if not isinstance(value, str) or not re.fullmatch(r"[0-9a-f]{" + str(size) + "}", value) or value != expected.get(key):
             raise ValueError(f"Evidence {key} does not match frozen inputs")
 
 
 def passing(record):
-    if record.get("status") != "pass" or record.get("forced_kill") is not False:
+    if record.get("status") != "pass" or record.get("forced_kill") is not False or any(record.get(key) is True for key in ("timed_out", "deadline_exceeded", "helper_forced_termination")):
         raise ValueError("Required failure, inconclusive result or forced termination blocks release")
 
 
@@ -159,6 +162,8 @@ def validate_smoke_report(report, expected):
     start, finish = parsed(report["started_at"]), parsed(report["finished_at"])
     if not parsed(expected["freeze_started_at"]) <= start <= finish < parsed(expected["deadline_at"]):
         raise ValueError("Smoke ran outside the frozen attempt deadline")
+    if finish > parsed(timestamp()):
+        raise ValueError("Smoke report cannot finish in the future")
     asset = expected["assets"][report["environment"]]
     if report.get("asset_sha256") != asset["sha256"]:
         raise ValueError("Native smoke did not run the exact candidate asset")
@@ -174,6 +179,11 @@ def validate_smoke_report(report, expected):
         previous = report.get("prior_attempt", {})
         if previous.get("status") not in ("fail", "inconclusive") or previous.get("attempts") != 1 or not report.get("transient_diagnosis"):
             raise ValueError("Retry requires retained failed first receipt and an identified transient cause")
+        if previous.get("forced_kill") is not False or any(previous.get(key) is True for key in ("timed_out", "deadline_exceeded", "helper_forced_termination")):
+            raise ValueError("Timeout or forced termination ends the attempt and cannot be retried")
+        for step in previous.get("steps", []):
+            if step.get("forced_kill") is not False or step.get("timed_out") is True or (parsed(step.get("finished_at")) - parsed(step.get("started_at"))).total_seconds() >= step.get("timeout_seconds", 0):
+                raise ValueError("A timed-out or forced native step cannot be retried")
         for field in ("source_sha", "build_inputs_sha256", "checksums_sha256", "asset_sha256", "environment", "helper_sha256", "tiny_tiff_sha256", "observer_tools", "freeze_started_at", "deadline_at"):
             if previous.get(field) != report.get(field):
                 raise ValueError("Retry changed source, helper, fixture, bytes or frozen attempt")
@@ -186,6 +196,8 @@ def validate_smoke_report(report, expected):
         raise ValueError("Stage C is limited to launch, render and clean exit")
     for row in steps:
         passing(row)
+        if row.get("timed_out") is True:
+            raise ValueError("A timed-out native step cannot pass")
         duration = (parsed(row["finished_at"]) - parsed(row["started_at"])).total_seconds()
         cap = STEP_LIMITS[row["name"]]
         if row["name"] == "launch" and report["environment"].startswith("windows"):
@@ -196,12 +208,12 @@ def validate_smoke_report(report, expected):
             raise ValueError("Native smoke step timestamps lie outside the report")
     render = steps[1].get("detail", {})
     validate_render(render, asset)
-    if steps[2].get("detail", {}).get("exit_code") != 0:
-        raise ValueError("Normal native close must produce exit code zero")
+    validate_native_exit(steps[0].get("detail", {}), steps[2].get("detail", {}), report["environment"], expected)
     if asset.get("fuse_fallback_required"):
         fallback = steps[3].get("detail", {})
         validate_render(fallback.get("render", {}), asset)
-        if fallback.get("clean-exit", {}).get("exit_code") != 0 or fallback.get("launch", {}).get("launch_method") != "extract-and-run" or not fallback.get("launch", {}).get("native_windows"):
+        validate_native_exit(fallback.get("launch", {}), fallback.get("clean-exit", {}), report["environment"], expected)
+        if fallback.get("launch", {}).get("launch_method") != "extract-and-run":
             raise ValueError("Extraction fallback must render and close naturally with exact bytes")
     launch = steps[0].get("detail", {})
     environment = report["environment"]
@@ -219,16 +231,36 @@ def validate_smoke_report(report, expected):
             raise ValueError("Native Wayland backend required for this environment")
 
 
+def validate_native_exit(launch, close, environment, expected):
+    pid = launch.get("pid")
+    if type(pid) is not int or pid <= 0 or type(close.get("exit_code")) is not int or close["exit_code"] != 0:
+        raise ValueError("Normal native close must identify its process and produce exit code zero")
+    if environment.startswith("windows"):
+        if close.get("pid") != pid or close.get("forced_cleanup") is not False or close.get("action") != "actual mouse SendInput" or type(launch.get("hwnd")) is not int or launch["hwnd"] <= 0:
+            raise ValueError("Windows close must observe its owned native window and process")
+        info = launch.get("embedded_buildinfo", {})
+    else:
+        launcher = launch.get("launcher_pid")
+        if type(launcher) is not int or launcher <= 0 or close.get("pid") != launcher or close.get("app_pid") != pid or close.get("app_exited") is not True or close.get("exit_code_source") != "exact AppImage launcher wait":
+            raise ValueError("AppImage close must retain exact launcher wait and native process exit")
+        if launch.get("backend") not in ("wayland", "x11") or not any(row.get("role") in ("frame", "window") for row in launch.get("native_windows", [])):
+            raise ValueError("Owned native Linux window and backend must be observed")
+        info = launch.get("process_identity", {}).get("buildinfo", {})
+    if info.get("source_sha") != expected["source_sha"]:
+        raise ValueError("Observed native process build source differs from frozen candidate")
+
+
 def validate_render(render, asset):
     observation = render.get("observation", {})
     state = observation.get("state", {})
     pixels = render.get("pixel_observation", {})
     screenshot_hash = render.get("screenshot_sha256", pixels.get("screenshot_sha256", ""))
-    if render.get("dialog_input") != "prepared fixed TIFF chooser response" or observation.get("chooser_restored") is not True or observation.get("rendered_tiles") is not True:
-        raise ValueError("Native smoke must open its fixed TIFF through the restored frontend handler and render actual tiles")
-    if state.get("phase") != "ready" or state.get("previewReady") is not True or observation.get("error") or observation.get("phase") != "ready":
+    if render.get("dialog_input") != "prepared fixed TIFF chooser response" or observation.get("chooser_restored") is not True or observation.get("rendered_canvas") is not True:
+        raise ValueError("Native smoke must open its fixed TIFF through the restored frontend handler and observe its visible canvas")
+    if state.get("phase") != "ready" or state.get("previewReady") is not True or observation.get("error") is not False or observation.get("phase") != "ready":
         raise ValueError("Native smoke must observe ready image state without errors")
-    if (state.get("width"), state.get("height")) != (asset["tiny_tiff_width"], asset["tiny_tiff_height"]) or pixels.get("spread", 0) < 35 or not re.fullmatch(r"[0-9a-f]{64}", screenshot_hash):
+    spread = pixels.get("spread")
+    if any(type(state.get(key)) is not int for key in ("width", "height")) or (state.get("width"), state.get("height")) != (asset["tiny_tiff_width"], asset["tiny_tiff_height"]) or type(spread) not in (int, float) or not math.isfinite(spread) or spread < 35 or not isinstance(screenshot_hash, str) or not re.fullmatch(r"[0-9a-f]{64}", screenshot_hash):
         raise ValueError("Native TIFF dimensions and visible pixels must be recorded")
 
 
@@ -254,16 +286,21 @@ def frozen(readiness, readiness_run_id):
 
 
 def validate_source_receipt(plan, expected, attempt_sha256):
+    same_identity(expected, expected)
     proof = plan.get("assembly_attempt", {})
+    if not isinstance(proof, dict):
+        raise ValueError("Stage B source assembly proof required")
     passing(proof)
+    same_identity(proof, expected)
+    if expected.get("stage") != "B" or proof.get("stage") != "B" or any(not isinstance(value, str) or not re.fullmatch(r"[0-9a-f]{64}", value) for value in (attempt_sha256, plan.get("sha256", ""), proof.get("archive_sha256", ""), proof.get("refresh_receipt_sha256", ""))):
+        raise ValueError("Stage B source assembly and valid archive/attempt identities required")
     for key in ("source_sha", "build_inputs_sha256", "freeze_started_at", "deadline_at"):
         if proof.get(key) != expected.get(key):
             raise ValueError("Source assembly belongs to another frozen attempt")
     if proof.get("attempt_sha256") != attempt_sha256 or proof.get("archive_sha256") != plan.get("sha256"):
         raise ValueError("Source assembly receipt does not identify frozen attempt and archive bytes")
-    if not re.fullmatch(r"[0-9a-f]{64}", proof.get("refresh_receipt_sha256", "")):
-        raise ValueError("Source assembly must retain the full refresh receipt identity")
-    if not parsed(expected["freeze_started_at"]) <= parsed(proof["started_at"]) <= parsed(proof["finished_at"]) < parsed(expected["deadline_at"]):
+    start, finish = parsed(proof.get("started_at")), parsed(proof.get("finished_at"))
+    if not parsed(expected["freeze_started_at"]) <= start <= finish < parsed(expected["deadline_at"]) or finish > parsed(timestamp()):
         raise ValueError("Corresponding source preparation ran outside original release deadline")
     validate_deadline(expected)
 
@@ -291,12 +328,12 @@ def compact_reports(expected, reports):
             def launch(value):
                 value = dict(value)
                 if "native_windows" in value:
-                    value["native_windows"] = value["native_windows"][:1]
+                    value["native_windows"] = [row for row in value["native_windows"] if row.get("role") in ("frame", "window")][:1]
                 return value
             def render(value):
                 observation = value.get("observation", {})
                 state = observation.get("state", {})
-                return {"observation": {"phase": observation.get("phase"), "error": observation.get("error"), "chooser_restored": observation.get("chooser_restored"), "rendered_tiles": observation.get("rendered_tiles"), "state": {key: state.get(key) for key in ("phase", "previewReady", "path", "width", "height")}}, "pixel_observation": {key: val for key, val in value.get("pixel_observation", {}).items() if key != "samples"}, **{key: value[key] for key in ("screenshot", "screenshot_sha256", "dialog_input") if key in value}}
+                return {"observation": {"phase": observation.get("phase"), "error": observation.get("error"), "chooser_restored": observation.get("chooser_restored"), "rendered_canvas": observation.get("rendered_canvas"), "state": {key: state.get(key) for key in ("phase", "previewReady", "path", "width", "height")}}, "pixel_observation": {key: val for key, val in value.get("pixel_observation", {}).items() if key != "samples"}, **{key: value[key] for key in ("screenshot", "screenshot_sha256", "dialog_input") if key in value}}
             if step["name"] == "launch": detail = launch(detail)
             elif step["name"] == "render": detail = render(detail)
             elif step["name"] == "fuse-fallback": detail = {"launch": launch(detail.get("launch", {})), "render": render(detail.get("render", {})), "clean-exit": detail.get("clean-exit", {})}
@@ -352,6 +389,8 @@ def trusted_run(run_id, workflow, source_sha=None):
     result = json.loads(subprocess.check_output(["gh", "api", f"repos/{repository}/actions/runs/{run_id}"], text=True, timeout=30))
     if result.get("repository", {}).get("full_name") != repository or result.get("conclusion") != "success" or result.get("event") != "workflow_dispatch" or result.get("path") != f".github/workflows/{workflow}":
         raise ValueError("Successful trusted release workflow evidence is required")
+    if workflow in ("release.yml", "release-evidence.yml") and result.get("head_branch") != "main":
+        raise ValueError("Release and evidence workflows must run from trusted main")
     if workflow == "release.yml" and result.get("run_attempt") != 1:
         raise ValueError("Final package workflow reruns are forbidden")
     if source_sha is not None and result.get("head_sha") != source_sha:
@@ -404,7 +443,7 @@ def main():
     p = sub.add_parser("automated"); p.add_argument("platform"); p.add_argument("binary", type=Path); p.add_argument("output", type=Path)
     p = sub.add_parser("readiness"); p.add_argument("evidence", type=Path); p.add_argument("output", type=Path)
     p = sub.add_parser("freeze"); p.add_argument("readiness", type=Path); p.add_argument("output", type=Path); p.add_argument("--readiness-run-id", required=True)
-    p = sub.add_parser("source-receipt"); p.add_argument("identity", type=Path); p.add_argument("plan", type=Path)
+    p = sub.add_parser("source-receipt"); p.add_argument("identity", type=Path); p.add_argument("plan", type=Path); p.add_argument("--plan-sha256", required=True)
     p = sub.add_parser("candidate"); p.add_argument("identity", type=Path); p.add_argument("directory", type=Path); p.add_argument("output", type=Path)
     p = sub.add_parser("acceptance"); p.add_argument("identity", type=Path); p.add_argument("reports", type=Path); p.add_argument("output", type=Path)
     p = sub.add_parser("compact"); p.add_argument("identity", type=Path); p.add_argument("reports", type=Path); p.add_argument("output", type=Path)
@@ -423,8 +462,9 @@ def main():
         validate_readiness(result, identity()); write_report(args.output, result)
     elif args.command == "freeze": write_report(args.output, frozen(read(args.readiness), args.readiness_run_id))
     elif args.command == "source-receipt":
-        from release import digest
-        validate_source_receipt(read(args.plan), load_identity(args.identity), digest(args.identity))
+        from release import source_plan
+        body = args.identity.read_bytes()
+        validate_source_receipt(source_plan(args.plan, args.plan_sha256), json.loads(body.decode("utf-8-sig")), hashlib.sha256(body).hexdigest())
     elif args.command == "candidate": write_report(args.output, candidate_identity(load_identity(args.identity), args.directory))
     elif args.command == "acceptance":
         expected = load_identity(args.identity)

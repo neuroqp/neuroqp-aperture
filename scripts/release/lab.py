@@ -13,6 +13,7 @@ import shutil
 import stat
 import subprocess
 import sys
+import time
 
 REPO = Path(__file__).resolve().parents[2]
 DEFAULT_ROOT = REPO.parent / "neuroqp-aperture-release/artifacts/first-release"
@@ -118,7 +119,7 @@ def inventory(root, extents=False):
                                                                if key.startswith("environments/")),
               "groups": dict(sorted(groups.items(), key=lambda row: -row[1])), "images": images,
               "largest_unique_files": sorted(unique_files, key=lambda row: -row["allocated"])[:30],
-              "readiness": {"windows11": "blocked: last SIGTERM requires guest recovery and graceful shutdown before base freeze",
+              "readiness": {"windows11": "blocked: observed full cold guest shutdown required before base freeze",
                             "linux": "blocked: verified live ISOs exist, persistent prepared desktops/tools do not"},
               "reclaimed_bytes_claimed": 0}
     base = inside(root, STATE + "/windows11-base.json")
@@ -231,6 +232,9 @@ def recovered(root, receipt):
         raise ValueError("Observed guest recovery and graceful shutdown receipt required; SIGTERM is insufficient")
     if data.get("licensed") is not True or data.get("disk_identity") != identity(inside(root, DISK)):
         raise ValueError("Clean licensed baseline receipt is missing or stale")
+    if (data.get("full_cold_shutdown") is not True or data.get("suspend_disk_event_before_shutdown") is not False
+            or data.get("qemu_exit_code") != 0 or data.get("forced_termination") is not False):
+        raise ValueError("Observed full cold shutdown required; hybrid/SUSPEND_DISK cannot certify a base")
 
 
 def freeze_base(root, receipt):
@@ -284,6 +288,8 @@ def overlay(root, name):
 
 
 def compact(root, receipt):
+    started = time.monotonic()
+    deadline = started + 1800
     with operation(root):
         recovered(root, receipt)
         if inside(root, STATE + "/windows11-base.json").exists():
@@ -293,6 +299,8 @@ def compact(root, receipt):
             info = json.loads(qemu(root, ["info", "--output=json", path]))
             if info.get("backing-filename") or info.get("full-backing-filename"):
                 raise ValueError("Compaction refused while any lab backing chain exists")
+            if path == disk and info.get("dirty-flag"):
+                raise ValueError("Clean standalone qcow2 required for compaction")
         before = identity(disk)
         if shutil.disk_usage(root).free < before["allocated"] + 4 * GIB:
             raise ValueError("Compaction requires current disk allocation plus 4 GiB free for a worst-case safe temporary copy")
@@ -300,8 +308,12 @@ def compact(root, receipt):
         if temporary.exists():
             raise ValueError("Previous compaction temporary file preserved; inspect it first")
         try:
-            qemu(root, ["convert", "-c", "-O", "qcow2", disk, temporary], mutate=True, timeout=1800)
-            qemu(root, ["compare", "-f", "qcow2", "-F", "qcow2", disk, temporary], timeout=1800)
+            conversion = qemu(root, ["convert", "-c", "-O", "qcow2", disk, temporary], mutate=True,
+                              timeout=max(1, deadline - time.monotonic()))
+            if time.monotonic() >= deadline:
+                raise ValueError("Compaction maintenance deadline reached; original retained")
+            comparison = qemu(root, ["compare", "-f", "qcow2", "-F", "qcow2", disk, temporary],
+                              timeout=max(1, deadline - time.monotonic()))
             inactive()
             if identity(disk) != before or identity(temporary)["allocated"] >= before["allocated"]:
                 raise ValueError("Original changed or compaction saved no space; original retained")
@@ -313,7 +325,11 @@ def compact(root, receipt):
         return {"schema": 1, "at": now(), "disk": DISK, "before": before, "after": identity(disk),
                 "disk_identity": identity(disk), "guest_shutdown": "graceful", "qemu_exited": True,
                 "licensed": True, "recovery_receipt": str(Path(receipt).resolve()),
-                "guest_sectors_compared": True, "atomic_replacement": True, "TPM_UEFI_unchanged": True}
+                "full_cold_shutdown": True, "suspend_disk_event_before_shutdown": False,
+                "qemu_exit_code": 0, "forced_termination": False,
+                "guest_sectors_compared": True, "atomic_replacement": True, "TPM_UEFI_unchanged": True,
+                "conversion_output": conversion, "comparison_output": comparison,
+                "maximum_maintenance_seconds": 1800, "maintenance_elapsed_seconds": time.monotonic() - started}
 
 
 def main():

@@ -26,10 +26,24 @@ python3 scripts/release/release.py source-material --help
 
 The refresh command requires `--source-sha`, `--prior-archive`, `--prior-review`,
 `--output` and, for an actual write, `--attempt` and `--write`. The external source
-gate accepts `--plan PATH --plan-sha256 SHA256 --source-sha FROZEN_SHA`. It checks the
+gate accepts `--plan PATH --plan-sha256 SHA256 --source-sha FROZEN_SHA --attempt ORIGINAL_RECEIPT`. It checks the
 manifest hash before parsing and verifies the archived application inventory and
 actual members against that frozen Git tree. Only the existing publication JSON
 is excluded; missing, changed, duplicate, extra or unsafe members fail.
+
+`bounded.py source-receipt ORIGINAL_RECEIPT REVIEW.json --plan-sha256 SHA256`
+also checks the assembly proof against the original freeze and deadline. Preserve
+the original receipt bytes. Reformatting or recreating that file changes its identity.
+
+## Development runtime coverage
+
+Stage A uses `release.py development-source` before uploading development runtimes.
+It verifies the immutable baseline archive once, actual native BUILDINFO and notices,
+and the current public Git source. It emits a small `DEVELOPMENT-SOURCE.json` into
+the runtime archive instead of uploading the baseline sources again. Only a proven
+Cargo root-package version change is allowed against the baseline lockfile; changed
+dependencies or native inputs require separate source review. This coverage record
+does not replace Stage B's exact frozen-source archive gate.
 
 Publish the once-assembled, reviewed bytes under a new source-only tag outside
 Latest. Transfer those same bytes to Stage B. Do not rebuild on a runner to upload

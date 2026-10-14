@@ -15,6 +15,8 @@ import tempfile
 import urllib.request
 from pathlib import Path, PurePosixPath
 
+import bounded
+
 ROOT = Path(__file__).resolve().parents[2]
 ASSETS = {
     "windows-x86_64": "Aperture-Setup-x64.exe",
@@ -104,7 +106,7 @@ def application_snapshot(root, source_sha):
     return files
 
 
-def reviewed_plan(root, plan_path=None, plan_sha256=None, source_sha=None):
+def reviewed_plan(root, plan_path=None, plan_sha256=None, source_sha=None, attempt_path=None):
     if (plan_path is None) != (plan_sha256 is None):
         raise ValueError("External review requires both --plan and --plan-sha256")
     if plan_path is not None and not re.fullmatch(r"[0-9a-f]{40}", source_sha or ""):
@@ -113,10 +115,21 @@ def reviewed_plan(root, plan_path=None, plan_sha256=None, source_sha=None):
     plan = source_plan(path, plan_sha256)
     if plan_path is not None and plan.get("application_source_sha") != source_sha:
         raise ValueError("External review must pin the frozen application source SHA")
+    if plan_path is not None:
+        if attempt_path is None:
+            raise ValueError("External review requires the original frozen --attempt")
+        body = attempt_path.read_bytes()
+        expected = json.loads(body.decode("utf-8-sig"))
+        bounded.same_identity(expected, bounded.identity(root))
+        if expected.get("stage") != "B":
+            raise ValueError("External review requires the original Stage B frozen attempt")
+        bounded.validate_source_receipt(plan, expected, hashlib.sha256(body).hexdigest())
+    elif attempt_path is not None:
+        raise ValueError("--attempt requires an external reviewed --plan")
     return path, plan
 
 
-def verify_source_material(directory, plan, builds=False, platform=None, fixture_locks=None, root=None, source_sha=None):
+def verify_source_material(directory, plan, builds=False, platform=None, fixture_locks=None, root=None, source_sha=None, application_locks=None):
     archive = directory / SOURCE_ASSET
     if not archive.is_file() or digest(archive) != plan["sha256"]:
         raise ValueError("Corresponding-source archive missing or different from the reviewed bytes")
@@ -144,8 +157,16 @@ def verify_source_material(directory, plan, builds=False, platform=None, fixture
             elif name.startswith("application/source/"):
                 result = hashlib.sha256()
                 reader = source.extractfile(member)
+                lock = name.removeprefix("application/source/") if application_locks is not None else None
+                contents = [] if lock in LOCKFILES else None
+                if contents is not None and member.size > 16 * 1024 * 1024:
+                    raise ValueError("Archived application lockfile exceeds 16 MiB")
                 for block in iter(lambda: reader.read(1024 * 1024), b""):
                     result.update(block)
+                    if contents is not None:
+                        contents.append(block)
+                if contents is not None:
+                    application_locks[lock] = b"".join(contents)
                 members[name.removeprefix("application/source/")] = {
                     "sha256": result.hexdigest(), "size": member.size,
                     "mode": 0o755 if member.mode & 0o111 else 0o644}
@@ -197,14 +218,7 @@ def upgrade_fixture_locks(directory, root, plan):
     return {**plan["application_lockfiles_sha256"], "src-tauri/Cargo.lock": digest(delta)}
 
 
-def source_material(directory, fetch=False, root=ROOT, platform=None, upgrade_fixture=False, plan_path=None, plan_sha256=None, source_sha=None, cache=None):
-    review, plan = reviewed_plan(root, plan_path, plan_sha256, source_sha)
-    verify_application_locks(root, plan)
-    fixture_locks = None
-    if upgrade_fixture:
-        if platform != "windows":
-            raise ValueError("Upgrade fixture source verification requires --platform windows")
-        fixture_locks = upgrade_fixture_locks(directory, root, plan)
+def obtain_source_archive(directory, plan, fetch=False, cache=None):
     directory.mkdir(parents=True, exist_ok=True)
     archive = directory / SOURCE_ASSET
     cached = cache / (plan["sha256"] + ".tar.xz") if cache is not None else None
@@ -222,18 +236,81 @@ def source_material(directory, fetch=False, root=ROOT, platform=None, upgrade_fi
             temporary.replace(archive)
         finally:
             temporary.unlink(missing_ok=True)
-    verify_source_material(directory, plan, platform=platform, fixture_locks=fixture_locks,
-                           root=root if plan_path is not None else None, source_sha=source_sha)
+    return cached
+
+
+def store_source_cache(directory, plan, cached):
     if cached is not None and (not cached.is_file() or digest(cached) != plan["sha256"]):
-        cache.mkdir(parents=True, exist_ok=True)
+        cached.parent.mkdir(parents=True, exist_ok=True)
         temporary = cached.with_suffix(".partial")
         try:
-            shutil.copyfile(archive, temporary)
+            shutil.copyfile(directory / SOURCE_ASSET, temporary)
             temporary.replace(cached)
         finally:
             temporary.unlink(missing_ok=True)
+
+
+def source_material(directory, fetch=False, root=ROOT, platform=None, upgrade_fixture=False, plan_path=None, plan_sha256=None, source_sha=None, cache=None, attempt_path=None):
+    review, plan = reviewed_plan(root, plan_path, plan_sha256, source_sha, attempt_path)
+    verify_application_locks(root, plan)
+    fixture_locks = None
+    if upgrade_fixture:
+        if platform != "windows":
+            raise ValueError("Upgrade fixture source verification requires --platform windows")
+        fixture_locks = upgrade_fixture_locks(directory, root, plan)
+    cached = obtain_source_archive(directory, plan, fetch, cache)
+    verify_source_material(directory, plan, platform=platform, fixture_locks=fixture_locks,
+                           root=root if plan_path is not None else None, source_sha=source_sha)
+    store_source_cache(directory, plan, cached)
     if review.resolve() != (directory / SOURCE_REVIEW).resolve():
         shutil.copyfile(review, directory / SOURCE_REVIEW)
+
+
+def development_source(directory, baseline_directory, platform, source_sha, fetch=False, cache=None, root=ROOT):
+    """Reference reviewed dependency source plus the public Stage A application commit."""
+    if baseline_directory.resolve().is_relative_to(directory.resolve()) or cache is not None and cache.resolve().is_relative_to(directory.resolve()):
+        raise ValueError("Development baseline/cache must remain outside the uploaded runtime")
+    current = bounded.identity(root)
+    if source_sha != current["source_sha"]:
+        raise ValueError("Development source must identify the current public Git commit")
+    review = root / SOURCE_PUBLICATION
+    plan = source_plan(review)
+    info_path = directory / f"BUILDINFO-{platform}.json"
+    info = json.loads(info_path.read_text(encoding="utf-8"))
+    locks = lockfile_hashes(root)
+    version = current_version(root)
+    if info.get("platform") != platform or info.get("source_sha") != source_sha or info.get("version") != version or info.get("lockfiles") != locks:
+        raise ValueError("Development BUILDINFO differs from the current platform/source/version/lockfiles")
+    if native_identity(info.get("native_dependencies")) != plan["native_dependencies_sha256"][platform]:
+        raise ValueError("Development native dependencies require separately reviewed corresponding source")
+    if locks["pnpm-lock.yaml"] != plan["application_lockfiles_sha256"]["pnpm-lock.yaml"]:
+        raise ValueError("Development npm dependencies require separately reviewed corresponding source")
+    notices = directory / f"THIRD-PARTY-NOTICES-{platform}.txt"
+    if not notices.is_file() or not notices.stat().st_size:
+        raise ValueError("Development runtime requires third-party notices")
+    cached = obtain_source_archive(baseline_directory, plan, fetch, cache)
+    original = {}
+    verify_source_material(baseline_directory, plan, application_locks=original)
+    archived = original["src-tauri/Cargo.lock"]
+    pattern = rb'(?m)^name = "aperture"\r?\nversion = "([^"\r\n]+)"\r?$'
+    found = re.findall(pattern, archived)
+    if len(found) != 1 or not VERSION.fullmatch(found[0].decode()):
+        raise ValueError("Reviewed Cargo lock requires exactly one stable aperture root version")
+    replacement = re.sub(pattern, lambda match: match[0].replace(match[1], version.encode()), archived)
+    if (root / "src-tauri/Cargo.lock").read_bytes() != replacement or (root / "pnpm-lock.yaml").read_bytes() != original["pnpm-lock.yaml"]:
+        raise ValueError("Development Cargo/npm dependencies changed; only the exact aperture root-version delta may reuse reviewed source")
+    store_source_cache(baseline_directory, plan, cached)
+    record = {"schema": 1, "stage": "A", "status": "ready", "platform": platform, "source_sha": source_sha,
+              "application_source_url": f"https://github.com/neuroqp/neuroqp-aperture/tree/{source_sha}",
+              "build_inputs_sha256": current["build_inputs_sha256"],
+              "baseline": {"url": plan["url"], "sha256": plan["sha256"], "review_sha256": digest(review),
+                           "application_lockfiles_sha256": plan["application_lockfiles_sha256"]},
+              "application_lockfiles_sha256": locks, "native_dependencies_sha256": plan["native_dependencies_sha256"][platform],
+              "cargo_root_version": {"baseline": found[0].decode(), "current": version,
+                                     "change": "unchanged" if archived == replacement else "aperture-root-version-only"},
+              "buildinfo": {"file": info_path.name, "sha256": digest(info_path)},
+              "notices": {"file": notices.name, "sha256": digest(notices)}}
+    bounded.write_report(directory / "DEVELOPMENT-SOURCE.json", record)
 
 
 def current_version(root=ROOT):
@@ -274,12 +351,12 @@ def set_version(version, root=ROOT):
     current_version(root)
 
 
-def manifest(directory, version, repository, source_sha, published_at, signed=True, root=ROOT, plan_path=None, plan_sha256=None):
+def manifest(directory, version, repository, source_sha, published_at, signed=True, root=ROOT, plan_path=None, plan_sha256=None, attempt_path=None):
     if not re.fullmatch(r"[0-9a-f]{40}", source_sha):
         raise ValueError("Source SHA must be a full Git commit ID")
     if repository != "neuroqp/neuroqp-aperture":
         raise ValueError("Release assets belong in neuroqp/neuroqp-aperture")
-    _, plan = reviewed_plan(root, plan_path, plan_sha256, source_sha)
+    _, plan = reviewed_plan(root, plan_path, plan_sha256, source_sha, attempt_path)
     verify_application_locks(root, plan)
     verify_source_material(directory, plan, builds=True, root=root if plan_path is not None else None,
                            source_sha=source_sha if plan_path is not None else None)
@@ -388,9 +465,17 @@ def main():
     sources.add_argument("--plan", type=Path)
     sources.add_argument("--plan-sha256")
     sources.add_argument("--source-sha")
+    sources.add_argument("--attempt", type=Path, help="Original frozen-attempt.json; required with an external review")
     sources.add_argument("--cache", type=Path, help="Optional local cache keyed by the reviewed archive SHA-256")
     sources.add_argument("--platform", choices=("linux", "windows"))
     sources.add_argument("--upgrade-fixture", action="store_true", help="Verify the separate unsigned 0.0.9 Windows fixture root-version delta")
+    development = commands.add_parser("development-source")
+    development.add_argument("--directory", required=True, type=Path)
+    development.add_argument("--baseline-directory", required=True, type=Path)
+    development.add_argument("--platform", required=True, choices=("linux", "windows"))
+    development.add_argument("--source-sha", required=True)
+    development.add_argument("--fetch", action="store_true")
+    development.add_argument("--cache", type=Path)
     version = commands.add_parser("version")
     version.add_argument("version")
     release_notes = commands.add_parser("notes")
@@ -406,6 +491,7 @@ def main():
         if command == "metadata":
             child.add_argument("--plan", type=Path)
             child.add_argument("--plan-sha256")
+            child.add_argument("--attempt", type=Path, help="Original frozen-attempt.json; required with an external review")
             child.add_argument("--repository", default="neuroqp/neuroqp-aperture")
             child.add_argument("--published-at", default=datetime.datetime.now(datetime.timezone.utc).isoformat().replace("+00:00", "Z"))
     info = commands.add_parser("buildinfo")
@@ -417,13 +503,15 @@ def main():
         print(current_version())
         notes(current_version())
     elif args.command == "source-material":
-        source_material(args.directory, args.fetch, platform=args.platform, upgrade_fixture=args.upgrade_fixture, plan_path=args.plan, plan_sha256=args.plan_sha256, source_sha=args.source_sha, cache=args.cache)
+        source_material(args.directory, args.fetch, platform=args.platform, upgrade_fixture=args.upgrade_fixture, plan_path=args.plan, plan_sha256=args.plan_sha256, source_sha=args.source_sha, cache=args.cache, attempt_path=args.attempt)
+    elif args.command == "development-source":
+        development_source(args.directory, args.baseline_directory, args.platform, args.source_sha, args.fetch, args.cache)
     elif args.command == "version":
         set_version(args.version)
     elif args.command == "notes":
         print(notes(args.version or current_version()), end="")
     elif args.command == "metadata":
-        manifest(args.directory, args.version, args.repository, args.source_sha, args.published_at, not args.unsigned, plan_path=args.plan, plan_sha256=args.plan_sha256)
+        manifest(args.directory, args.version, args.repository, args.source_sha, args.published_at, not args.unsigned, plan_path=args.plan, plan_sha256=args.plan_sha256, attempt_path=args.attempt)
     elif args.command == "verify":
         verify(args.directory, args.version, args.source_sha, not args.unsigned, root=ROOT)
         if args.cryptographic:

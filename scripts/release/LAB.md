@@ -17,11 +17,11 @@ It also records whole-tree and environment exclusive plus set-shared extent
 totals, which count shared rollback reflinks once for the retained storage budget.
 
 ```sh
-python3 scripts/release/lab.py --output /tmp/lab-before.json inventory --btrfs
-python3 scripts/release/lab.py --output /tmp/lab-cleanup-plan.json plan-cleanup
+python3 scripts/release/lab.py --output artifacts/lab-before.json inventory --btrfs
+python3 scripts/release/lab.py --output artifacts/lab-cleanup-plan.json plan-cleanup
 # Review the exact paths, identities and hardlink aliases in this manifest.
-python3 scripts/release/lab.py --output /tmp/lab-cleanup-result.json cleanup /tmp/lab-cleanup-plan.json
-python3 scripts/release/lab.py --output /tmp/lab-after.json inventory --btrfs
+python3 scripts/release/lab.py --output artifacts/lab-cleanup-result.json cleanup artifacts/lab-cleanup-plan.json
+python3 scripts/release/lab.py --output artifacts/lab-after.json inventory --btrfs
 ```
 
 The current cleanup allowlist contains the obsolete Windows 10 disk and both
@@ -47,22 +47,29 @@ Never print credential contents. Do not create users, reinstall the OS or
 download tools for this maintenance task.
 
 A recovery receipt records `schema: 1`, `licensed: true`,
-`guest_shutdown: "graceful"`, `qemu_exited: true`, the exact `disk_identity` and
-the observation references. A clean shutdown on a CoW overlay applies to that
+`guest_shutdown: "graceful"`, `qemu_exited: true`, `qemu_exit_code: 0`,
+`forced_termination: false`, `full_cold_shutdown: true`,
+`suspend_disk_event_before_shutdown: false`, the exact `disk_identity` and
+the observation references. Use Windows `shutdown /s /t 0`, without `/hybrid`,
+and observe QMP guest SHUTDOWN, QEMU exit zero and no preceding SUSPEND_DISK.
+The previous recovery receipt has SUSPEND_DISK and cannot certify a cold base.
+A clean shutdown on a CoW overlay applies to that
 overlay, not its backing disk. It cannot certify the original as recovered.
 Promotion of a recovered overlay requires a separate verified standalone copy;
 the current helper refuses compaction or freezing while backing chains exist.
 
 ```sh
-python3 scripts/release/lab.py --output /tmp/lab-compacted.json compact /path/recovery.json
-python3 scripts/release/lab.py --output /tmp/lab-frozen.json freeze-base /tmp/lab-compacted.json
-python3 scripts/release/lab.py --output /tmp/lab-run.json overlay candidate-id
+python3 scripts/release/lab.py --output artifacts/lab-compacted.json compact /path/recovery.json
+python3 scripts/release/lab.py --output artifacts/lab-frozen.json freeze-base artifacts/lab-compacted.json
+python3 scripts/release/lab.py --output artifacts/lab-run.json overlay candidate-id
 ```
 
 Compaction needs the current allocated disk size plus 4 GiB of host free space
 for a temporary copy. It uses the existing `qemu-img convert -c`, compares all
 guest-visible sectors with `qemu-img compare`, and replaces the original only
-after successful comparison and an unchanged original identity. A failure keeps
+after successful comparison and an unchanged original identity. Conversion and
+comparison share one 30 minute maintenance deadline. The receipt preserves tool
+output and elapsed time. A failure keeps
 the original and temporary output for inspection. TPM and UEFI are untouched.
 Never compact an image that backs an overlay. A successful compaction receipt
 can certify the unchanged logical contents for base registration.

@@ -1,7 +1,8 @@
 param(
     [Parameter(Mandatory)][string]$Identity,
     [Parameter(Mandatory)][ValidateSet('windows11-setup','windows11-portable')][string]$Environment,
-    [Parameter(Mandatory)][string]$Report
+    [Parameter(Mandatory)][string]$Report,
+    [switch]$Worker
 )
 # Stage A prepares a standard interactive desktop and fixed inputs. Stage C only
 # installs/launches the exact incoming package, opens one TIFF, observes and closes.
@@ -13,6 +14,45 @@ $Report = [IO.Path]::GetFullPath($Report)
 if ((Test-Path -LiteralPath $Report) -or -not (Test-Path -LiteralPath (Split-Path $Report))) { throw 'Fresh Stage A evidence destination required' }
 $r = [ordered]@{schema=1;stage='C';environment=$Environment;status='inconclusive';attempts=1;forced_kill=$false;started_at=[DateTime]::UtcNow.ToString('o');steps=@();helper_sha256=(Get-FileHash -LiteralPath $PSCommandPath).Hash.ToLowerInvariant();helper_revision=$i.source_sha;asset_sha256=$i.asset_sha256;tiny_tiff_sha256=$i.tiny_tiff_sha256}
 foreach ($key in @('source_sha','build_inputs_sha256','checksums_sha256','freeze_started_at','deadline_at')) { $r[$key] = $i.$key }
+$progress=$Report+'.watch.json'
+function Supervise-Observer($observer,$StartupSeconds=180) {
+    $clock=[Diagnostics.Stopwatch]::StartNew()
+    $overallEnd=([DateTime]::Parse($i.deadline_at).ToUniversalTime()-[DateTime]::UtcNow).TotalSeconds
+    $stepIndex=-1;$stepEnd=$StartupSeconds
+    while (-not $observer.WaitForExit(150)) {
+        if (Test-Path -LiteralPath $progress) {
+            try { $snapshot=Get-Content -LiteralPath $progress -Raw|ConvertFrom-Json;$r=[ordered]@{};foreach ($property in $snapshot.PSObject.Properties) {$r[$property.Name]=$property.Value} } catch {}
+        }
+        if ($r.steps.Count -and $r.steps.Count-1 -ne $stepIndex) {
+            $stepIndex=$r.steps.Count-1;$step=$r.steps[-1]
+            $elapsed=[Math]::Max(0,([DateTime]::UtcNow-[DateTime]::Parse($step.started_at).ToUniversalTime()).TotalSeconds)
+            $stepEnd=$clock.Elapsed.TotalSeconds+[Math]::Max(0,$step.timeout_seconds-$elapsed)
+        }
+        if ($clock.Elapsed.TotalSeconds -ge $overallEnd -or $clock.Elapsed.TotalSeconds -ge $stepEnd) {
+            try { $observer.Kill() } catch {}
+            $stopped=$observer.WaitForExit(5000)
+            $r.status='fail';$r.forced_kill=$true;$r.error='Observer exceeded hard step or frozen deadline; application state preserved';$r.helper_forced_termination=$true;$r.timed_out=$true;$r.observer_stopped=$stopped
+            $r.finished_at=[DateTime]::UtcNow.ToString('o')
+            if ($r.steps.Count) { $step=$r.steps[-1];$step.status='fail';$step.forced_kill=$true;$step|Add-Member timed_out $true -Force;$step.finished_at=$r.finished_at }
+            [IO.File]::WriteAllText($Report,($r|ConvertTo-Json -Depth 15),[Text.UTF8Encoding]::new($false))
+            return 1
+        }
+    }
+    if (-not (Test-Path -LiteralPath $Report)) { $r.status='fail';$r.error='Observer exited without a final report';$r.finished_at=[DateTime]::UtcNow.ToString('o');[IO.File]::WriteAllText($Report,($r|ConvertTo-Json -Depth 15),[Text.UTF8Encoding]::new($false));return 1 }
+    return $observer.ExitCode
+}
+if (-not $Worker) {
+    if (Test-Path -LiteralPath $progress) { throw 'Fresh watchdog evidence destination required' }
+    $arguments='-NoProfile -STA -ExecutionPolicy Bypass -File "'+$PSCommandPath+'" -Worker -Identity "'+[IO.Path]::GetFullPath($Identity)+'" -Environment "'+$Environment+'" -Report "'+$Report+'"'
+    $observer=Start-Process -FilePath ([Diagnostics.Process]::GetCurrentProcess().MainModule.FileName) -ArgumentList $arguments -WindowStyle Hidden -PassThru
+    exit (Supervise-Observer $observer)
+}
+function Save-Progress {
+    $temporary=$progress+'.tmp'
+    [IO.File]::WriteAllText($temporary,($r|ConvertTo-Json -Depth 15),[Text.UTF8Encoding]::new($false))
+    Move-Item -LiteralPath $temporary -Destination $progress -Force
+}
+Save-Progress
 $script:app=$null; $script:held=[IntPtr]::Zero; $script:target=$null
 $priorArguments=$env:WEBVIEW2_ADDITIONAL_BROWSER_ARGUMENTS
 $priorPath=$env:PATH
@@ -28,7 +68,8 @@ function Step($Name,[scriptblock]$Action) {
     $script:stepEnd=[DateTime]::UtcNow.AddSeconds($seconds)
     $row=[ordered]@{name=$Name;status='fail';started_at=[DateTime]::UtcNow.ToString('o');timeout_seconds=$seconds;forced_kill=$false}
     $r.steps+=,$row
-    try { if ((Remaining) -le 0) { throw 'Frozen attempt deadline reached' };$row.detail=& $Action;if ((Remaining) -le 0) { throw 'Step or frozen attempt deadline reached' };$row.status='pass' } finally { $row.finished_at=[DateTime]::UtcNow.ToString('o') }
+    Save-Progress
+    try { if ((Remaining) -le 0) { throw 'Frozen attempt deadline reached' };$row.detail=& $Action;if ((Remaining) -le 0) { throw 'Step or frozen attempt deadline reached' };$row.status='pass' } catch { if ($_.ToString() -match 'deadline') {$row.timed_out=$true;$r.timed_out=$true};throw } finally { $row.finished_at=[DateTime]::UtcNow.ToString('o');Save-Progress }
 }
 function Verify-Inputs {
     foreach ($name in @('asset','tiny_tiff')) {
@@ -39,6 +80,8 @@ function Verify-Inputs {
     foreach ($tool in $i.readiness.tools) {
         if (-not [IO.Path]::IsPathRooted($tool.path) -or (Get-FileHash -LiteralPath $tool.path).Hash.ToLowerInvariant() -ne $tool.sha256) { throw ('Stage A observer tool changed: '+$tool.name) }
     }
+    $observer=[Diagnostics.Process]::GetCurrentProcess().MainModule.FileName
+    if (-not @($i.readiness.tools|Where-Object {[IO.Path]::GetFullPath($_.path) -eq $observer}).Count) { throw 'Actual PowerShell observer executable is not Stage A pinned' }
 }
 function Find-Name($Name) {
     $h=[SmokeDesktop]::AppWindow([uint32]$script:app.Id)
@@ -69,12 +112,16 @@ function Evaluate-JavaScript($Expression) {
     } finally { $cancel.Dispose();$socket.Dispose() }
 }
 function Actual-State {
-    Evaluate-JavaScript '(async()=>{const state=await window.__TAURI_INTERNALS__.invoke("image_state"),canvas=document.querySelector("#viewer canvas")?.getBoundingClientRect();return {state,phase:document.querySelector("#viewer")?.dataset.phase,error:document.querySelector("#status")?.classList.contains("error"),chooser_restored:window.__apertureSmokeChooser?.restored,rendered_canvas:!!canvas&&canvas.width>0&&canvas.height>0};})()'
+    Evaluate-JavaScript '(async()=>{const state=await window.__TAURI_INTERNALS__.invoke("image_state"),canvas=document.querySelector("#viewer canvas")?.getBoundingClientRect();return {state,phase:document.querySelector("#viewer")?.dataset.phase??null,error:document.querySelector("#status")?.classList.contains("error")??false,chooser_restored:window.__apertureSmokeChooser?.restored===true,rendered_canvas:!!canvas&&canvas.width>0&&canvas.height>0};})()'
 }
 function Assert-Rendered($Observation) {
-    if ($Observation.error -or $Observation.phase -eq 'error') { throw 'Actual application reports image error' }
-    if (-not $Observation.state) { return $false }
-    if ($Observation.state.phase -eq 'error') { throw 'Actual application reports image error' }
+    if (-not $Observation) { return $false }
+    $phase=$Observation.PSObject.Properties['phase'];$imageError=$Observation.PSObject.Properties['error'];$state=$Observation.PSObject.Properties['state']
+    if (($imageError -and $imageError.Value) -or ($phase -and $phase.Value -eq 'error')) { throw 'Actual application reports image error' }
+    if (-not $state -or -not $state.Value) { return $false }
+    $backendPhase=$state.Value.PSObject.Properties['phase'];$backendError=$state.Value.PSObject.Properties['error']
+    if (($backendPhase -and $backendPhase.Value -eq 'error') -or ($backendError -and $backendError.Value)) { throw 'Actual application reports image error' }
+    if (-not $phase -or -not $backendPhase) { return $false }
     if ($Observation.phase -ne 'ready' -or $Observation.state.phase -ne 'ready' -or -not $Observation.state.previewReady) { return $false }
     if ($Observation.state.path -ne $i.tiny_tiff_path -or $Observation.state.width -ne $i.tiny_tiff_width -or $Observation.state.height -ne $i.tiny_tiff_height) { throw 'Actual image path/dimensions differ' }
     return $true

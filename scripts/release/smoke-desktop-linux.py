@@ -6,16 +6,20 @@ command. No dependency installation, desktop repair or package rebuilding here.
 """
 
 import argparse
+from contextlib import contextmanager
 from datetime import datetime, timezone
 import hashlib
 import json
 import os
 from pathlib import Path
 import re
+import shutil
+import signal
 import subprocess
 import sys
 import time
 from urllib.request import Request, urlopen
+from urllib.parse import urlsplit
 
 STEP_SECONDS = {"launch": 90, "render": 60, "clean-exit": 30, "fuse-fallback": 180}
 DIALOG_INPUT = "prepared fixed TIFF chooser response"
@@ -35,6 +39,27 @@ def utc():
     return datetime.now(timezone.utc).isoformat()
 
 
+@contextmanager
+def bounded_action(seconds):
+    """Interrupt blocking observer work without terminating the application."""
+    if seconds <= 0:
+        raise TimeoutError("Step or frozen attempt deadline reached")
+    previous_handler = signal.getsignal(signal.SIGALRM)
+    previous_timer = signal.getitimer(signal.ITIMER_REAL)
+    started = time.monotonic()
+    def expired(signum, frame):
+        raise TimeoutError("Step or frozen attempt deadline reached")
+    signal.signal(signal.SIGALRM, expired)
+    signal.setitimer(signal.ITIMER_REAL, min(seconds, previous_timer[0]) if previous_timer[0] else seconds)
+    try:
+        yield
+    finally:
+        signal.setitimer(signal.ITIMER_REAL, 0)
+        signal.signal(signal.SIGALRM, previous_handler)
+        delay, interval = previous_timer
+        signal.setitimer(signal.ITIMER_REAL, max(.001, delay - (time.monotonic() - started)) if delay else 0, interval)
+
+
 def sha(path):
     digest = hashlib.sha256()
     with open(path, "rb") as source:
@@ -47,6 +72,8 @@ def verify_inputs(identity):
     for name in ("asset", "tiny_tiff"):
         if sha(identity[name + "_path"]) != identity[name + "_sha256"]:
             raise ValueError(name + " SHA256 mismatch before launch")
+    if not os.access(identity["asset_path"], os.X_OK):
+        raise ValueError("AppImage is not executable. In Stage A prepare an owned copy with chmod +x; verify its unchanged SHA256 before launch")
     if identity["readiness"]["helper_sha256"] != sha(__file__):
         raise ValueError("Stage A reviewed helper changed")
     if not identity["readiness"]["ready"] or os.getuid() == 0:
@@ -57,11 +84,39 @@ def verify_inputs(identity):
     for tool in tools:
         if not Path(tool["path"]).is_absolute() or sha(tool["path"]) != tool["sha256"]:
             raise ValueError("Stage A observer tool changed: " + tool["name"])
+    pinned = {Path(tool["path"]).resolve() for tool in tools}
+    for path in (sys.executable, shutil.which("ss"), identity["screenshot_command"][0]):
+        if not path or not Path(path).is_absolute() or Path(path).resolve() not in pinned:
+            raise ValueError("Actual observer executable is not Stage A pinned: " + str(path))
+
+
+def verify_driver(identity, timeout):
+    url = urlsplit(identity["driver_url"])
+    if url.scheme != "http" or url.hostname not in ("127.0.0.1", "localhost") or not url.port or url.path not in ("", "/") or url.username or url.query or url.fragment:
+        raise ValueError("Prepared native driver must use an owned loopback endpoint")
+    rows = subprocess.run([shutil.which("ss"), "-H", "-ltnp"], check=True, capture_output=True, text=True, timeout=timeout).stdout.splitlines()
+    listeners = [row for row in rows if row.split()[3].rsplit(":", 1)[-1] == str(url.port)]
+    pids = {int(pid) for row in listeners for pid in re.findall(r"\bpid=(\d+)\b", row)}
+    if len(pids) != 1:
+        raise ValueError("Exactly one owned native driver listener required")
+    proc = Path("/proc", str(pids.pop()))
+    executable = (proc / "exe").resolve()
+    if proc.stat().st_uid != os.getuid() or executable.name != "WebKitWebDriver" or executable not in {Path(tool["path"]).resolve() for tool in identity["readiness"]["tools"]}:
+        raise ValueError("Actual driver listener is not the Stage A pinned WebKitWebDriver")
+    return {"pid": int(proc.name), "path": str(executable), "endpoint": identity["driver_url"]}
+
+
+def assert_os(environment, actual_os):
+    expected_id, expected_version = {"debian12": ("debian", "12"), "ubuntu24": ("ubuntu", "24.04"), "arch-omarchy": ("arch", None), "fedora-wayland": ("fedora", None)}[environment]
+    actual_id = actual_os.get("ID", "").strip('"')
+    omarchy = environment == "arch-omarchy" and actual_id == "omarchy" and "arch" in actual_os.get("ID_LIKE", "").strip('"').split()
+    if not (actual_id == expected_id or omarchy) or expected_version and actual_os.get("VERSION_ID", "").strip('"') != expected_version:
+        raise ValueError("Actual OS differs from required native environment")
 
 
 def assert_rendered(observation, identity):
     state = observation.get("state") or {}
-    if observation.get("phase") == "error" or observation.get("error") or state.get("phase") == "error":
+    if observation.get("phase") == "error" or observation.get("error") or state.get("phase") == "error" or state.get("error"):
         raise ValueError("Actual application reports image error")
     if not (state.get("phase") == "ready" and state.get("previewReady") and observation.get("phase") == "ready"):
         return False
@@ -109,26 +164,38 @@ def ppm_spread(path, rect):
     return {"spread": max(values) - min(values), "samples": values, "viewer_rect": rect, "desktop_size": [width, height]}
 
 
-def native_nodes(pid):
+def native_nodes(pid, deadline):
     import gi
     gi.require_version("Atspi", "2.0")
     from gi.repository import Atspi
     Atspi.set_timeout(1000, 1000)
     desktop = Atspi.get_desktop(0)
     found = []
+    visited = 0
+    def check():
+        if time.monotonic() >= deadline:
+            raise TimeoutError("Native accessibility observation deadline reached")
     def visit(node, depth=0):
-        if depth > 16 or len(found) > 500:
+        nonlocal visited
+        check()
+        visited += 1
+        if visited > 500:
+            raise ValueError("Native accessibility observation exceeds 500 visited nodes")
+        if depth > 16:
             return
         state = node.get_state_set()
+        check()
         if state.contains(Atspi.StateType.SHOWING):
             component = node.get_component_iface()
             extent = component.get_extents(Atspi.CoordType.SCREEN) if component else None
             found.append((node, {"name": node.get_name(), "role": node.get_role_name(), "active": state.contains(Atspi.StateType.ACTIVE), "sensitive": state.contains(Atspi.StateType.SENSITIVE), "rect": [extent.x, extent.y, extent.width, extent.height] if extent else None}))
         for n in range(node.get_child_count()):
+            check()
             child = node.get_child_at_index(n)
             if child:
                 visit(child, depth + 1)
     for n in range(desktop.get_child_count()):
+        check()
         app = desktop.get_child_at_index(n)
         if app and app.get_process_id() == pid:
             visit(app)
@@ -149,7 +216,7 @@ def owned_process(pid, identity):
     return {"start_ticks": (proc / "stat").read_text().rsplit(")", 1)[1].split()[19], "buildinfo": info}
 
 
-def application_process(launcher_pid, identity):
+def application_process(launcher_pid, identity, deadline):
     """AppImage extraction can keep a launcher parent while AppRun owns the UI."""
     matches = []
     for item in Path("/proc").iterdir():
@@ -163,7 +230,7 @@ def application_process(launcher_pid, identity):
                 ancestor = int(Path("/proc", str(ancestor), "stat").read_text().rsplit(")", 1)[1].split()[1])
             if ancestor == launcher_pid:
                 process_identity = owned_process(int(item.name), identity)
-                nodes = native_nodes(int(item.name))
+                nodes = native_nodes(int(item.name), deadline)
                 if any(row["role"] in ("frame", "window") for _, row in nodes):
                     matches.append((int(item.name), process_identity, nodes))
         except (FileNotFoundError, ProcessLookupError, PermissionError):
@@ -179,8 +246,16 @@ def launcher(identity, receipt, extra):
     if identity.get("extract_and_run"):
         command.append("--appimage-extract-and-run")
     command.extend(extra)
+    environment = os.environ.copy()
+    for name in ("APPIMAGE_EXTRACT_AND_RUN", "APPIMAGE_EXTRACT_AND_RUN_DEFAULT"):
+        environment.pop(name, None)
     with open(str(receipt) + ".log", "xb") as log:
-        child = subprocess.Popen(command, stdout=log, stderr=subprocess.STDOUT)
+        try:
+            child = subprocess.Popen(command, stdout=log, stderr=subprocess.STDOUT, env=environment)
+        except OSError as error:
+            log.write((str(error) + "\n").encode())
+            receipt.write_text(json.dumps({"pid": None, "exit_code": 1, "error": str(error), "finished_at": utc()}))
+            return 1
         Path(str(receipt) + ".pid").write_text(str(child.pid))
         code = child.wait()
     receipt.write_text(json.dumps({"pid": child.pid, "exit_code": code, "finished_at": utc()}))
@@ -238,7 +313,8 @@ def main():
         try:
             if remaining() <= 0:
                 raise TimeoutError("Frozen attempt deadline reached")
-            row["detail"] = action()
+            with bounded_action(remaining()):
+                row["detail"] = action()
             if remaining() <= 0:
                 raise TimeoutError("Step or frozen attempt deadline reached")
             row["status"] = "pass"
@@ -248,10 +324,9 @@ def main():
         nonlocal route, current_launch
         verify_inputs(identity)
         report["observer_tools"] = identity["readiness"]["tools"]
+        report["driver_observer"] = verify_driver(identity, max(.1, min(remaining(), 5)))
         actual_os = dict(line.split("=", 1) for line in Path("/etc/os-release").read_text().splitlines() if "=" in line)
-        expected_os = {"debian12": ("debian", "12"), "ubuntu24": ("ubuntu", "24.04"), "arch-omarchy": ("arch", None), "fedora-wayland": ("fedora", None)}[args.environment]
-        if actual_os.get("ID", "").strip('"') != expected_os[0] or expected_os[1] and actual_os.get("VERSION_ID", "").strip('"') != expected_os[1]:
-            raise ValueError("Actual OS differs from required native environment")
+        assert_os(args.environment, actual_os)
         if identity["readiness"]["environment"] != args.environment or identity["readiness"]["source_sha"] != identity["source_sha"]:
             raise ValueError("Stage A receipt does not match candidate/environment")
         if identity.get("extract_and_run") and args.environment not in ("debian12", "ubuntu24"):
@@ -264,9 +339,15 @@ def main():
         session = request("POST", "/session", {"capabilities": {"alwaysMatch": {"browserName": "wry", "webkitgtk:browserOptions": {"binary": str(Path(__file__).resolve()), "args": launch_args}}}})
         route = "/session/" + session["sessionId"]
         pid_path = Path(str(receipt) + ".pid")
-        launcher_pid = wait(lambda: int(pid_path.read_text()) if pid_path.exists() else None)
-        pid, process_identity, nodes = wait(lambda: application_process(launcher_pid, identity))
-        rows = subprocess.run(["ss", "-xnp"], check=True, capture_output=True, text=True, timeout=max(.1, remaining())).stdout.splitlines()
+        def launched_pid():
+            if receipt.exists():
+                result = json.loads(receipt.read_text())
+                if result.get("error"):
+                    raise RuntimeError("AppImage launch failed: " + result["error"])
+            return int(pid_path.read_text()) if pid_path.exists() else None
+        launcher_pid = wait(launched_pid)
+        pid, process_identity, nodes = wait(lambda: application_process(launcher_pid, identity, time.monotonic() + remaining()))
+        rows = subprocess.run([shutil.which("ss"), "-xnp"], check=True, capture_output=True, text=True, timeout=max(.1, remaining())).stdout.splitlines()
         peers = [line for line in rows if re.search(r"\bpid=" + str(pid) + r"\b", line)]
         wayland = any("/wayland-" in line for line in peers)
         x11 = any(".X11-unix/" in line for line in peers)
@@ -276,17 +357,17 @@ def main():
         return current_launch
     def render():
         request("POST", route + "/execute/sync", {"script": OPEN_TIFF, "args": [identity["tiny_tiff_path"]]})
-        expression = "const done=arguments[arguments.length-1];window.__TAURI_INTERNALS__.invoke('image_state').then(state=>{const canvas=document.querySelector('#viewer canvas')?.getBoundingClientRect();done({state,phase:document.querySelector('#viewer')?.dataset.phase,error:document.querySelector('#status')?.classList.contains('error'),chooser_restored:window.__apertureSmokeChooser?.restored,rendered_canvas:!!canvas&&canvas.width>0&&canvas.height>0});}).catch(e=>done({error:String(e)}));"
+        expression = "const done=arguments[arguments.length-1];window.__TAURI_INTERNALS__.invoke('image_state').then(state=>{const canvas=document.querySelector('#viewer canvas')?.getBoundingClientRect();done({state,phase:document.querySelector('#viewer')?.dataset.phase??null,error:document.querySelector('#status')?.classList.contains('error')??false,chooser_restored:window.__apertureSmokeChooser?.restored===true,rendered_canvas:!!canvas&&canvas.width>0&&canvas.height>0});}).catch(e=>done({error:String(e)}));"
         def observation():
             value = request("POST", route + "/execute/async", {"script": expression, "args": []})
             return value if assert_rendered(value, identity) and value.get("chooser_restored") and value.get("rendered_canvas") else None
         state = wait(observation)
         pid = current_launch["pid"]
         def active_window():
-            nodes = native_nodes(pid)
+            nodes = native_nodes(pid, time.monotonic() + remaining())
             return next((row for _, row in nodes if row["role"] in ("frame", "window") and row["active"]), None)
         foreground = wait(active_window)
-        viewer = wait(lambda: next((row for _, row in native_nodes(pid) if row["name"] == "Image viewer" and row["rect"]), None))
+        viewer = wait(lambda: next((row for _, row in native_nodes(pid, time.monotonic() + remaining()) if row["name"] == "Image viewer" and row["rect"]), None))
         capture = receipt.with_suffix(".ppm")
         command = [arg.replace("{output}", str(capture)) for arg in identity["screenshot_command"]]
         def visible_pixels():
@@ -301,7 +382,7 @@ def main():
         pid = current_launch["pid"]
         if owned_process(pid, identity) != current_launch["process_identity"]:
             raise ValueError("Owned process identity changed before native Close")
-        nodes = native_nodes(pid)
+        nodes = native_nodes(pid, time.monotonic() + remaining())
         if not any(row["role"] in ("frame", "window") and row["active"] for _, row in nodes):
             raise ValueError("Owned native window must be active before Close")
         matches = [(node, row) for node, row in nodes if row["name"] == "Close" and row["role"] in ("push button", "button") and row["sensitive"]]
@@ -331,6 +412,8 @@ def main():
         report["status"] = "pass"
     except Exception as error:
         report.update(status="fail", error=str(error))
+        if isinstance(error, (TimeoutError, subprocess.TimeoutExpired)):
+            report["timed_out"] = report["steps"][-1]["timed_out"] = True
         if isinstance(error, subprocess.TimeoutExpired):
             report["forced_kill"] = report["steps"][-1]["forced_kill"] = True
     finally:

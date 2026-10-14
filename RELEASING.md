@@ -8,7 +8,7 @@ Windows x64 Setup and portable, and Linux x86_64 AppImage remain supported. The 
 
 Finish application changes and valid review fixes on a feature branch. Follow `AGENTS.md` and `SPECS.md`. Choose an increasing `MAJOR.MINOR.PATCH` version and keep the changelog short. During `0.x`, features use a minor bump and fixes use a patch bump. An authorized merge is separate from running a release; never push directly to `main`.
 
-Run **Native validation** for the source that will be frozen. It compiles development/test executables and runs frontend, Rust, release-helper and worker regressions on Linux and Windows. It does not build optimized installers, portable executables or AppImages. Use those development binaries with the prepared native runtimes for functional desktop validation.
+Run **Stage A development validation** for the source that will be frozen. It compiles development/test executables and runs frontend, Rust, release-helper and worker regressions on Linux and Windows. It does not build optimized installers, portable executables or AppImages. Use those development binaries with the prepared native runtimes for functional desktop validation.
 
 Complete the [Stage A functional checklist](scripts/release/RELEASE-ACCEPTANCE.md). Test changed behavior on affected operating systems, including saving, annotations, independent pixel preservation, cancellation and multi-instance coordination. Test installer/updater behavior and rejection paths here when those components change. Detailed GUI upgrades are development tests, not a mandatory matrix for every routine release. Reuse a verified prior-version fixture until its baseline or transport/configuration changes.
 
@@ -22,7 +22,7 @@ Freeze the exact reviewed source commit after Stage A passes. `bounded.py freeze
 
 Prepare and review corresponding-source material **once** for that frozen commit. Transfer those verified bytes instead of assembling the same archive again on a runner. A pinned external review manifest lets source material be prepared without editing the frozen commit. Keep required dependency coverage, notices, hashes and native identities. The source gate remains mandatory. See [source material](scripts/release/SOURCE-MATERIAL.md) for cache reuse and the remaining archive-size limitation.
 
-Create an annotated application tag on the frozen main commit. Never move a published tag or replace an asset. Dispatch **Release candidate** with the trusted readiness/frozen-attempt records and reviewed source-manifest digest. A tag push alone does not begin packaging.
+Create an annotated application tag on the exact validated commit, which must be contained in `main`. This may be the reviewed feature commit after merge; do not substitute a merge commit with different source identity. Never move a published tag or replace an asset. Dispatch **Stage B signed candidate** with the trusted readiness/frozen-attempt records and reviewed source-manifest digest. A tag push alone does not begin packaging.
 
 The Windows and Linux jobs build the final updater-signed packages in parallel. Each package is built once. They consume Stage A evidence instead of running the full functional suites again. Short CI payload checks verify package structure, bundled runtime and build identity; these are not desktop acceptance. Record source SHA, build inputs, signature verification and every asset hash.
 
@@ -32,12 +32,12 @@ The candidate remains a prerelease outside Latest. A source change invalidates t
 
 Download the exact candidate assets into a fresh directory. Verify the complete asset set, hashes, updater signatures and feed version/immutable URLs before launching them. The native adapters require prepared environments and the Stage A pinned helper/TIFF identities.
 
-| Target | Entire required desktop smoke |
-| --- | --- |
-| Windows Setup | Standard-user install without elevation; launch; open the fixed small TIFF; observe ready state, visible pixels and expected dimensions; close normally and observe exit 0 |
-| Windows portable | Launch the actual portable executable with its incoming payload absent; open the same TIFF and observe rendering; close normally and observe exit 0 |
-| Linux AppImage | Launch the same verified bytes on Debian, Ubuntu, Arch/Omarchy and Fedora; open the same TIFF and observe rendering; close normally and observe exit 0 |
-| Debian/Ubuntu fallback | Repeat only that small launch/render/close check with extraction fallback |
+| Target                 | Entire required desktop smoke                                                                                                                                              |
+| ---------------------- | -------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| Windows Setup          | Standard-user install without elevation; launch; open the fixed small TIFF; observe ready state, visible pixels and expected dimensions; close normally and observe exit 0 |
+| Windows portable       | Launch the actual portable executable with its incoming payload absent; open the same TIFF and observe rendering; close normally and observe exit 0                        |
+| Linux AppImage         | Launch the same verified bytes on Debian, Ubuntu, Arch/Omarchy and Fedora; open the same TIFF and observe rendering; close normally and observe exit 0                     |
+| Debian/Ubuntu fallback | Repeat only that small launch/render/close check with extraction fallback                                                                                                  |
 
 **Do not repeat** annotation editing, save/reopen or pixel-preservation suites, concurrency scenarios, extensive cancellation, performance tests, full codec coverage or a GUI upgrade matrix after packaging. If a changed packaging/updater component needs one extra final-byte check, define its exact scope and timeout during Stage A, before freeze; never enlarge the routine suite during execution.
 
@@ -45,7 +45,7 @@ Record pass, fail or inconclusive with helper revision, OS/user/backend, source 
 
 A required failure, unavailable lab or timeout stops the attempt. Retain the failure and diagnostics; application defects and helper repairs return to Stage A. At most one bounded retry of unchanged bytes is allowed for an identified transient environment failure, with both attempts retained. Assertion changes and helper repairs do not qualify. An expired attempt is **blocked, not published**.
 
-Upload the six compact smoke reports through **Release evidence**, stage C. **Promote release** verifies the trusted candidate and smoke records, deadline, hashes and signatures, and promotes those exact assets without rebuilding or replacing them.
+Upload the six compact smoke reports through **Release evidence**, stage C. **Stage C promote exact bytes** verifies the trusted candidate and smoke records, deadline, hashes and signatures, and promotes those exact assets without rebuilding or replacing them.
 
 After promotion, verify public download identity and `latest.json` version/URLs. Use public hashes and server asset identities; record the results. Do not open another functional or upgrade campaign. Finalize concise GitHub notes with the source/checksum identity, smoke report link and existing support limitations. Website/email announcements are separate actions.
 

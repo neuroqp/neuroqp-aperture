@@ -6,14 +6,14 @@ Use with [RELEASING.md](../../RELEASING.md). Stage A establishes application beh
 
 Run full automated frontend, Rust, release-helper and actual-worker regressions before final packaging. Development compilation is allowed and necessary. Use the compiled native development app on the affected operating systems, with pinned native libraries/runtime. Browser previews alone do not establish native dialogs or filesystem behavior.
 
-| Behavior | Meaningful pre-freeze observations |
-| --- | --- |
-| Viewing | Supported formats and relevant TIFF/BigTIFF variants render correct dimensions/pixels; navigation, pan, zoom and display controls work |
-| Saving | Annotation save/reopen retains points; independent decoded pixels and encoded image data remain unchanged; failures preserve edits and destination |
-| Unsaved work | Real Save/Discard/Cancel branches preserve or discard the intended edits |
-| Lifecycle | Replacement/cancellation leaves no stale results or surviving workers; normal close exits without forced cleanup |
-| Multiple instances | Independent processes, edits and caches; shared/changed-file advisory Cancel/Save as/Overwrite choices; one window closes without breaking others |
-| Updates/installers | Applicable installer admission, startup exclusion, signature/version rejection, preferences, worker shutdown and upgrade failure paths |
+| Behavior           | Meaningful pre-freeze observations                                                                                                                 |
+| ------------------ | -------------------------------------------------------------------------------------------------------------------------------------------------- |
+| Viewing            | Supported formats and relevant TIFF/BigTIFF variants render correct dimensions/pixels; navigation, pan, zoom and display controls work             |
+| Saving             | Annotation save/reopen retains points; independent decoded pixels and encoded image data remain unchanged; failures preserve edits and destination |
+| Unsaved work       | Real Save/Discard/Cancel branches preserve or discard the intended edits                                                                           |
+| Lifecycle          | Replacement/cancellation leaves no stale results or surviving workers; normal close exits without forced cleanup                                   |
+| Multiple instances | Independent processes, edits and caches; shared/changed-file advisory Cancel/Save as/Overwrite choices; one window closes without breaking others  |
+| Updates/installers | Applicable installer admission, startup exclusion, signature/version rejection, preferences, worker shutdown and upgrade failure paths             |
 
 Select changed-area tests before freeze. Expand codec, large-file, scratch-space, display/GPU or native-library coverage when those inputs change. Reuse valid unchanged-component results with their original input hashes and limitations. Do not repeat every format on every desktop merely because another package is being built.
 
@@ -23,7 +23,7 @@ Prepare the lab, native helpers and fixed small TIFF before readiness approval. 
 
 ### Readiness record
 
-`bounded.py identity` records the source and Git input identities. Combine trusted **Native validation** automated records with two native-functional records, Linux and Windows, and six prepared-lab records. A native record includes `suite: native-functional`, tested `areas`, evidence references, development-binary hash, component identities, source SHA, `status` and `forced_kill`. Unchanged component evidence may reference an older source explicitly; current-source native tests must match the automated development binary.
+`bounded.py identity` records the source and Git input identities. Combine trusted **Stage A development validation** automated records with two native-functional records, Linux and Windows, and six prepared-lab records. A native record includes `suite: native-functional`, tested `areas`, evidence references, development-binary hash, component identities, source SHA, `status` and `forced_kill`. Unchanged component evidence may reference an older source explicitly; current-source native tests must match the automated development binary.
 
 The labs are `windows11-setup`, `windows11-portable`, `debian12`, `ubuntu24`, `arch-omarchy` and `fedora-wayland`. Each records fixed TIFF/helper hashes, dimensions, native desktop/tools with exact paths and SHA-256 values, expiry and a pass. All six
 environments use the same fixed TIFF bytes and dimensions. Windows 10 is unverified; publisher signing remains pending.
@@ -34,7 +34,7 @@ Submit JSON through **Release evidence**, stage A, with the trusted validation r
 
 `bounded.py freeze READINESS.json frozen-attempt.json --readiness-run-id RUN_ID` starts the single 30-minute clock. Submit the original receipt through **Release evidence**, stage B. Source preparation/review takes place after this freeze; it does not alter the frozen commit or start a second clock.
 
-Provide the reviewed corresponding-source JSON and its exact SHA-256 to **Release candidate**, together with the frozen-attempt record identity. Prepare its archive once and transfer it. The source gate compares required coverage, lock/native identities and archived application files with the frozen Git tree. Final package jobs sign updater assets and record BUILDINFO and hashes. They do not rerun this functional checklist.
+Provide the reviewed corresponding-source JSON and its exact SHA-256 to **Stage B signed candidate**, together with the frozen-attempt record identity. Prepare its archive once and transfer it. The source gate compares required coverage, lock/native identities and archived application files with the frozen Git tree. Final package jobs sign updater assets and record BUILDINFO and hashes. They do not rerun this functional checklist.
 
 ## Stage C fixed desktop smoke
 

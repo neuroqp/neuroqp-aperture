@@ -267,12 +267,15 @@ using representative Linux files, including tiled and strip-based TIFFs.
 - Download and verify before asking to restart. Preserve unsaved-work warnings;
   cancellation and save failure leave edits intact. Stop background image work
   before replacement. Failed installation must leave a recoverable application.
-- Run automated source regressions before optimized release packaging. Build
-  candidates on native Windows runners and the Linux baseline container, then
-  test the exact downloads on the supported native desktop matrix before promotion.
-  Apply the routine checklist to every candidate and select expanded checks from
-  the diff since the previous stable release. Record results tied to the source
-  commit and asset hashes; required failures or inconclusive checks block promotion.
+- Complete automated source regressions and meaningful changed-area native
+  functional validation before freezing source and building final optimized packages.
+  Prepare test helpers and desktop environments during that development stage.
+  Build each final package once on native Windows runners and the Linux baseline
+  container. After packaging, run only the fixed launch, one-small-TIFF rendering
+  and normal-exit smoke checks on the supported desktop matrix. Functional,
+  save/pixel-preservation, concurrency and detailed upgrade testing belongs before
+  packaging. Record results tied to the source commit and asset hashes; required
+  failures, inconclusive checks or the overall release timeout block promotion.
   Promote tested bytes without rebuilding or moving tags, then verify public
   download routes and the production updater. Follow [RELEASING.md](RELEASING.md).
 - Keep PR checks fast. Full native builds and package validation are separate from
