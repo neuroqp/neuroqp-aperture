@@ -1,23 +1,24 @@
-name: Promote release
+name: Stage C promote exact bytes
 
 on:
   workflow_dispatch:
     inputs:
       tag:
-        description: Existing candidate tag, for example v0.1.0
+        description: Existing candidate tag
         required: true
       source_sha:
-        description: Candidate source commit copied from release notes
+        description: Candidate source commit
         required: true
-      checksums_sha256:
-        description: SHA256SUMS digest copied from release notes
+      candidate_run_id:
+        description: Successful Stage B run containing frozen-candidate
         required: true
-      desktop_acceptance:
-        description: Type accepted after Windows installed/portable and Linux desktop checks
+      smoke_run_id:
+        description: Successful release-evidence run containing six compact Stage C reports
         required: true
 
 permissions:
   contents: read
+  actions: read
 
 concurrency:
   group: promote-release
@@ -27,18 +28,43 @@ jobs:
   promote:
     if: github.ref == 'refs/heads/main'
     runs-on: ubuntu-24.04
+    timeout-minutes: 3
     permissions:
       contents: write
+      actions: read
     steps:
       - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
         with:
+          ref: ${{ inputs.source_sha }}
           persist-credentials: false
+      - uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4
+        with:
+          name: frozen-candidate
+          run-id: ${{ inputs.candidate_run_id }}
+          github-token: ${{ github.token }}
+          path: build/evidence
+      - uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4
+        with:
+          name: desktop-acceptance
+          run-id: ${{ inputs.smoke_run_id }}
+          github-token: ${{ github.token }}
+          path: build/evidence
       - run: sudo apt-get update && sudo apt-get install -y minisign
-      - name: Verify exact candidate bytes and promote without rebuilding
+        timeout-minutes: 1
+      - name: Verify fixed native smoke, frozen deadline and exact candidate bytes
         env:
           GH_TOKEN: ${{ github.token }}
           RELEASE_TAG: ${{ inputs.tag }}
           SOURCE_SHA: ${{ inputs.source_sha }}
-          CHECKSUMS_SHA256: ${{ inputs.checksums_sha256 }}
-          DESKTOP_ACCEPTANCE: ${{ inputs.desktop_acceptance }}
+          CANDIDATE_RUN_ID: ${{ inputs.candidate_run_id }}
+          SMOKE_RUN_ID: ${{ inputs.smoke_run_id }}
+          FROZEN_IDENTITY: build/evidence/frozen-candidate.json
+          DESKTOP_REPORT: build/evidence/desktop-acceptance.json
         run: python3 scripts/release/promote.py
+      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
+        if: always()
+        with:
+          name: promotion-report
+          path: build/evidence/promotion-report.json
+          if-no-files-found: ignore
+          retention-days: 30

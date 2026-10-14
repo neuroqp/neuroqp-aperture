@@ -11,6 +11,17 @@ permissions:
   contents: read
 
 jobs:
+  windows-helpers:
+    runs-on: windows-2022
+    timeout-minutes: 3
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+      - name: Windows PowerShell helper regressions
+        shell: powershell
+        run: ./scripts/release/test-smoke-desktop-windows.ps1
+      - name: PowerShell 7 helper regressions
+        shell: pwsh
+        run: ./scripts/release/test-smoke-desktop-windows.ps1
   linux:
     runs-on: ubuntu-24.04
     timeout-minutes: 5
@@ -33,5 +44,8 @@ jobs:
       - run: pnpm exec tsc --noEmit
       - run: pnpm test
       - run: python3 scripts/release/test_release.py
+      - run: python3 scripts/release/test_bounded.py
+      - run: python3 scripts/release/test_smoke_desktop.py
+      - run: python3 scripts/release/test_lab.py
       - run: python3 scripts/release/test-source-windows.py
       - run: python3 scripts/release/release.py check

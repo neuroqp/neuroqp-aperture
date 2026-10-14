@@ -1,169 +1,56 @@
 # Building and releasing Aperture
 
-Aperture ships from the public [source repository](https://github.com/neuroqp/neuroqp-aperture).
-We offer Windows x64 Setup and portable executables and a Linux x86_64 AppImage.
-macOS, ARM, app stores, MSI and distro packages are deferred.
+Full application validation happens **before final OS packages are built**. A routine release has three stages. After packaging, run only the fixed package smoke checks below, then publish the same verified bytes. Lab preparation and failure repair are development work.
 
-Follow these steps in order. Source checks precede optimized release packages;
-desktop acceptance uses the exact candidate downloads. Promote those bytes
-without rebuilding. Detailed [setup and source-material instructions](scripts/release/RELEASE-REFERENCE.md)
-and the [acceptance checklist and report template](scripts/release/RELEASE-ACCEPTANCE.md)
-are separate references.
+Windows x64 Setup and portable, and Linux x86_64 AppImage remain supported. The desktop matrix is Windows 11 standard user, Debian 12, Ubuntu 24, Arch/Omarchy and Fedora with native Wayland coverage. Windows 10 is unverified; publisher signing is pending. macOS, ARM, stores and distro packages remain deferred.
 
-## 1. Prepare reviewed source
+## Stage A: development and functional validation
 
-Use a feature branch and a reviewed PR to `main`. Keep unrelated work out of
-release commits. Never push directly to `main`, move a released tag or replace a
-published binary. Release work does not itself authorize merging a PR.
+Finish application changes and valid review fixes on a feature branch. Follow `AGENTS.md` and `SPECS.md`. Choose an increasing `MAJOR.MINOR.PATCH` version and keep the changelog short. During `0.x`, features use a minor bump and fixes use a patch bump. An authorized merge is separate from running a release; never push directly to `main`.
 
-Choose an increasing `MAJOR.MINOR.PATCH` version. During `0.x`, use a minor bump for
-features or incompatible changes and a patch bump for fixes. Describe any
-compatibility change explicitly. Stable promotion currently accepts three-number
-versions, with no prerelease suffix. For example, on the feature branch:
+Run **Stage A development validation** for the source that will be frozen. It compiles development/test executables and runs frontend, Rust, release-helper and worker regressions on Linux and Windows. It does not build optimized installers, portable executables or AppImages. Use those development binaries with the prepared native runtimes for functional desktop validation. Stage A compiles the native development binary with the release profile and warms the shared compilation cache. This produces no final OS package; the runtime has no installed marker or AppImage identity, so it remains a development edition. Stage B reuses compilation work and builds each final package once.
 
-```sh
-python3 scripts/release/release.py version 0.2.0
-```
+Complete the [Stage A functional checklist](scripts/release/RELEASE-ACCEPTANCE.md). Test changed behavior on affected operating systems, including saving, annotations, independent pixel preservation, cancellation and multi-instance coordination. Test installer/updater behavior and rejection paths here when those components change. Detailed GUI upgrades are development tests, not a mandatory matrix for every routine release. Reuse a verified prior-version fixture until its baseline or transport/configuration changes.
 
-This updates `package.json`, Tauri configuration, Cargo metadata and Cargo's root
-lockfile entry. Move the relevant `CHANGELOG.md` entries from `Unreleased` into a
-dated `0.2.0` section. Include user-visible changes, known limitations and upgrade
-actions. Refresh reviewed corresponding-source material and pins even for a
-version-only Cargo lock change, as required by the current source gate.
+Prepare the native smoke helpers, fixed small TIFF and all six desktop environments here. Exercise helpers during development and record their revisions. Existing checks may be reused only when their relevant source, dependency and packaging inputs match; name the original source and evidence. A new source revision is never silently accepted as the old one.
 
-Run the automated source suites before tagging. On a prepared Linux development
-machine, with the pinned tools and native dependencies available:
+Upload the completed functional and lab-readiness records through **Release evidence**, stage A. It combines them with the trusted automated validation run. Missing, failed, inconclusive or expired readiness blocks source freeze. See the script commands and report fields in [the acceptance reference](scripts/release/RELEASE-ACCEPTANCE.md).
 
-```sh
-pnpm install --frozen-lockfile
-pnpm format:check
-pnpm exec tsc --noEmit
-pnpm test
-python3 scripts/release/test_release.py
-python3 scripts/release/test-source-windows.py
-python3 scripts/release/release.py check
-python3 scripts/release/release.py source-material build/release-preflight --fetch
-cargo fmt --manifest-path src-tauri/Cargo.toml --all -- --check
-pnpm build
-cargo build --manifest-path src-tauri/Cargo.toml --features custom-protocol --locked
-APERTURE_WORKER_EXECUTABLE="$PWD/src-tauri/target/debug/aperture" cargo test --manifest-path src-tauri/Cargo.toml --locked
-cargo clippy --manifest-path src-tauri/Cargo.toml --all-targets --locked -- -D warnings
-```
+## Stage B: freeze and build final packages once
 
-Expect all commands to exit successfully, version check to print the intended
-version, and source preflight to verify the reviewed archive. Compiling the test
-and worker executables is necessary before running Rust tests. The candidate jobs
-repeat native source checks on both build platforms before optimized packaging.
+Freeze the exact reviewed source commit after Stage A passes. `bounded.py freeze` records source/input identities, the readiness run and a deadline 30 minutes after freeze. That same clock covers corresponding-source preparation, builds, downloads, smoke checks and promotion; uploading evidence or rerunning a command cannot reset it.
 
-Keep ordinary PR checks fast. Run targeted native checks for changed UI behavior
-and unsigned **Native validation** when the build or packaging changes. Browser
-previews and mocked dialogs do not establish native desktop behavior. Before
-tagging, identify the expanded acceptance checks needed for the diff since the
-previous stable version, and confirm the test environments and upgrade baseline
-are ready. Do not begin a release with required environments unavailable.
+Prepare and review corresponding-source material **once** for that frozen commit. Transfer those verified bytes instead of assembling the same archive again on a runner. A pinned external review manifest lets source material be prepared without editing the frozen commit. Keep required dependency coverage, notices, hashes and native identities. The source gate remains mandatory. See [source material](scripts/release/SOURCE-MATERIAL.md) for cache reuse and the remaining archive-size limitation.
 
-## 2. Build one immutable candidate
+Create an annotated application tag on the exact validated commit, which must be contained in `main`. This may be the reviewed feature commit after merge; do not substitute a merge commit with different source identity. Never move a published tag or replace an asset. Dispatch **Stage B signed candidate** with the trusted readiness/frozen-attempt records and reviewed source-manifest digest. A tag push alone does not begin packaging.
 
-After the PR has passed checks and review and an authorized merge has completed,
-fetch `origin/main` and identify the reviewed commit. For example:
+The Windows and Linux jobs build the final updater-signed packages in parallel. Each package is built once. They consume Stage A evidence instead of running the full functional suites again. Short CI payload checks verify package structure, bundled runtime and build identity; these are not desktop acceptance. Record source SHA, build inputs, signature verification and every asset hash.
 
-```sh
-git fetch origin
-git tag -a v0.2.0 <reviewed-main-commit> -m 'Aperture 0.2.0'
-git push origin refs/tags/v0.2.0
-```
+The candidate remains a prerelease outside Latest. A source change invalidates the frozen attempt and affected evidence. A package/build defect returns to Stage A; do not repair it inside this release attempt. Preserve existing public tags and assets, and use a higher application version after a published candidate defect.
 
-Watch **Release candidate** in GitHub Actions. It checks version/tag/main ancestry,
-source materials and build identities, runs source tests, builds packages, signs
-updates and runs package smoke checks. It publishes a prerelease outside latest,
-so stable clients do not see it. `BUILDINFO` records the source commit, toolchains,
-lock hashes and native dependency versions. The assets include:
+## Stage C: small package smoke and publication
 
-- Three fixed-name application downloads and their updater signatures.
-- `latest.json` with immutable version-tag URLs and changelog notes.
-- `SHA256SUMS`, platform `BUILDINFO`, third-party notices and reviewed source material.
+Download the exact candidate assets into a fresh directory. Verify the complete asset set, hashes, updater signatures and feed version/immutable URLs before launching them. The native adapters require prepared environments and the Stage A pinned helper/TIFF identities.
 
-Require successful jobs and verify the exact downloaded asset set on a prepared
-Linux verifier with `minisign` installed. Use a new empty destination:
+| Target                 | Entire required desktop smoke                                                                                                                                              |
+| ---------------------- | -------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| Windows Setup          | Standard-user install without elevation; launch; open the fixed small TIFF; observe ready state, visible pixels and expected dimensions; close normally and observe exit 0 |
+| Windows portable       | Launch the actual portable executable with its incoming payload absent; open the same TIFF and observe rendering; close normally and observe exit 0                        |
+| Linux AppImage         | Launch the same verified bytes on Debian, Ubuntu, Arch/Omarchy and Fedora; open the same TIFF and observe rendering; close normally and observe exit 0                     |
+| Debian/Ubuntu fallback | Repeat only that small launch/render/close check with extraction fallback                                                                                                  |
 
-```sh
-gh release download v0.2.0 --repo neuroqp/neuroqp-aperture --dir build/candidate-v0.2.0
-python3 scripts/release/release.py verify build/candidate-v0.2.0 --version 0.2.0 --source-sha <reviewed-main-commit> --cryptographic
-sha256sum build/candidate-v0.2.0/SHA256SUMS
-```
+**Do not repeat** annotation editing, save/reopen or pixel-preservation suites, concurrency scenarios, extensive cancellation, performance tests, full codec coverage or a GUI upgrade matrix after packaging. If a changed packaging/updater component needs one extra final-byte check, define its exact scope and timeout during Stage A, before freeze; never enlarge the routine suite during execution.
 
-Expect verification to succeed and the checksum-file digest to match the candidate
-notes. Record the tag, source commit and this digest in the acceptance report.
+Record pass, fail or inconclusive with helper revision, OS/user/backend, source SHA, artifact hash, screenshot identity, dimensions and actual process exit. PID absence or a forced kill does not prove successful closure. Each step has a fixed timeout, and the original overall deadline still applies.
 
-## 3. Accept the exact downloads
+A required failure, unavailable lab or timeout stops the attempt. Retain the failure and diagnostics; application defects and helper repairs return to Stage A. At most one bounded retry of unchanged bytes is allowed for an identified transient environment failure, with both attempts retained. Assertion changes and helper repairs do not qualify. An expired attempt is **blocked, not published**.
 
-Complete [routine desktop acceptance](scripts/release/RELEASE-ACCEPTANCE.md#routine-checks-for-every-candidate)
-on Windows 11 standard-user Setup and portable editions, and the same AppImage
-on Debian 12, Ubuntu 24, Arch/Omarchy and Fedora. Record exact OS versions and
-desktop sessions. Windows 10 remains unverified and publisher signing remains
-pending; do not advertise either as validated. Complete the selected expanded
-checks and actual signed upgrades as well.
+Upload the six compact smoke reports through **Release evidence**, stage C. **Stage C promote exact bytes** verifies the trusted candidate and smoke records, deadline, hashes and signatures, and promotes those exact assets without rebuilding or replacing them.
 
-Record pass, fail or inconclusive results with evidence in the release PR or an
-associated durable GitHub test record. The report must identify the tested bytes,
-all required environments and tests, the operator, limitations and the decision.
-Any required failure, inconclusive result or missing evidence blocks promotion.
+After promotion, verify public download identity and `latest.json` version/URLs. Use public hashes and server asset identities; record the results. Do not open another functional or upgrade campaign. Finalize concise GitHub notes with the source/checksum identity, smoke report link and existing support limitations. Website/email announcements are separate actions.
 
-If the application fails, fix it in a new PR and issue a higher version/tag. Never
-replace candidate bytes or retag. A diagnosed test-tool failure permits a bounded
-retry of unchanged bytes; retain the original failure and explanation.
+## Timing and maintenance
 
-## 4. Promote without rebuilding
+The target is about 30 minutes from validated source freeze to publication, not 30 minutes of desktop tests. Measure actual source/build/smoke/transfer durations. The [recovery report](docs/release-recovery-2026-10-14.md) shows the old signed build alone took 30m 57s, and cold portable extraction took about 5m 29s on the test VM. The new end-to-end target has not yet been demonstrated.
 
-Review the completed acceptance report. The operator may run **Promote release**
-on `main` only when all required checks passed. Supply:
-
-- `tag`, for example `v0.2.0`.
-- `source_sha`, the full candidate commit.
-- `checksums_sha256`, the digest of the entire tested `SHA256SUMS` file.
-- `desktop_acceptance`, set to `accepted` after reviewing the report.
-
-The workflow re-downloads and verifies assets, signatures, tag/main ancestry and
-increasing stable versions. It preserves every candidate asset ID and byte, then
-marks the release stable/latest. The acceptance report is an operator gate:
-the workflow checks the typed confirmation, not the report or its test results.
-
-## 5. Verify production and announce
-
-After promotion, complete these checks before announcing success:
-
-1. Finalize the GitHub release body. Remove the candidate-only warning, retain
-   source/checksum identity, and link acceptance evidence and support limitations.
-   Promotion changes state and title only; it does not finalize the body.
-2. Download all three applications and `latest.json` through the public latest
-   routes without authentication. Verify complete download hashes against the
-   accepted set; confirm the feed version and immutable asset URLs.
-3. In a released Windows installed app and Linux AppImage, perform a real manual
-   check against the production feed and observe the up-to-date result. Test feeds
-   cannot prove this step.
-4. Launch the previous stable portable executable unchanged and check the
-   production feed. Verify its update action opens the new release's exact
-   portable download URL without starting an installer. Record the observed URL
-   and absence of an installer; complete download hashes are covered in step 2.
-   No additional portable fixture build is required.
-5. Append production results to the acceptance record and stop owned QA processes,
-   feeds and VMs. Restore temporary test settings.
-
-If production verification fails, pause announcements, remove latest status or
-restore the preceding stable release as latest, and investigate. Ship a
-higher-version fix for product defects. Already-upgraded clients do not
-automatically downgrade.
-
-The website can link to the fixed public routes:
-
-- [Windows Setup](https://github.com/neuroqp/neuroqp-aperture/releases/latest/download/Aperture-Setup-x64.exe)
-- [Windows portable](https://github.com/neuroqp/neuroqp-aperture/releases/latest/download/Aperture-Portable-x64.exe)
-- [Linux AppImage](https://github.com/neuroqp/neuroqp-aperture/releases/latest/download/Aperture-x86_64.AppImage)
-- [Updater feed](https://github.com/neuroqp/neuroqp-aperture/releases/latest/download/latest.json)
-- [Release notes](https://github.com/neuroqp/neuroqp-aperture/releases/latest)
-
-GitHub hosts downloads and release notes. Updater notes come from the changelog
-when candidate metadata is built; editing the GitHub body later does not change
-the immutable feed. Users can subscribe to GitHub release notifications.
-Website announcements and email are separate editorial actions; workflows do not
-send them. The first stable release was `0.1.1`; `0.1.0` was not promoted.
+Maintain and recover VMs separately using the [lab procedure](scripts/release/LAB.md). Keep reusable sparse bases and small disposable overlays, current/previous relevant inputs and compact durable reports. Do not provision operating systems, create users, repair automation or modify desktop settings in Stage C.

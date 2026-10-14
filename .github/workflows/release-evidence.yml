@@ -1,0 +1,85 @@
+name: Release evidence
+
+on:
+  workflow_dispatch:
+    inputs:
+      stage:
+        description: Readiness A, local frozen-attempt B, or exact-byte smoke C
+        type: choice
+        options: [A, B, C]
+        required: true
+      source_sha:
+        description: Exact reviewed source SHA
+        required: true
+      input_run_id:
+        description: Stage A validation or Stage B candidate run; readiness evidence run for B
+        required: true
+      report_json:
+        description: A readiness manifest, B local frozen-attempt JSON, or array of six C smoke reports
+        required: true
+
+permissions:
+  contents: read
+  actions: read
+
+jobs:
+  evidence:
+    if: github.ref == 'refs/heads/main'
+    runs-on: ubuntu-24.04
+    timeout-minutes: 3
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+        with:
+          ref: ${{ inputs.source_sha }}
+          fetch-depth: 0
+          persist-credentials: false
+      - uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4
+        if: inputs.stage == 'A'
+        with:
+          pattern: stage-a-*
+          run-id: ${{ inputs.input_run_id }}
+          github-token: ${{ github.token }}
+          path: build/evidence/input
+          merge-multiple: true
+      - uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4
+        if: inputs.stage == 'B'
+        with:
+          name: release-readiness
+          run-id: ${{ inputs.input_run_id }}
+          github-token: ${{ github.token }}
+          path: build/evidence/input
+      - uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4
+        if: inputs.stage == 'C'
+        with:
+          name: frozen-candidate
+          run-id: ${{ inputs.input_run_id }}
+          github-token: ${{ github.token }}
+          path: build/evidence/input
+      - name: Validate submitted evidence
+        env:
+          GH_TOKEN: ${{ github.token }}
+          EVIDENCE_STAGE: ${{ inputs.stage }}
+          INPUT_RUN_ID: ${{ inputs.input_run_id }}
+          REPORT_JSON: ${{ inputs.report_json }}
+        run: python3 scripts/release/bounded.py submit build/evidence/input build/evidence/output
+      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
+        if: inputs.stage == 'A'
+        with:
+          name: release-readiness
+          path: build/evidence/output/release-readiness.json
+          if-no-files-found: error
+          retention-days: 30
+      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
+        if: inputs.stage == 'B'
+        with:
+          name: frozen-attempt
+          path: build/evidence/output/frozen-attempt.json
+          if-no-files-found: error
+          retention-days: 30
+      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
+        if: inputs.stage == 'C'
+        with:
+          name: desktop-acceptance
+          path: build/evidence/output/desktop-acceptance.json
+          if-no-files-found: error
+          retention-days: 30

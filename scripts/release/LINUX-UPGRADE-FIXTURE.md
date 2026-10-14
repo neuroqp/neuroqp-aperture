@@ -1,4 +1,8 @@
-# Local Linux upgrade fixture
+# Historical first-release Linux upgrade fixture
+
+This `0.0.9` recipe is retained evidence for the initial `0.1.1` release.
+It is not a routine release step or the previous-stable baseline for later versions.
+Use the actual previous stable source and reuse its verified Stage A fixture.
 
 Build the first-release `0.0.9` prior AppImage from the exact reviewed `0.1.1`
 candidate commit. Keep the candidate AppImage, signature and BUILDINFO in their

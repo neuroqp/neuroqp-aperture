@@ -1,62 +1,100 @@
-name: Release candidate
+name: Stage B signed candidate
 
 on:
-  push:
-    tags: ["v*"]
+  workflow_dispatch:
+    inputs:
+      tag:
+        description: Existing version tag on reviewed main source, never moved or rebuilt
+        required: true
+      source_sha:
+        description: Exact reviewed commit that passed Stage A
+        required: true
+      frozen_run_id:
+        description: Release-evidence run containing the local pre-assembly frozen-attempt
+        required: true
+      frozen_sha256:
+        description: SHA256 of that exact frozen-attempt JSON
+        required: true
+      source_review_json:
+        description: Reviewed corresponding-source plan JSON prepared after local freeze
+        required: true
+      source_review_sha256:
+        description: Operator-reviewed source plan SHA256, never derived as automatic approval
+        required: true
 
 permissions:
   contents: read
+  actions: read
 
 concurrency:
-  group: release-${{ github.ref }}
+  group: release-${{ inputs.tag }}
   cancel-in-progress: false
 
 jobs:
   identity:
+    if: github.ref == 'refs/heads/main'
     runs-on: ubuntu-24.04
+    timeout-minutes: 5
+    permissions:
+      contents: write
+      actions: read
     outputs:
+      reservation_id: ${{ steps.identity.outputs.reservation_id }}
       source_sha: ${{ steps.identity.outputs.source_sha }}
       version: ${{ steps.identity.outputs.version }}
     steps:
       - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
         with:
+          ref: ${{ inputs.source_sha }}
           fetch-depth: 0
           persist-credentials: false
+      - uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4
+        with:
+          name: frozen-attempt
+          run-id: ${{ inputs.frozen_run_id }}
+          github-token: ${{ github.token }}
+          path: build/evidence
       - id: identity
         env:
           GH_TOKEN: ${{ github.token }}
+          RELEASE_TAG: ${{ inputs.tag }}
+          SOURCE_SHA: ${{ inputs.source_sha }}
+          FROZEN_RUN_ID: ${{ inputs.frozen_run_id }}
+          FROZEN_SHA256: ${{ inputs.frozen_sha256 }}
         run: |
+          test "$GITHUB_RUN_ATTEMPT" = 1
           test "$GITHUB_REPOSITORY" = neuroqp/neuroqp-aperture
+          test "$(git rev-parse HEAD)" = "$SOURCE_SHA"
           version=$(python3 scripts/release/release.py check)
-          test "$GITHUB_REF_NAME" = "v$version"
+          test "$RELEASE_TAG" = "v$version"
           git merge-base --is-ancestor HEAD origin/main
-          if gh release view "$GITHUB_REF_NAME" >/dev/null 2>&1; then
+          remote_sha=$(git ls-remote origin "refs/tags/$RELEASE_TAG" "refs/tags/$RELEASE_TAG^{}" | sort -k2 | tail -n1 | cut -f1)
+          test "$remote_sha" = "$SOURCE_SHA"
+          python3 scripts/release/bounded.py trusted-run "$FROZEN_RUN_ID" release-evidence.yml
+          if gh release view "$RELEASE_TAG" >/dev/null 2>&1; then
             echo 'Release already exists. Never rebuild or overwrite release assets.' >&2
             exit 1
           fi
-          python3 scripts/release/release.py source-material build/corresponding-source --fetch
-          echo "source_sha=$(git rev-parse HEAD)" >> "$GITHUB_OUTPUT"
+          FROZEN_SHA256="$FROZEN_SHA256" python3 -c 'import os,sys; sys.path.insert(0,"scripts/release"); from bounded import read,identity,same_identity,validate_readiness,validate_deadline; from release import digest; from pathlib import Path; p=Path("build/evidence/frozen-attempt.json"); assert digest(p)==os.environ["FROZEN_SHA256"], "Frozen attempt bytes differ"; r=read(p); current=identity(); same_identity(r,current); validate_readiness(r["readiness"],current); validate_deadline(r)'
+          python3 scripts/release/bounded.py deadline build/evidence/frozen-attempt.json
+          # A durable one-way tag reservation prevents both reruns and new dispatches
+          # from rebuilding the same final packages after any failed Stage B job.
+          gh release create "$RELEASE_TAG" --verify-tag --target "$SOURCE_SHA" --title "Aperture $version build reservation" --notes "Frozen attempt: $FROZEN_RUN_ID/$FROZEN_SHA256. Stage B run: $GITHUB_RUN_ID. Failed reservations are retained; never rebuild this tag." --draft --prerelease --latest=false
+          reservation_id=$(gh api "repos/$GITHUB_REPOSITORY/releases?per_page=100" --jq ".[] | select(.tag_name == \"$RELEASE_TAG\" and .draft == true) | .id")
+          test -n "$reservation_id"
+          echo "reservation_id=$reservation_id" >> "$GITHUB_OUTPUT"
+          echo "source_sha=$SOURCE_SHA" >> "$GITHUB_OUTPUT"
           echo "version=$version" >> "$GITHUB_OUTPUT"
       - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
         with:
-          name: corresponding-source
-          path: build/corresponding-source/*
+          name: frozen-attempt
+          path: build/evidence/frozen-attempt.json
           if-no-files-found: error
-          retention-days: 14
-  packages:
+          retention-days: 30
+  source:
     needs: identity
-    uses: ./.github/workflows/package-build.yml
-    with:
-      source_sha: ${{ needs.identity.outputs.source_sha }}
-      signed: true
-    secrets:
-      TAURI_SIGNING_PRIVATE_KEY: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY }}
-      TAURI_SIGNING_PRIVATE_KEY_PASSWORD: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY_PASSWORD }}
-  candidate:
-    needs: [identity, packages]
     runs-on: ubuntu-24.04
-    permissions:
-      contents: write
+    timeout-minutes: 5
     steps:
       - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
         with:
@@ -64,29 +102,95 @@ jobs:
           persist-credentials: false
       - uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4
         with:
+          name: frozen-attempt
+          path: build/evidence
+      - name: Load operator-reviewed corresponding source plan
+        env:
+          SOURCE_REVIEW_JSON: ${{ inputs.source_review_json }}
+        run: python3 -c 'import os; from pathlib import Path; p=Path("build/evidence/source-review.json"); p.write_text(os.environ["SOURCE_REVIEW_JSON"],encoding="utf-8")'
+      - name: Require the once-only source assembly inside the original frozen deadline
+        env:
+          SOURCE_REVIEW_SHA256: ${{ inputs.source_review_sha256 }}
+        run: python3 scripts/release/bounded.py source-receipt build/evidence/frozen-attempt.json build/evidence/source-review.json --plan-sha256 "$SOURCE_REVIEW_SHA256"
+      - name: Fetch reviewed corresponding source once within original frozen deadline
+        env:
+          SOURCE_SHA: ${{ needs.identity.outputs.source_sha }}
+          SOURCE_REVIEW_SHA256: ${{ inputs.source_review_sha256 }}
+        run: python3 scripts/release/bounded.py run build/evidence/frozen-attempt.json build/evidence/source-material.json --seconds 240 -- python3 scripts/release/release.py source-material build/corresponding-source --fetch --plan build/evidence/source-review.json --plan-sha256 "$SOURCE_REVIEW_SHA256" --source-sha "$SOURCE_SHA" --attempt build/evidence/frozen-attempt.json
+      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
+        if: always()
+        with:
+          name: stage-b-source-timing
+          path: build/evidence/source-material.json
+          if-no-files-found: ignore
+          retention-days: 30
+      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
+        with:
+          name: corresponding-source
+          path: build/corresponding-source/*
+          if-no-files-found: error
+          retention-days: 30
+  packages:
+    needs: [identity, source]
+    uses: ./.github/workflows/package-build.yml
+    with:
+      source_sha: ${{ needs.identity.outputs.source_sha }}
+      source_review_sha256: ${{ inputs.source_review_sha256 }}
+    secrets:
+      TAURI_SIGNING_PRIVATE_KEY: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY }}
+      TAURI_SIGNING_PRIVATE_KEY_PASSWORD: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY_PASSWORD }}
+  candidate:
+    needs: [identity, packages]
+    runs-on: ubuntu-24.04
+    timeout-minutes: 5
+    permissions:
+      contents: write
+      actions: read
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+        with:
+          ref: ${{ needs.identity.outputs.source_sha }}
+          persist-credentials: false
+      - uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4
+        with:
+          name: frozen-attempt
+          path: build/evidence
+      - uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4
+        with:
           pattern: packages-*
           path: build/release
           merge-multiple: true
-      - uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4
-        with:
-          name: corresponding-source
-          path: build/release
       - run: sudo apt-get update && sudo apt-get install -y minisign
+        timeout-minutes: 2
       - name: Assemble and verify candidate
+        timeout-minutes: 3
         env:
           VERSION: ${{ needs.identity.outputs.version }}
           SOURCE_SHA: ${{ needs.identity.outputs.source_sha }}
+          SOURCE_REVIEW_SHA256: ${{ inputs.source_review_sha256 }}
         run: |
-          python3 scripts/release/release.py metadata build/release --version "$VERSION" --source-sha "$SOURCE_SHA"
+          python3 scripts/release/bounded.py deadline build/evidence/frozen-attempt.json
+          python3 scripts/release/release.py metadata build/release --version "$VERSION" --source-sha "$SOURCE_SHA" --plan build/release/Aperture-Corresponding-Source.json --plan-sha256 "$SOURCE_REVIEW_SHA256" --attempt build/evidence/frozen-attempt.json
           python3 scripts/release/release.py verify build/release --version "$VERSION" --source-sha "$SOURCE_SHA" --cryptographic
-          remote_sha=$(git ls-remote origin "refs/tags/v$VERSION" "refs/tags/v$VERSION^{}" | sort -k2 | tail -n1 | cut -f1)
-          test "$remote_sha" = "$SOURCE_SHA"
+          python3 scripts/release/bounded.py candidate build/evidence/frozen-attempt.json build/release build/evidence/frozen-candidate.json
           python3 scripts/release/release.py notes "$VERSION" > build/release-notes.md
-          printf '\nCandidate. Desktop acceptance is required before promotion.\n\nSource commit: `%s`\nSHA256SUMS digest: `%s`\n' "$SOURCE_SHA" "$(sha256sum build/release/SHA256SUMS | cut -d ' ' -f1)" >> build/release-notes.md
+          printf '\nCandidate. Stage C exact-byte native smoke is required before promotion.\n\nSource commit: `%s`\nSHA256SUMS digest: `%s`\nFrozen attempt evidence: workflow run `%s`. The 30-minute deadline includes build and promotion; previous unsigned build measured 31 minutes; this revised signed path has not yet been measured.\n' "$SOURCE_SHA" "$(sha256sum build/release/SHA256SUMS | cut -d ' ' -f1)" "$GITHUB_RUN_ID" >> build/release-notes.md
+      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
+        with:
+          name: frozen-candidate
+          path: build/evidence/frozen-candidate.json
+          if-no-files-found: error
+          retention-days: 30
       - name: Publish candidate outside latest
+        timeout-minutes: 2
         env:
           GH_TOKEN: ${{ github.token }}
           VERSION: ${{ needs.identity.outputs.version }}
           SOURCE_SHA: ${{ needs.identity.outputs.source_sha }}
+          RESERVATION_ID: ${{ needs.identity.outputs.reservation_id }}
         run: |
-          gh release create "v$VERSION" build/release/* --verify-tag --target "$SOURCE_SHA" --title "Aperture $VERSION candidate" --notes-file build/release-notes.md --prerelease --latest=false
+          python3 scripts/release/bounded.py deadline build/evidence/frozen-attempt.json
+          gh api "repos/$GITHUB_REPOSITORY/releases/$RESERVATION_ID" > build/evidence/reservation.json
+          python3 -c 'import json,os; r=json.load(open("build/evidence/reservation.json")); assert r["draft"] and r["prerelease"] and not r["assets"] and r["tag_name"] == "v"+os.environ["VERSION"], "Reservation differs or already contains assets"'
+          python3 scripts/release/bounded.py run build/evidence/frozen-attempt.json build/evidence/candidate-publication.json --seconds 120 -- gh release upload "v$VERSION" build/release/*
+          python3 scripts/release/bounded.py run build/evidence/frozen-attempt.json build/evidence/candidate-state.json --seconds 30 -- gh release edit "v$VERSION" --draft=false --title "Aperture $VERSION candidate" --notes-file build/release-notes.md --prerelease --latest=false
