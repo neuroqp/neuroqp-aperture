@@ -99,10 +99,13 @@ fn startup_image(session: State<'_, Arc<Session>>) -> Result<Option<String>, Str
 
 #[tauri::command]
 fn new_window() -> Result<(), String> {
-    std::process::Command::new(updates::launch_executable()?)
+    let mut child = std::process::Command::new(updates::launch_executable()?)
         .spawn()
-        .map(|_| ())
-        .map_err(|error| format!("Cannot open another window: {error}"))
+        .map_err(|error| format!("Cannot open another window: {error}"))?;
+    std::thread::spawn(move || {
+        let _ = child.wait();
+    });
+    Ok(())
 }
 
 fn startup_path(
