@@ -101,6 +101,10 @@ class SourceRefreshTests(unittest.TestCase):
                     "application_source_inventory_sha256": refresh.sha(inventories[release.SOURCE_INVENTORY])}
             review_path = directory / "prior-review.json"
             review_path.write_bytes(refresh.encoded(plan))
+            renamed = directory / "unreviewed-other-name.tar.xz"
+            renamed.write_bytes(b"not the reviewed archive")
+            with self.assertRaisesRegex(ValueError, "fixed corresponding-source asset name"):
+                refresh.prepare(renamed, review_path, directory, "5" * 40)
             files["package.json"] = (b'{"version":"0.2.0"}', 0o644)
             files["src-tauri/Cargo.lock"] = (lock.replace('version = "0.1.1"', 'version = "0.2.0"').encode(), 0o644)
             with mock.patch.object(refresh, "snapshot", return_value=files):

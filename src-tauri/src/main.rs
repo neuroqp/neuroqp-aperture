@@ -40,10 +40,26 @@ fn open_image(
     backend: State<'_, Backend>,
     session: State<'_, Arc<Session>>,
 ) -> Result<ImageState, String> {
+    open_image_path(Path::new(&path), &backend, &session)
+}
+
+fn open_image_path(
+    path: &Path,
+    backend: &Backend,
+    session: &Session,
+) -> Result<ImageState, String> {
     let _opening = session.opening.lock().unwrap();
-    let source = path_key(Path::new(&path)).map_err(|e| e.to_string())?;
+    // The frontend has discarded the previous image before requesting replacement.
+    // Release its presence even when path validation or opening the new image fails.
+    backend.cancel();
+    *session.loaded.lock().unwrap() = None;
+    session
+        .instances
+        .set_image(None)
+        .map_err(|e| e.to_string())?;
+    let source = path_key(path).map_err(|e| e.to_string())?;
     let initial = fingerprint(&source).map_err(|e| e.to_string())?;
-    let state = backend.open(Path::new(&path))?;
+    let state = backend.open(path)?;
     session
         .instances
         .set_image(Some(&source))
@@ -667,6 +683,48 @@ mod startup_tests {
             .unwrap()
             .contains("destination already exists"));
         drop(session);
+        std::fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn failed_image_replacement_releases_previous_presence_and_cancels_work() {
+        let root = std::env::temp_dir().join(format!(
+            "aperture-failed-replacement-{}-{}",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ));
+        std::fs::create_dir(&root).unwrap();
+        let source = root.join("source.png");
+        std::fs::write(&source, []).unwrap();
+        let unsupported = root.join("corrupt.unsupported");
+        std::fs::write(&unsupported, b"invalid image").unwrap();
+        let session = Session {
+            instances: Arc::new(Instances::new(root.join("cache")).unwrap()),
+            loaded: Mutex::new(None),
+            opening: Mutex::new(()),
+            startup: Mutex::new(None),
+        };
+        let observer = Instances::new(root.join("cache")).unwrap();
+        let backend = Backend::new(session.instances.cache_root().to_path_buf()).unwrap();
+        for failed in [
+            root.join("missing.tif"),
+            unsupported,
+            root.join("missing-parent").join("missing.tif"),
+        ] {
+            open_image_path(&source, &backend, &session).unwrap();
+            let previous = backend.current.lock().unwrap().clone().unwrap();
+            assert!(observer.others_open(&source).unwrap());
+            assert!(open_image_path(&failed, &backend, &session).is_err());
+            assert!(previous.cancel.load(Ordering::Relaxed));
+            assert!(session.loaded.lock().unwrap().is_none());
+            assert!(!observer.others_open(&source).unwrap());
+        }
+        backend.shutdown();
+        drop(session);
+        drop(observer);
         std::fs::remove_dir_all(root).unwrap();
     }
 }

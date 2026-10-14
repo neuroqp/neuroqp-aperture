@@ -67,6 +67,8 @@ def snapshot(root, source_sha):
 
 
 def prepare(archive, prior_review, root, source_sha):
+    if archive.name != release.SOURCE_ASSET:
+        raise ValueError("Prior archive must use the fixed corresponding-source asset name")
     plan = release.source_plan(prior_review)
     release.verify_source_material(archive.parent, plan)
     records = {}
