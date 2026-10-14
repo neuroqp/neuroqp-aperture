@@ -6,20 +6,83 @@ paths below are relative to the repository root.
 
 ## Build environments
 
-The reusable `package-build.yml` builds Windows on `windows-2022` and Linux in the
-pinned Debian 12 container on an Ubuntu runner. It runs frontend build/tests,
-Rust tests with a real worker executable, and Clippy before optimized packaging.
-Windows Server runner evidence does not establish Windows 11 standard-user
-behavior. Prepare native desktop environments separately.
+`native-validation.yml` is Stage A. It compiles development binaries with their
+pinned native runtimes, runs the automated functional/regression suites and
+produces reusable development evidence. Its release-profile native binaries warm the same dependency compilation cache used by Stage B without creating any Setup, portable or AppImage package. Prepare native Windows/Linux desktops
+and perform changed-area functional validation here. Optional prior-version
+fixtures are development inputs; reuse verified ones while their baseline and
+configuration stay applicable.
 
-`native-validation.yml` calls the same package workflow without updater secrets
-or signatures. Its packages cannot be promoted. Use it before release when
-packaging, platform code, toolchains or native libraries change. A routine release
-need not duplicate the full unsigned build immediately before the signed build;
-the candidate workflow runs the source checks again before packaging.
+`package-build.yml` is Stage B. It builds updater-signed final packages once,
+Windows on `windows-2022` and Linux in the pinned Debian 12 container on an Ubuntu
+runner. It consumes trusted Stage A and frozen-source evidence. It does not rerun
+frontend/Rust/worker functional suites or build an unsigned optimized edition first.
+
+The short CI `smoke-linux.sh` and `smoke-windows.ps1` check payload structure,
+bundled runtime and build identity. The versioned `smoke-desktop-*` adapters perform
+Stage C's fixed native launch/one-TIFF/render/normal-exit cases. Windows Server
+payload evidence does not establish Windows 11 standard-user behavior. Observer
+tools and every native desktop must already be ready before freeze.
 
 Pinned downloads have SHA-256 checks. Changes to toolchains, library versions,
 checksums, workflow code or release scripts require source review.
+
+## Operator sequence
+
+Use a clean reviewed checkout. Keep reports and downloads in an ignored evidence
+directory. Workflow dispatches below run from `main`; their `source_sha` identifies
+the exact validated source, not necessarily the current `main` tip.
+
+1. Run `native-validation.yml` on the reviewed feature commit. Complete affected-area
+   native functional tests and all lab-readiness checks. Submit their readiness
+   manifest with the successful validation run ID:
+
+   ```sh
+   gh workflow run release-evidence.yml --ref main -f stage=A \
+     -f source_sha="$release_sha" -f input_run_id="$validation_run" \
+     -F report_json=@readiness-input.json
+   ```
+
+2. After that evidence run succeeds, download its `release-readiness` artifact.
+   Freeze once and upload the exact original receipt:
+
+   ```sh
+   python3 scripts/release/bounded.py freeze release-readiness.json frozen-attempt.json \
+     --readiness-run-id "$readiness_run"
+   gh workflow run release-evidence.yml --ref main -f stage=B \
+     -f source_sha="$release_sha" -f input_run_id="$readiness_run" \
+     -F report_json=@frozen-attempt.json
+   ```
+
+3. Prepare source material once with `refresh-source.py --source-sha "$release_sha"
+--prior-archive PATH --prior-review PATH --attempt frozen-attempt.json
+--output FRESH_DIRECTORY --write --timeout 600`. Review the resulting external
+   manifest and archive, mark the manifest ready with its immutable publication
+   identity, and transfer those exact bytes under a new source-only tag. Validate
+   with `bounded.py source-receipt` as described in [SOURCE-MATERIAL.md](SOURCE-MATERIAL.md).
+   No runner assembles a second archive.
+4. Create and push the annotated application version tag on `$release_sha` after
+   that commit is contained in `main`. Dispatch `release.yml` from `main` with
+   `tag`, `source_sha`, `frozen_run_id`, `frozen_sha256`,
+   `source_review_json=@REVIEW.json` and `source_review_sha256`. Supply file inputs
+   with `-F` and digests with `-f`. Compute digests from exact files using `sha256sum`.
+   Watch the existing attempt; never rerun failed packaging or reset its clock.
+5. Download that candidate into a fresh directory. Run `release.py verify DIRECTORY
+--version VERSION --source-sha "$release_sha" --cryptographic`, then use the
+   prepared native adapters for only the fixed smoke cases. Make an owned AppImage
+   download executable with `chmod +x`; this does not change its byte hash.
+6. Put the six reports in one directory, named `windows11-setup.json`,
+   `windows11-portable.json`, `debian12.json`, `ubuntu24.json`, `arch-omarchy.json`
+   and `fedora-wayland.json`. Run `bounded.py compact frozen-candidate.json
+REPORT_DIRECTORY compact-reports.json`. Preserve raw reports.
+   Submit the compact file to `release-evidence.yml`, stage C, with the candidate
+   run ID. After it passes, dispatch `promote-release.yml` with `tag`, `source_sha`,
+   `candidate_run_id` and `smoke_run_id`. The original deadline must still be live.
+
+Use `gh run view RUN_ID` and `gh run download RUN_ID --name ARTIFACT` to inspect
+and obtain exact workflow artifacts. A failed or inconclusive required result
+ends the attempt; repair belongs to Stage A. These commands are an operator
+sequence, not permission to reconstruct evidence or bypass failed assertions.
 
 ## Package behavior
 
@@ -42,9 +105,7 @@ checksums, workflow code or release scripts require source review.
 All editions use the stable `com.neuroqp.aperture` identity. Preferences and
 image display caches are outside package directories. Linux uses the XDG
 application directories; Windows uses user-local application directories.
-Each process exclusively owns a reusable directory under `display-v3/slot-N`.
-Locks stay outside those directories, and cleanup only visits the owned directory.
-Generated display data uses a 2 GiB soft cache limit per directory. Saving TIFF annotations can
+Generated display data uses a 2 GiB soft cache limit. Saving TIFF annotations can
 require temporary disk space proportional to the source image. Portable means
 no installed application registration; it does not mean zero local files.
 Portable runtimes are retained by version to avoid deleting files used by another
@@ -82,7 +143,7 @@ the bundled library versions. Linux BUILDINFO records the Debian package version
 and libvips source hash. Notices and source links alone are not presented as a
 completed corresponding-source distribution.
 
-The replacement archive for this release will be reviewed and published under
+The reviewed development baseline for `0.2.0` is published under
 [`source-v0.2.0-r3`](https://github.com/neuroqp/neuroqp-aperture/releases/tag/source-v0.2.0-r3),
 separate from application releases and excluded from latest.
 `scripts/release/corresponding-source.json` pins its checksum, both native
@@ -93,76 +154,29 @@ and verifies the archive, then compares its identities against actual BUILDINFO.
 Checkout lock changes block source preflight before downloading.
 An identity mismatch blocks binary uploads and requires refreshed material.
 
-Unsigned native builds and package smoke tests remain available. Immediately
-before either platform uploads binary artifacts, the workflow downloads and
-verifies reviewed source material against that platform's actual BUILDINFO.
-If source material is missing or fails verification, the job stops at this upload
-gate after builds and smoke checks; no binary artifacts, including failed packages,
-are uploaded. Windows screenshots, process JSON, and text diagnostics can still
-be retained. Public binary CI downloads require source material too; signing or
-calling a build validation does not establish redistribution compliance.
+Development binaries and optional upgrade fixtures receive no updater signing
+secrets. Their source-material requirements still apply before public binary
+artifact uploads. Final packages use the reviewed external source plan pinned by
+SHA-256 and frozen Git identity. Missing or mismatched coverage, lockfiles, native
+identities or BUILDINFO blocks uploads. Do not weaken this gate to speed a release.
 
-Unsigned package sets include the verified source archive and its review record
-in `SHA256SUMS`, and aggregate metadata checks both native identities and each
-build's application lock hashes.
-The gate does not assemble sources or certify their distribution.
+Corresponding-source preparation happens once after source freeze. See
+[SOURCE-MATERIAL.md](SOURCE-MATERIAL.md) for the reviewed refresh command, exact-byte
+transfer/cache reuse, and the separately deferred dependency/archive split. Do not
+assemble locally and then assemble the same material again on a publisher runner.
+An external manifest avoids changing the frozen commit merely to update source
+publication metadata. Source-material tags and assets remain immutable.
 
-The current gate pins exact lockfile bytes. A version-only bump changes
-`src-tauri/Cargo.lock` and therefore also requires refreshed reviewed material and
-pins. Do this before tagging. Archive assembly is a reviewed manual step; the gate
-does not assemble it, and unchanged native dependencies do not bypass it.
+## Historical bootstrap upgrade fixtures
 
-To refresh the source artifact when version or dependency locks change:
+The retained `0.0.9` recipes were first-release bootstrap tests for `0.1.1`.
+They are not the previous-stable baseline for later releases and are not called
+by Stage B or C. [LINUX-UPGRADE-FIXTURE.md](LINUX-UPGRADE-FIXTURE.md) and
+`build-windows-upgrade-fixture.ps1` preserve that historical evidence only.
 
-1. Assemble `Aperture-Corresponding-Source.tar.xz` with the applicable exact-version
-   sources, build recipes/configuration, patches, and license material for the
-   libraries actually bundled on both platforms, including relevant statically
-   incorporated dependencies. The Windows inventory is a starting point, not a
-   complete source archive. Check Linux's actual bundled libraries against the
-   Debian versions in BUILDINFO. This completeness review remains human work.
-2. Put `SOURCE-MANIFEST.json` first in the tar archive. It must be a regular file
-   of at most 64 KiB with `schema: 1` and `native_dependencies_sha256` containing
-   `linux` and `windows` identity hashes. Each hash is SHA-256 of that platform's
-   BUILDINFO `native_dependencies` serialized with Python
-   `json.dumps(value, sort_keys=True, separators=(",", ":"), ensure_ascii=True)`
-   and encoded as UTF-8. Dependency changes require fresh material and review.
-3. Publish the reviewed archive under a fixed source-material tag in this source
-   repository, outside latest, then update `corresponding-source.json` through a
-   PR with `status: "ready"`, its version-tag asset URL, the archive's SHA-256,
-   both native identity hashes, `application_lockfiles_sha256` for `pnpm-lock.yaml`
-   and `src-tauri/Cargo.lock`, and `application_source_inventory_sha256`. Verify
-   those exact lock bytes against the archived application source inventory,
-   which the first manifest must pin under `inventory_sha256`. Use a new
-   source-material tag and preserve published
-   bytes. The workflow downloads actual bytes, checks their pinned hash and identity
-   record, then compares native identities and lock hashes against both completed
-   binary builds.
-
-The gate checks reviewed byte/dependency identities. It does not determine
-license obligations or prove that the archive's contents are complete or
-rebuildable; those claims require the source/material review above.
-
-## Previous-stable upgrade fixtures
-
-For `0.2.0`, dispatch **Native validation** with `build_upgrade_fixture: true`.
-The optional jobs run `build-previous-windows-upgrade-fixture.ps1` and
-`build-previous-linux-upgrade-fixture.sh` in isolated checkouts of released
-`v0.1.1` source, retaining its version, locks, public
-key and signed-version checks. Only an unsigned loopback transport overlay differs.
-The normal prior-source gate verifies its material, with no lockfile exception.
-The separate `windows-upgrade-fixture` and `linux-upgrade-fixture` artifacts record provenance and hashes;
-production packages remain unchanged. Signed release builds forbid this fixture.
-Updating the prior tag/SHA constant for future releases is a reviewed change.
-
-`previous-upgrade-fixture.py` prepares and records both baselines. The Linux job
-reuses the prepared Debian build environment and Cargo cache, preserves the normal
-candidate bundle, and restores it even if the fixture build fails. Both jobs
-verify that staged production assets remain unchanged.
-Run `scripts/native-appimage-update.py` with `--prior-version 0.1.1`, the actual
-candidate `--version`, AppImage and detached signature. Its supplied chooser and
-confirmation inputs still require separate native dialog observations.
-
-The [0.0.9 Linux recipe](LINUX-UPGRADE-FIXTURE.md) and
-`build-windows-upgrade-fixture.ps1` remain historical first-release bootstrap
-helpers. They are not the routine previous-stable baseline. Fixture packages are
-QA inputs, never stable releases, and must receive no signing secrets.
+For new Stage A updater work, reuse a verified fixture based on the actual
+previous stable source/version and its production key. Rebuild it only when that
+baseline or test transport changes. Keep its configuration delta, source/runtime
+identities and package hashes with the development record. A direct new Setup
+install is not proof of an upgrade. Detailed upgrade testing never becomes an
+automatic post-package matrix.

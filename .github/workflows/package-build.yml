@@ -3,20 +3,17 @@ name: Build packages
 on:
   workflow_call:
     inputs:
-      signed:
-        type: boolean
-        default: false
       source_sha:
         type: string
         required: true
-      build_upgrade_fixture:
-        type: boolean
-        default: false
+      source_review_sha256:
+        type: string
+        required: true
     secrets:
       TAURI_SIGNING_PRIVATE_KEY:
-        required: false
+        required: true
       TAURI_SIGNING_PRIVATE_KEY_PASSWORD:
-        required: false
+        required: true
 
 permissions:
   contents: read
@@ -24,177 +21,163 @@ permissions:
 jobs:
   linux:
     runs-on: ubuntu-24.04
-    timeout-minutes: 90
+    timeout-minutes: 30
     container:
       image: debian:12.12-slim@sha256:d5d3f9c23164ea16f31852f95bd5959aad1c5e854332fe00f7b3a20fcc9f635c
     env:
       APPIMAGE_EXTRACT_AND_RUN: "1"
       CARGO_INCREMENTAL: "0"
     steps:
-      - run: apt-get update && apt-get install -y --no-install-recommends git ca-certificates curl
+      - run: apt-get update && apt-get install -y --no-install-recommends git ca-certificates curl python3
       - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+        timeout-minutes: 3
         with:
           ref: ${{ inputs.source_sha }}
           persist-credentials: false
-      - name: Guard signing boundary
+      - name: Require frozen readiness before building
+        timeout-minutes: 1
         env:
-          SIGNED: ${{ inputs.signed }}
           SIGNING_KEY: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY }}
-          BUILD_UPGRADE_FIXTURE: ${{ inputs.build_upgrade_fixture }}
         run: |
-          if [ "$SIGNED" = true ]; then
-            test "$BUILD_UPGRADE_FIXTURE" != true
-            test "$GITHUB_REPOSITORY" = neuroqp/neuroqp-aperture
-            test "$GITHUB_EVENT_NAME" = push
-            case "$GITHUB_REF" in refs/tags/v*) ;; *) exit 1 ;; esac
-            test -n "$SIGNING_KEY"
-          fi
-      - run: bash scripts/release/prepare-linux.sh
+          test "$GITHUB_RUN_ATTEMPT" = 1
+          test "$GITHUB_REPOSITORY" = neuroqp/neuroqp-aperture
+          test "$GITHUB_EVENT_NAME" = workflow_dispatch
+          test "$GITHUB_REF" = refs/heads/main
+          test -n "$SIGNING_KEY"
+      - uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4
+        timeout-minutes: 3
+        with:
+          name: frozen-attempt
+          path: build/evidence
+      - run: python3 scripts/release/bounded.py deadline build/evidence/frozen-attempt.json
+        timeout-minutes: 1
+      - name: Prepare pinned Linux build tools
+        timeout-minutes: 8
+        run: python3 scripts/release/bounded.py run build/evidence/frozen-attempt.json build/evidence/linux-prepare.json --seconds 480 -- bash scripts/release/prepare-linux.sh
       - uses: pnpm/action-setup@f40ffcd9367d9f12939873eb1018b921a783ffaa # v4
+        timeout-minutes: 3
         with:
           version: 9.15.9
       - uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4
+        timeout-minutes: 3
         with:
           node-version: 22.22.0
           cache: pnpm
       - uses: dtolnay/rust-toolchain@e2a55d2ffb04f378e9626c28d38b36d230d1e12f
+        timeout-minutes: 3
         with:
           toolchain: 1.98.0
           components: rustfmt, clippy
       - uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2.9.2
+        timeout-minutes: 3
         with:
           workspaces: src-tauri
           cache-on-failure: true
-          key: debian12-vips8.18-${{ inputs.signed && 'signed' || 'unsigned' }}
+          key: debian12-vips8.18-signed
       - run: pnpm install --frozen-lockfile
-      - run: python3 scripts/release/release.py check && python3 scripts/release/test_release.py
-      - run: pnpm format:check && pnpm test && pnpm build
-      - run: cargo fmt --manifest-path src-tauri/Cargo.toml --all -- --check
-      - run: cargo build --manifest-path src-tauri/Cargo.toml --features custom-protocol --locked
-      - run: cargo test --manifest-path src-tauri/Cargo.toml --locked
-        env:
-          APERTURE_WORKER_EXECUTABLE: ${{ github.workspace }}/src-tauri/target/debug/aperture
-      - run: cargo clippy --manifest-path src-tauri/Cargo.toml --all-targets --locked -- -D warnings
-      - name: Build unsigned validation package
-        if: ${{ !inputs.signed }}
-        run: |
-          printf '%s\n' '{"bundle":{"createUpdaterArtifacts":false}}' > build/linux/unsigned.json
-          bash scripts/release/package-linux.sh --config build/linux/unsigned.json
+        timeout-minutes: 3
       - name: Build updater-signed package
-        if: inputs.signed
         env:
           TAURI_SIGNING_PRIVATE_KEY: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY }}
           TAURI_SIGNING_PRIVATE_KEY_PASSWORD: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY_PASSWORD }}
-        run: bash scripts/release/package-linux.sh
+        run: python3 scripts/release/bounded.py run build/evidence/frozen-attempt.json build/evidence/linux-build.json --seconds 1500 -- bash scripts/release/package-linux.sh
       - run: bash scripts/release/smoke-linux.sh
+        timeout-minutes: 2
+      - run: python3 scripts/release/bounded.py deadline build/evidence/frozen-attempt.json
+        timeout-minutes: 1
+      - uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4
+        timeout-minutes: 3
+        with:
+          name: corresponding-source
+          path: build/release
       - name: Verify corresponding source before binary artifact upload
-        run: python3 scripts/release/release.py source-material build/release --fetch --platform linux
+        env:
+          SOURCE_REVIEW_SHA256: ${{ inputs.source_review_sha256 }}
+          SOURCE_SHA: ${{ inputs.source_sha }}
+        run: python3 scripts/release/release.py source-material build/release --platform linux --plan build/release/Aperture-Corresponding-Source.json --plan-sha256 "$SOURCE_REVIEW_SHA256" --source-sha "$SOURCE_SHA" --attempt build/evidence/frozen-attempt.json
       - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
+        timeout-minutes: 1
+        if: always()
+        with:
+          name: stage-b-linux-timings
+          path: build/evidence/linux-*.json
+          if-no-files-found: ignore
+          retention-days: 30
+      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
+        timeout-minutes: 3
         with:
           name: packages-linux
-          path: build/release/*
-          if-no-files-found: error
-          retention-days: 14
-      - name: Build unsigned prior-version Linux upgrade fixture
-        if: ${{ inputs.build_upgrade_fixture && !inputs.signed }}
-        run: bash scripts/release/build-previous-linux-upgrade-fixture.sh
-      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
-        if: ${{ inputs.build_upgrade_fixture && !inputs.signed }}
-        with:
-          name: linux-upgrade-fixture
-          path: build/upgrade-fixture-linux/
-          if-no-files-found: error
-          retention-days: 14
-
-  validation-metadata:
-    if: ${{ !inputs.signed }}
-    needs: [linux, windows]
-    runs-on: ubuntu-24.04
-    steps:
-      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
-        with:
-          ref: ${{ inputs.source_sha }}
-          persist-credentials: false
-      - uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4
-        with:
-          pattern: packages-*
-          path: build/release
-          merge-multiple: true
-      - env:
-          SOURCE_SHA: ${{ inputs.source_sha }}
-        run: |
-          version=$(python3 scripts/release/release.py check)
-          python3 scripts/release/release.py metadata build/release --version "$version" --source-sha "$SOURCE_SHA" --unsigned
-      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
-        with:
-          name: unsigned-validation-set
           path: build/release/*
           if-no-files-found: error
           retention-days: 14
 
   windows:
     runs-on: windows-2022
-    timeout-minutes: 90
+    timeout-minutes: 30
     env:
       CARGO_INCREMENTAL: "0"
       RUSTFLAGS: -C target-feature=+crt-static
       LIBCLANG_PATH: C:\Program Files\LLVM\bin
     steps:
       - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+        timeout-minutes: 3
         with:
           ref: ${{ inputs.source_sha }}
           persist-credentials: false
-      - name: Guard signing boundary
+      - name: Require frozen readiness before building
+        timeout-minutes: 1
         env:
-          SIGNED: ${{ inputs.signed }}
           SIGNING_KEY: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY }}
-          BUILD_UPGRADE_FIXTURE: ${{ inputs.build_upgrade_fixture }}
         run: |
-          if ($env:SIGNED -eq 'true') {
-            if ($env:BUILD_UPGRADE_FIXTURE -eq 'true') { throw 'Upgrade fixtures are forbidden in signed release builds' }
-            if ($env:GITHUB_REPOSITORY -ne 'neuroqp/neuroqp-aperture' -or $env:GITHUB_EVENT_NAME -ne 'push' -or !$env:GITHUB_REF.StartsWith('refs/tags/v') -or !$env:SIGNING_KEY) { throw 'Trusted release tag and signing key required' }
-          }
+          if ($env:GITHUB_RUN_ATTEMPT -ne '1' -or $env:GITHUB_REPOSITORY -ne 'neuroqp/neuroqp-aperture' -or $env:GITHUB_EVENT_NAME -ne 'workflow_dispatch' -or $env:GITHUB_REF -ne 'refs/heads/main' -or !$env:SIGNING_KEY) { throw 'Trusted main dispatch and signing key required' }
+      - uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4
+        timeout-minutes: 3
+        with:
+          name: frozen-attempt
+          path: build/evidence
+      - run: python scripts/release/bounded.py deadline build/evidence/frozen-attempt.json
+        timeout-minutes: 1
       - uses: ilammy/msvc-dev-cmd@0b201ec74fa43914dc39ae48a89fd1d8cb592756 # v1
+        timeout-minutes: 3
         with:
           arch: x64
       - name: Install pinned portable packager
         run: choco install nsis --version=3.11 --yes --no-progress --allow-downgrade
-      - name: Check portable extraction and locking
-        run: pwsh scripts/release/test-portable.ps1
       - uses: pnpm/action-setup@f40ffcd9367d9f12939873eb1018b921a783ffaa # v4
+        timeout-minutes: 3
         with:
           version: 9.15.9
       - uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4
+        timeout-minutes: 3
         with:
           node-version: 22.22.0
           cache: pnpm
       - uses: actions/setup-python@a26af69be951a213d495a4c3e4e4022e16d87065 # v5
+        timeout-minutes: 3
         with:
           python-version: "3.12"
       - uses: dtolnay/rust-toolchain@e2a55d2ffb04f378e9626c28d38b36d230d1e12f
+        timeout-minutes: 3
         with:
           toolchain: 1.98.0
           targets: x86_64-pc-windows-msvc
           components: rustfmt, clippy
       - run: pnpm install --frozen-lockfile
-      - run: python scripts/release/release.py check; if ($LASTEXITCODE) { exit $LASTEXITCODE }; python scripts/release/test_release.py
-      - run: pwsh scripts/release/prepare-windows.ps1
+        timeout-minutes: 3
+      - name: Prepare pinned Windows dependencies
+        timeout-minutes: 6
+        run: python scripts/release/bounded.py run build/evidence/frozen-attempt.json build/evidence/windows-prepare.json --seconds 360 -- pwsh scripts/release/prepare-windows.ps1
       - name: Configure native tools
         run: |
           "APERTURE_NATIVE_DIR=$env:GITHUB_WORKSPACE\build\windows\native" >> $env:GITHUB_ENV
           "$env:GITHUB_WORKSPACE\build\windows\payload" >> $env:GITHUB_PATH
       - uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2.9.2
+        timeout-minutes: 3
         with:
           workspaces: src-tauri
           cache-on-failure: true
-          key: windows-msvc-vips8.18.7-${{ inputs.signed && 'signed' || 'unsigned' }}
+          key: windows-msvc-vips8.18.7-signed
           env-vars: APERTURE_NATIVE_DIR LIBCLANG_PATH
-      - run: pnpm test; if ($LASTEXITCODE) { exit $LASTEXITCODE }; pnpm build
-      - run: cargo build --manifest-path src-tauri/Cargo.toml --target x86_64-pc-windows-msvc --features custom-protocol --locked
-      - run: cargo test --manifest-path src-tauri/Cargo.toml --target x86_64-pc-windows-msvc --locked
-        env:
-          APERTURE_WORKER_EXECUTABLE: ${{ github.workspace }}\src-tauri\target\x86_64-pc-windows-msvc\debug\aperture.exe
-      - run: cargo clippy --manifest-path src-tauri/Cargo.toml --target x86_64-pc-windows-msvc --all-targets --locked -- -D warnings
       - name: Collect build identity and license notices
         run: |
           python scripts/release/release.py buildinfo windows build/release build/windows/dependencies.json
@@ -203,32 +186,29 @@ jobs:
           if ($LASTEXITCODE) { exit $LASTEXITCODE }
           Copy-Item build/release/BUILDINFO-windows.json build/windows/payload/BUILDINFO.json
           Copy-Item build/release/THIRD-PARTY-NOTICES-windows.txt build/windows/payload/THIRD-PARTY-NOTICES.txt
-      - name: Build unsigned validation installer
-        if: ${{ !inputs.signed }}
-        run: |
-          '{"bundle":{"createUpdaterArtifacts":false}}' | Set-Content build/windows/unsigned.json
-          pnpm exec tauri build --target x86_64-pc-windows-msvc --bundles nsis --config build/windows/unsigned.json -- --locked
       - name: Build updater-signed installer
-        if: inputs.signed
         env:
           TAURI_SIGNING_PRIVATE_KEY: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY }}
           TAURI_SIGNING_PRIVATE_KEY_PASSWORD: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY_PASSWORD }}
-        run: pnpm exec tauri build --target x86_64-pc-windows-msvc --bundles nsis -- --locked
+        run: python scripts/release/bounded.py run build/evidence/frozen-attempt.json build/evidence/windows-build.json --seconds 1500 -- cmd /d /c pnpm exec tauri build --target x86_64-pc-windows-msvc --bundles nsis -- --locked
       - name: Stage installer and build portable executable
         run: |
           $installers = @(Get-ChildItem src-tauri/target/x86_64-pc-windows-msvc/release/bundle/nsis/*.exe)
           if ($installers.Count -ne 1) { throw 'Expected exactly one installer' }
           Copy-Item $installers[0].FullName build/release/Aperture-Setup-x64.exe
           if (Test-Path ($installers[0].FullName + '.sig')) { Copy-Item ($installers[0].FullName + '.sig') build/release/Aperture-Setup-x64.exe.sig }
-          pwsh scripts/release/build-portable.ps1 -Version (python scripts/release/release.py check)
+          python scripts/release/bounded.py run build/evidence/frozen-attempt.json build/evidence/windows-portable-build.json --seconds 480 -- pwsh scripts/release/build-portable.ps1 -Version (python scripts/release/release.py check)
+          if ($LASTEXITCODE) { exit $LASTEXITCODE }
       - name: Sign portable updater asset
-        if: inputs.signed
         env:
           TAURI_SIGNING_PRIVATE_KEY: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY }}
           TAURI_SIGNING_PRIVATE_KEY_PASSWORD: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY_PASSWORD }}
-        run: pnpm exec tauri signer sign --app-version (python scripts/release/release.py check) build/release/Aperture-Portable-x64.exe
+        timeout-minutes: 1
+        run: python scripts/release/bounded.py run build/evidence/frozen-attempt.json build/evidence/windows-portable-sign.json --seconds 60 -- cmd /d /c pnpm exec tauri signer sign --app-version (python scripts/release/release.py check) build/release/Aperture-Portable-x64.exe
       - run: pwsh scripts/release/smoke-windows.ps1 -Version (python scripts/release/release.py check) -Setup build/release/Aperture-Setup-x64.exe
+        timeout-minutes: 3
       - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
+        timeout-minutes: 3
         if: always()
         with:
           name: windows-package-evidence
@@ -238,21 +218,30 @@ jobs:
             build/evidence/windows/*.txt
           if-no-files-found: ignore
           retention-days: 14
+      - run: python scripts/release/bounded.py deadline build/evidence/frozen-attempt.json
+        timeout-minutes: 1
+      - uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4
+        timeout-minutes: 3
+        with:
+          name: corresponding-source
+          path: build/release
       - name: Verify corresponding source before binary artifact upload
-        run: python scripts/release/release.py source-material build/release --fetch --platform windows
+        env:
+          SOURCE_REVIEW_SHA256: ${{ inputs.source_review_sha256 }}
+          SOURCE_SHA: ${{ inputs.source_sha }}
+        run: python scripts/release/release.py source-material build/release --platform windows --plan build/release/Aperture-Corresponding-Source.json --plan-sha256 $env:SOURCE_REVIEW_SHA256 --source-sha $env:SOURCE_SHA --attempt build/evidence/frozen-attempt.json
       - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
+        timeout-minutes: 1
+        if: always()
+        with:
+          name: stage-b-windows-timings
+          path: build/evidence/windows-*.json
+          if-no-files-found: ignore
+          retention-days: 30
+      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
+        timeout-minutes: 3
         with:
           name: packages-windows
           path: build/release/*
-          if-no-files-found: error
-          retention-days: 14
-      - name: Build unsigned prior-version Windows upgrade fixture
-        if: ${{ inputs.build_upgrade_fixture && !inputs.signed }}
-        run: pwsh scripts/release/build-previous-windows-upgrade-fixture.ps1
-      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
-        if: ${{ inputs.build_upgrade_fixture && !inputs.signed }}
-        with:
-          name: windows-upgrade-fixture
-          path: build/upgrade-fixture/
           if-no-files-found: error
           retention-days: 14

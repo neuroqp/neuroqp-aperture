@@ -1,36 +1,80 @@
-# Corresponding-source material review
+# Corresponding-source preparation
 
-## Aperture 0.2.0 refresh
+Keep the existing archive coverage and integrity gate. Native libraries, Cargo/npm
+dependencies, patches, build recipes and notices remain required. A faster release
+must not reuse the 0.1.1 application snapshot for different application source or
+pretend that its old lockfile covers a changed dependency set.
 
-The planned `source-v0.2.0-r3` archive refreshes the application snapshot and Cargo root
-version from the reviewed `0.1.1` material. The removed single-instance plugin
-reduces the Cargo registry closure to 522 crates and 26,992 vendor files. All
-60 npm archives and the Windows/Linux native sources, patches and build inputs
-remain unchanged. Original source releases remain immutable.
+## One assembly after source freeze
 
-`refresh-source.py` takes a full committed application SHA, checks the prior
-reviewed archive and native build inputs, and rejects new dependency resolutions.
-It records a pending publication plan, then reads the complete new archive back
-to verify every retained member and generated application file. Review that
-receipt and dependency closure before changing the plan to ready and publishing.
-The final publication plan is excluded from its own application inventory to
-avoid a checksum cycle. Binary uploads still require exact application lock and
-native dependency identities from each actual build.
+Use `refresh-source.py` with the original frozen-attempt receipt, exact frozen
+commit, and a verified previous archive/review. It reuses reviewed non-application
+members when native/dependency inputs match, creates the small application
+snapshot from exact Git blobs, and writes one refreshed archive. Dependency
+changes that the reuse recipe cannot establish require separate source review.
 
-For a slow local upload, **Native validation** can reproduce and publish already
-reviewed source bytes on a GitHub runner. Select its source-only mode with the
-full reviewed snapshot SHA after pinning the ready plan. The snapshot must match
-the current tree except for that publication plan, and the rebuilt archive must
-match every pinned identity. The job only completes an existing draft source
-release; it cannot overwrite assets or modify a published release. This is a
-manual transport step after source review, not automatic source approval.
+The external review initially says `assembled-awaiting-review`. Review archive
+coverage, exact app/member bytes, native/lock identities and checksum before
+marking that external manifest ready. Keep this manifest outside the frozen Git
+commit. Pin its exact file SHA-256. The original deadline covers assembly and review;
+a timeout preserves diagnostic output and blocks publication.
 
-Previous-stable upgrade fixtures retain the released `0.1.1` application source,
-version, locks and verification key. Their loopback transport overlay is separate
-QA material, checked through the ordinary prior-source gate. The historical
-`0.0.9` bootstrap exception below does not apply to those fixtures.
+```sh
+python3 scripts/release/refresh-source.py --help
+python3 scripts/release/release.py source-material --help
+```
 
-## Retained 0.1.1 review
+The refresh command requires `--source-sha`, `--prior-archive`, `--prior-review`,
+`--output` and, for an actual write, `--attempt` and `--write`. The external source
+gate accepts `--plan PATH --plan-sha256 SHA256 --source-sha FROZEN_SHA --attempt ORIGINAL_RECEIPT`. It checks the
+manifest hash before parsing and verifies the archived application inventory and
+actual members against that frozen Git tree. Only the existing publication JSON
+is excluded; missing, changed, duplicate, extra or unsafe members fail.
+
+`bounded.py source-receipt ORIGINAL_RECEIPT REVIEW.json --plan-sha256 SHA256`
+also checks the assembly proof against the original freeze and deadline. Preserve
+the original receipt bytes. Reformatting or recreating that file changes its identity.
+
+## Development runtime coverage
+
+The reviewed `0.2.0` development baseline is `source-v0.2.0-r3`, pinned by the
+tracked `corresponding-source.json`. It retains 522 Cargo crates after removal of
+the single-instance plugin, all 60 npm archives and the reviewed native sources.
+Its application snapshot predates the cache-publication fix and Stage A/B/C
+workflow changes. Development coverage therefore identifies the current public
+Git commit separately; Stage B refreshes the exact frozen application snapshot.
+
+Stage A uses `release.py development-source` before uploading development runtimes.
+It verifies the immutable baseline archive once, actual native BUILDINFO and notices,
+and the current public Git source. It emits a small `DEVELOPMENT-SOURCE.json` into
+the runtime archive instead of uploading the baseline sources again. Only a proven
+Cargo root-package version change is allowed against the baseline lockfile; changed
+dependencies or native inputs require separate source review. This coverage record
+does not replace Stage B's exact frozen-source archive gate.
+
+Publish the once-assembled, reviewed bytes under a new source-only tag outside
+Latest. Transfer those same bytes to Stage B. Do not rebuild on a runner to upload
+them. The candidate source job downloads/validates the published archive once and
+passes its artifact to the package jobs. Existing exact-checksum archives and
+`--cache PATH` entries are reused; checksum mismatch requires a verified fetch.
+Lock mismatches fail before network access. Each actual BUILDINFO still has to
+match the frozen source, lockfiles and native dependencies.
+
+## Remaining size limitation
+
+The current schema is still a monolithic archive of roughly 1.7 GiB. Reusing
+reviewed dependency members avoids another dependency audit, but the refreshed
+archive still contains them. This PR removes redundant assembly/download/copy
+work; it does not claim that each new application snapshot uploads only a few MiB.
+
+A separate immutable dependency archive plus a small application snapshot needs a
+new composition manifest, explicit dependency-closure proof and migration of the
+source gate and release asset set. That is deferred as a separate change rather
+than expanding this process repair. Existing public archives/tags remain usable
+and immutable. Until that change, one full source assembly and review can consume
+a substantial part of the 30-minute budget; an overrun blocks the attempt.
+
+## Historical 0.1.1 review
 
 The corresponding-source archive preserves original upstream sources, patches,
 build recipes, license material and application dependencies for Aperture 0.1.1.
@@ -99,5 +143,5 @@ application records, dependency closure and archive writer. Whole-package offlin
 or byte-identical rebuilds have not been demonstrated. Windows expected native
 metadata and the retained Linux baseline must match each actual candidate's
 BUILDINFO before any binary upload. A dependency change requires refreshed source
-material and review. Desktop acceptance and updater-key backup are separate
-release requirements.
+material and review. Stage A functional validation, Stage C package smoke and recoverable updater-key
+backup are separate requirements. The source review does not establish them.

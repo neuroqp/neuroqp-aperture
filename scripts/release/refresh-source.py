@@ -2,8 +2,9 @@
 """Refresh an immutable application snapshot using reviewed, unchanged sources.
 
 Python 3.10+, no downloads or publication. Without --write, validate inputs and
-emit a local preparation receipt only. Review the completed archive before
-changing corresponding-source.json or publishing under a new source-only tag.
+emit a local preparation receipt only. Review the completed archive and mark its
+external review ready before transferring those bytes. Keep the tracked
+corresponding-source.json unchanged after freezing the application commit.
 """
 
 import argparse
@@ -11,14 +12,14 @@ import hashlib
 import io
 import json
 import lzma
+import sys
 from pathlib import Path, PurePosixPath
-import re
-import subprocess
 import tarfile
 
 import release
+import bounded
 
-EXCLUDED = "scripts/release/corresponding-source.json"
+EXCLUDED = release.SOURCE_PUBLICATION
 RECORDS = ("SOURCE-MANIFEST.json", release.SOURCE_INVENTORY,
            "application/cargo-vendor-inventory.json", "application/npm-inventory.json")
 NATIVE_INPUTS = ("scripts/release/prepare-linux.sh",
@@ -52,18 +53,7 @@ def cargo_packages(body):
 
 
 def snapshot(root, source_sha):
-    if not re.fullmatch(r"[0-9a-f]{40}", source_sha):
-        raise ValueError("Provide an immutable full application commit SHA")
-    data = subprocess.check_output(["git", "archive", "--format=tar", source_sha], cwd=root)
-    files = {}
-    with tarfile.open(fileobj=io.BytesIO(data)) as tree:
-        for member in tree:
-            if member.isdir() or member.name == EXCLUDED:
-                continue
-            if not member.isfile():
-                raise ValueError(f"Application snapshot requires regular files: {member.name}")
-            files[member.name] = (tree.extractfile(member).read(), 0o755 if member.mode & 0o111 else 0o644)
-    return files
+    return release.application_snapshot(root, source_sha)
 
 
 def prepare(archive, prior_review, root, source_sha):
@@ -124,6 +114,7 @@ def prepare(archive, prior_review, root, source_sha):
     generated.update({"application/source/" + name: body for name, (body, _) in files.items()})
     review = {**plan, "status": "assembled-awaiting-review", "sha256": None,
               "url": f"https://github.com/neuroqp/neuroqp-aperture/releases/download/source-v{json.loads(files['package.json'][0])['version']}/{release.SOURCE_ASSET}",
+              "application_source_sha": source_sha,
               "application_lockfiles_sha256": locks,
               "application_source_inventory_sha256": sha(generated[release.SOURCE_INVENTORY])}
     if review["url"] == plan["url"]:
@@ -136,6 +127,7 @@ def write_archive(archive, output, generated, files, removed, preset=3):
         raise ValueError("XZ preset must be an integer from 0 through 9")
     # Preserve every native/npm payload byte. Only the application snapshot,
     # its identities, and no-longer-locked Cargo directories are replaced.
+    started_at = bounded.timestamp()
     expected = {}
     temporary = output.with_suffix(".partial")
     try:
@@ -168,6 +160,7 @@ def write_archive(archive, output, generated, files, removed, preset=3):
                 if name not in expected:
                     mode = files[name.removeprefix("application/source/")][1] if name.startswith("application/source/") else 0o644
                     add(name, body, mode)
+        compression_finished_at = bounded.timestamp()
         if temporary.stat().st_size >= 2 * 1024 ** 3:
             raise ValueError("Refreshed archive exceeds GitHub's 2 GiB asset limit")
         seen = set()
@@ -183,7 +176,9 @@ def write_archive(archive, output, generated, files, removed, preset=3):
             raise ValueError("Refreshed source readback has missing members")
         temporary.replace(output)
         return {"members_verified": len(seen), "archive_bytes": output.stat().st_size,
-                "sha256": release.digest(output), "xz_preset": preset}
+                "sha256": release.digest(output), "xz_preset": preset,
+                "compression_started_at": started_at, "compression_finished_at": compression_finished_at,
+                "readback_finished_at": bounded.timestamp()}
     finally:
         temporary.unlink(missing_ok=True)
 
@@ -198,6 +193,70 @@ class HashReader:
         return body
 
 
+def attempt_inputs(path, root, source_sha, trusted_sha256=None):
+    body = path.read_bytes()
+    checksum = sha(body)
+    if trusted_sha256 is not None and checksum != trusted_sha256:
+        raise ValueError("Frozen attempt bytes changed during source preparation")
+    expected = json.loads(body.decode("utf-8-sig"))
+    bounded.same_identity(expected, bounded.identity(root))
+    if expected.get("stage") != "B" or expected["source_sha"] != source_sha:
+        raise ValueError("Source assembly requires the original Stage B frozen source SHA")
+    bounded.validate_deadline(expected)
+    return expected, checksum
+
+
+def assemble(args, expected=None, attempt_sha256=None):
+    started_at = bounded.timestamp()
+    receipt = {"schema": 1, "stage": "B", "application_source_sha": args.source_sha,
+               "started_at": started_at, "archive_written": args.write,
+               "status": "preparation-only" if not args.write else "fail", "forced_kill": False}
+    if expected is not None:
+        receipt.update({key: expected[key] for key in ("source_sha", "build_inputs_sha256", "freeze_started_at", "deadline_at")})
+        receipt.update(attempt_sha256=attempt_sha256, timeout_seconds=min(args.timeout, bounded.deadline_remaining(expected)))
+    args.output.mkdir(parents=True)
+    try:
+        generated, files, removed, review = prepare(args.prior_archive, args.prior_review, args.root, args.source_sha)
+        receipt.update(prior_archive_sha256=release.digest(args.prior_archive), native_payloads_unchanged=True,
+                       removed_cargo_directories=sorted(removed),
+                       changed_application_files=json.loads(generated["SOURCE-MANIFEST.json"])["refresh"]["changed_application_files"],
+                       application_source_files=len(files), preparation_finished_at=bounded.timestamp())
+        if args.write:
+            bounded.validate_deadline(expected)
+            receipt.update(write_archive(args.prior_archive, args.output / release.SOURCE_ASSET, generated, files, removed, args.xz_preset))
+            review["sha256"] = receipt["sha256"]
+            # Retain completed bytes for diagnosis even if the original deadline expired.
+            (args.output / release.SOURCE_REVIEW).write_bytes(encoded(review))
+            bounded.validate_deadline(expected)
+            release.verify_source_material(args.output, review, root=args.root, source_sha=args.source_sha)
+            bounded.validate_deadline(expected)
+            receipt["status"] = "assembled-awaiting-review"
+        else:
+            (args.output / release.SOURCE_REVIEW).write_bytes(encoded(review))
+    except Exception as exc:
+        receipt.update(status="fail", error=str(exc))
+        raise
+    finally:
+        receipt["finished_at"] = bounded.timestamp()
+        if expected is not None:
+            receipt["deadline_exceeded"] = bounded.parsed(receipt["finished_at"]) >= bounded.parsed(expected["deadline_at"])
+        (args.output / "REFRESH.json").write_bytes(encoded(receipt))
+    print(json.dumps(receipt, sort_keys=True))
+
+
+def reserve_assembly(root, expected, attempt_sha256, output):
+    frozen = {key: expected[key] for key in ("source_sha", "build_inputs_sha256", "freeze_started_at", "deadline_at")}
+    marker = root / "build/evidence" / ("source-assembly-" + sha(encoded(frozen)) + ".json")
+    marker.parent.mkdir(parents=True, exist_ok=True)
+    try:
+        with marker.open("xb") as reserved:
+            reserved.write(encoded({**frozen, "attempt_sha256": attempt_sha256, "output": str(output.resolve()),
+                                    "status": "reserved", "started_at": bounded.timestamp()}))
+    except FileExistsError as exc:
+        raise ValueError("Frozen attempt already used its one source assembly; preserve diagnostics and return to Stage A") from exc
+    return marker
+
+
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--prior-archive", required=True, type=Path)
@@ -206,24 +265,64 @@ def main():
     parser.add_argument("--output", required=True, type=Path, help="New, empty, local material directory")
     parser.add_argument("--root", type=Path, default=release.ROOT)
     parser.add_argument("--write", action="store_true")
+    parser.add_argument("--attempt", type=Path, help="Original frozen-attempt.json; required for actual assembly")
+    parser.add_argument("--timeout", type=int, default=600, help="Whole assembly step cap, also limited by the original attempt deadline")
     parser.add_argument("--xz-preset", type=int, choices=range(10), default=3, help="XZ compression level; 0 is fastest, 3 is the historical default")
+    parser.add_argument("--assemble-worker", action="store_true", help=argparse.SUPPRESS)
+    parser.add_argument("--attempt-sha256", help=argparse.SUPPRESS)
     args = parser.parse_args()
     if args.prior_archive.name != release.SOURCE_ASSET or args.output.exists():
         parser.error("Use the fixed prior archive name and a new output directory; published bytes must be preserved")
-    generated, files, removed, review = prepare(args.prior_archive, args.prior_review, args.root, args.source_sha)
-    args.output.mkdir(parents=True)
-    receipt = {"application_source_sha": args.source_sha, "prior_archive_sha256": release.digest(args.prior_archive),
-               "native_payloads_unchanged": True, "removed_cargo_directories": sorted(removed),
-               "changed_application_files": json.loads(generated["SOURCE-MANIFEST.json"])["refresh"]["changed_application_files"],
-               "application_source_files": len(files), "archive_written": args.write}
-    if args.write:
-        receipt.update(write_archive(args.prior_archive, args.output / release.SOURCE_ASSET, generated, files, removed, args.xz_preset))
-        review["sha256"] = receipt["sha256"]
-        # The ordinary gate still requires an explicit reviewed ready plan.
-        release.verify_source_material(args.output, review)
-    (args.output / release.SOURCE_REVIEW).write_bytes(encoded(review))
-    (args.output / "REFRESH.json").write_bytes(encoded(receipt))
-    print(json.dumps(receipt, sort_keys=True))
+    if not 1 <= args.timeout <= bounded.ATTEMPT_SECONDS:
+        parser.error("Assembly timeout must be from 1 to 1800 seconds")
+    if args.write and args.attempt is None:
+        parser.error("--write requires the original --attempt; source preparation cannot reset its deadline")
+    expected, attempt_sha256 = attempt_inputs(args.attempt, args.root, args.source_sha, args.attempt_sha256) if args.attempt else (None, None)
+    if not args.write or args.assemble_worker:
+        assemble(args, expected, attempt_sha256)
+        return
+    command = [sys.executable, str(Path(__file__).resolve()), "--prior-archive", str(args.prior_archive.resolve()),
+               "--prior-review", str(args.prior_review.resolve()), "--source-sha", args.source_sha,
+               "--output", str(args.output.resolve()), "--root", str(args.root.resolve()), "--write",
+               "--attempt", str(args.attempt.resolve()), "--attempt-sha256", attempt_sha256,
+               "--timeout", str(args.timeout), "--xz-preset", str(args.xz_preset), "--assemble-worker"]
+    marker = reserve_assembly(args.root, expected, attempt_sha256, args.output)
+    report_path = args.output / "ASSEMBLY.json"
+    try:
+        code = bounded.run_bounded(expected, args.timeout, command, report_path)
+        report = bounded.read(report_path)
+    except Exception as exc:
+        code = 1
+        report = {**{key: expected[key] for key in ("schema", "source_sha", "build_inputs_sha256", "freeze_started_at", "deadline_at")},
+                  "stage": "B", "status": "fail", "forced_kill": False, "error": str(exc),
+                  "started_at": bounded.timestamp(), "finished_at": bounded.timestamp()}
+        bounded.write_report(report_path, report)
+    report["attempt_sha256"] = attempt_sha256
+    report["evidence"] = "REFRESH.json"
+    review_path = args.output / release.SOURCE_REVIEW
+    if not code:
+        try:
+            bounded.validate_deadline(expected)
+            receipt = bounded.read(args.output / "REFRESH.json")
+            if receipt.get("status") != "assembled-awaiting-review" or receipt.get("deadline_exceeded") is not False:
+                raise ValueError("Source assembly did not complete within the original frozen attempt")
+        except (ValueError, OSError) as exc:
+            code = 1
+            report.update(status="fail", error=str(exc))
+    if review_path.exists():
+        review = json.loads(review_path.read_bytes())
+        review["assembly_attempt"] = {key: report[key] for key in ("schema", "stage", "source_sha", "build_inputs_sha256", "freeze_started_at", "deadline_at", "started_at", "finished_at", "status", "forced_kill")}
+        review["assembly_attempt"].update(attempt_sha256=attempt_sha256, archive_sha256=review.get("sha256"))
+        if (args.output / "REFRESH.json").exists():
+            review["assembly_attempt"]["refresh_receipt_sha256"] = release.digest(args.output / "REFRESH.json")
+        review_path.write_bytes(encoded(review))
+    if code:
+        # A killed process may have left only partial bytes; never resume/reassemble them.
+        report["diagnostic_files"] = [{"name": path.name, "bytes": path.stat().st_size}
+                                      for path in args.output.iterdir() if path.is_file() and path.name != report_path.name]
+    bounded.write_report(report_path, report)
+    bounded.write_report(marker, {**report, "output": str(args.output.resolve())})
+    raise SystemExit(code)
 
 
 if __name__ == "__main__":

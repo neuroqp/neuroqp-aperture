@@ -1,50 +1,169 @@
-name: Native validation
+name: Stage A development validation
 
 on:
   workflow_dispatch:
+  workflow_call:
     inputs:
-      prepare_source:
-        description: Reproduce the reviewed source archive and publish its existing source-only draft
-        type: boolean
-        default: false
       source_sha:
-        description: Full reviewed application snapshot commit for source-only publication
         type: string
-        default: ""
-      build_upgrade_fixture:
-        description: Build isolated v0.1.1 prior-code Windows Setup and Linux AppImage upgrade fixtures
-        type: boolean
-        default: false
+        required: true
 
 permissions:
   contents: read
 
 jobs:
-  packages:
-    if: ${{ !inputs.prepare_source }}
-    uses: ./.github/workflows/package-build.yml
-    with:
-      source_sha: ${{ github.sha }}
-      signed: false
-      build_upgrade_fixture: ${{ inputs.build_upgrade_fixture }}
-
-  reviewed-source:
-    if: ${{ inputs.prepare_source && github.repository == 'neuroqp/neuroqp-aperture' && github.event_name == 'workflow_dispatch' }}
+  linux:
     runs-on: ubuntu-24.04
-    timeout-minutes: 30
-    permissions:
-      contents: write
+    timeout-minutes: 45
+    container:
+      image: debian:12.12-slim@sha256:d5d3f9c23164ea16f31852f95bd5959aad1c5e854332fe00f7b3a20fcc9f635c
+    env:
+      APPIMAGE_EXTRACT_AND_RUN: "1"
+      CARGO_INCREMENTAL: "0"
+    steps:
+      - run: apt-get update && apt-get install -y --no-install-recommends git ca-certificates curl
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+        with:
+          ref: ${{ inputs.source_sha || github.sha }}
+          persist-credentials: false
+      - run: bash scripts/release/prepare-linux.sh
+      - uses: pnpm/action-setup@f40ffcd9367d9f12939873eb1018b921a783ffaa # v4
+        with:
+          version: 9.15.9
+      - uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4
+        with:
+          node-version: 22.22.0
+          cache: pnpm
+      - uses: dtolnay/rust-toolchain@e2a55d2ffb04f378e9626c28d38b36d230d1e12f
+        with:
+          toolchain: 1.98.0
+          components: rustfmt, clippy
+      - uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2.9.2
+        with:
+          workspaces: src-tauri
+          cache-on-failure: true
+          key: debian12-vips8.18-signed
+      - run: pnpm install --frozen-lockfile
+      - run: python3 scripts/release/release.py check && python3 scripts/release/test_release.py && python3 scripts/release/test_bounded.py && python3 scripts/release/test_smoke_desktop.py && python3 scripts/release/test-source-windows.py
+      - run: pnpm format:check && pnpm test && pnpm build
+      - run: cargo fmt --manifest-path src-tauri/Cargo.toml --all -- --check
+      - run: cargo build --manifest-path src-tauri/Cargo.toml --release --features custom-protocol --locked
+      - run: cargo test --manifest-path src-tauri/Cargo.toml --locked
+        env:
+          APERTURE_WORKER_EXECUTABLE: ${{ github.workspace }}/src-tauri/target/release/aperture
+      - run: cargo clippy --manifest-path src-tauri/Cargo.toml --all-targets --locked -- -D warnings
+      - uses: actions/cache@0057852bfaa89a56745cba8c7296529d2fc39830 # v4
+        with:
+          path: build/source-baseline
+          key: development-source-${{ runner.os }}-${{ hashFiles('scripts/release/corresponding-source.json') }}
+      - name: Stage native development runtime
+        run: |
+          mkdir -p build/evidence build/development/linux/bin build/development/linux/lib
+          cp src-tauri/target/release/aperture /usr/bin/vips /usr/bin/vipsheader /usr/bin/tiffinfo build/development/linux/bin/
+          # The Stage A Debian desktop already supplies GTK/WebKit and system codecs.
+          cp -L /usr/lib/x86_64-linux-gnu/libvips.so.42 build/development/linux/lib/
+          cp build/linux/dependencies.json build/development/linux/
+          cp LICENSE build/development/linux/LICENSE.txt
+          python3 scripts/release/release.py buildinfo linux build/development/linux build/linux/dependencies.json
+          python3 scripts/release/notices.py linux build/linux/native-notices.txt build/development/linux/THIRD-PARTY-NOTICES-linux.txt
+          # Reuse reviewed native/vendor bytes and current public Git source.
+          # Baseline sources stay outside the development artifact; no new archive assembly.
+          python3 scripts/release/release.py development-source --platform linux --source-sha "$(git rev-parse HEAD)" --directory build/development/linux --baseline-directory build/source-baseline --fetch
+          tar -czf build/evidence/development-linux.tar.gz -C build/development linux
+      - name: Record successful development validation
+        run: python3 scripts/release/bounded.py automated linux src-tauri/target/release/aperture build/evidence/stage-a-linux.json
+      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
+        with:
+          name: stage-a-linux
+          path: |
+            build/evidence/development-linux.tar.gz
+            build/linux/dependencies.json
+            build/evidence/stage-a-linux.json
+            dist/
+          if-no-files-found: error
+          retention-days: 30
+
+  windows:
+    runs-on: windows-2022
+    timeout-minutes: 45
+    env:
+      CARGO_INCREMENTAL: "0"
+      RUSTFLAGS: -C target-feature=+crt-static
+      LIBCLANG_PATH: C:\Program Files\LLVM\bin
     steps:
       - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
         with:
-          ref: ${{ github.sha }}
-          fetch-depth: 0
+          ref: ${{ inputs.source_sha || github.sha }}
           persist-credentials: false
-      - run: python3 scripts/release/test_release.py
-      - name: Reproduce and publish only exact reviewed source bytes
+      - uses: ilammy/msvc-dev-cmd@0b201ec74fa43914dc39ae48a89fd1d8cb592756 # v1
+        with:
+          arch: x64
+      - name: Install pinned portable packager
+        run: choco install nsis --version=3.11 --yes --no-progress --allow-downgrade
+      - name: Check portable extraction and locking
+        run: pwsh scripts/release/test-portable.ps1
+      - uses: pnpm/action-setup@f40ffcd9367d9f12939873eb1018b921a783ffaa # v4
+        with:
+          version: 9.15.9
+      - uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4
+        with:
+          node-version: 22.22.0
+          cache: pnpm
+      - uses: actions/setup-python@a26af69be951a213d495a4c3e4e4022e16d87065 # v5
+        with:
+          python-version: "3.12"
+      - uses: dtolnay/rust-toolchain@e2a55d2ffb04f378e9626c28d38b36d230d1e12f
+        with:
+          toolchain: 1.98.0
+          targets: x86_64-pc-windows-msvc
+          components: rustfmt, clippy
+      - run: pnpm install --frozen-lockfile
+      - run: python scripts/release/release.py check; if ($LASTEXITCODE) { exit $LASTEXITCODE }; python scripts/release/test_release.py; if ($LASTEXITCODE) { exit $LASTEXITCODE }; python scripts/release/test_bounded.py; if ($LASTEXITCODE) { exit $LASTEXITCODE }; python scripts/release/test_smoke_desktop.py; if ($LASTEXITCODE) { exit $LASTEXITCODE }; python scripts/release/test-source-windows.py
+      - run: pwsh scripts/release/prepare-windows.ps1
+      - name: Configure native tools
+        run: |
+          "APERTURE_NATIVE_DIR=$env:GITHUB_WORKSPACE\build\windows\native" >> $env:GITHUB_ENV
+          "$env:GITHUB_WORKSPACE\build\windows\payload" >> $env:GITHUB_PATH
+      - uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2.9.2
+        with:
+          workspaces: src-tauri
+          cache-on-failure: true
+          key: windows-msvc-vips8.18.7-signed
+          env-vars: APERTURE_NATIVE_DIR LIBCLANG_PATH
+      - run: pnpm format:check; if ($LASTEXITCODE) { exit $LASTEXITCODE }; pnpm test; if ($LASTEXITCODE) { exit $LASTEXITCODE }; pnpm build
+      - run: cargo fmt --manifest-path src-tauri/Cargo.toml --all -- --check
+      - run: pwsh scripts/release/test-smoke-desktop-windows.ps1
+      - run: cargo build --manifest-path src-tauri/Cargo.toml --target x86_64-pc-windows-msvc --release --features custom-protocol --locked
+      - run: cargo test --manifest-path src-tauri/Cargo.toml --target x86_64-pc-windows-msvc --locked
         env:
-          GH_TOKEN: ${{ github.token }}
-          SOURCE_SHA: ${{ inputs.source_sha }}
-          PREPARE_SOURCE: ${{ inputs.prepare_source }}
-          BUILD_UPGRADE_FIXTURE: ${{ inputs.build_upgrade_fixture }}
-        run: python3 scripts/release/publish-reviewed-source.py
+          APERTURE_WORKER_EXECUTABLE: ${{ github.workspace }}\src-tauri\target\x86_64-pc-windows-msvc\release\aperture.exe
+      - run: cargo clippy --manifest-path src-tauri/Cargo.toml --target x86_64-pc-windows-msvc --all-targets --locked -- -D warnings
+      - uses: actions/cache@0057852bfaa89a56745cba8c7296529d2fc39830 # v4
+        with:
+          path: build/source-baseline
+          key: development-source-${{ runner.os }}-${{ hashFiles('scripts/release/corresponding-source.json') }}
+      - name: Stage native development runtime
+        run: |
+          Copy-Item src-tauri/target/x86_64-pc-windows-msvc/release/aperture.exe build/windows/payload/aperture.exe
+          python scripts/release/release.py buildinfo windows build/windows/payload build/windows/dependencies.json
+          if ($LASTEXITCODE) { exit $LASTEXITCODE }
+          python scripts/release/notices.py windows build/windows/native-notices.txt build/windows/payload/THIRD-PARTY-NOTICES-windows.txt
+          if ($LASTEXITCODE) { exit $LASTEXITCODE }
+          # The source baseline is verified once here and never enters this runtime ZIP.
+          python scripts/release/release.py development-source --platform windows --source-sha (git rev-parse HEAD) --directory build/windows/payload --baseline-directory build/source-baseline --fetch
+          if ($LASTEXITCODE) { exit $LASTEXITCODE }
+          # Runtime files, development executable and pinned dependency identities travel together.
+          python -c "import shutil; shutil.make_archive('build/evidence/development-windows', 'zip', 'build/windows/payload')"
+          if ($LASTEXITCODE) { exit $LASTEXITCODE }
+      - name: Record successful development validation
+        run: python scripts/release/bounded.py automated windows src-tauri/target/x86_64-pc-windows-msvc/release/aperture.exe build/evidence/stage-a-windows.json
+      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
+        with:
+          name: stage-a-windows
+          path: |
+            build/evidence/development-windows.zip
+            build/windows/dependencies.json
+            build/evidence/stage-a-windows.json
+            dist/
+          if-no-files-found: error
+          retention-days: 30
