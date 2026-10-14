@@ -76,10 +76,10 @@ def source_plan(path, trusted_sha256=None):
 def application_snapshot(root, source_sha):
     if not re.fullmatch(r"[0-9a-f]{40}", source_sha or ""):
         raise ValueError("Source SHA must be a full Git commit ID")
-    if subprocess.check_output(["git", "cat-file", "-t", source_sha], cwd=root).strip() != b"commit":
+    if subprocess.check_output(["git", "-c", f"safe.directory={root}", "cat-file", "-t", source_sha], cwd=root).strip() != b"commit":
         raise ValueError("Frozen source SHA must identify a Git commit")
     # Read raw Git objects so export-ignore/export-subst cannot alter the tree.
-    tree = subprocess.check_output(["git", "ls-tree", "-rz", source_sha], cwd=root)
+    tree = subprocess.check_output(["git", "-c", f"safe.directory={root}", "ls-tree", "-rz", source_sha], cwd=root)
     entries = []
     for row in tree.split(b"\0"):
         if not row:
@@ -92,7 +92,7 @@ def application_snapshot(root, source_sha):
         if kind != b"blob" or mode not in (b"100644", b"100755"):
             raise ValueError(f"Frozen application tree requires regular files: {name}")
         entries.append((name, int(mode[-3:], 8), object_sha))
-    objects = subprocess.check_output(["git", "cat-file", "--batch"], cwd=root,
+    objects = subprocess.check_output(["git", "-c", f"safe.directory={root}", "cat-file", "--batch"], cwd=root,
                                       input=b"".join(object_sha + b"\n" for _, _, object_sha in entries))
     files, offset = {}, 0
     for name, mode, object_sha in entries:

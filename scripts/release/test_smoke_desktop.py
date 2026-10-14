@@ -15,6 +15,12 @@ spec.loader.exec_module(smoke)
 
 
 class DesktopSmokeTests(unittest.TestCase):
+    def test_session_startup_can_use_launch_budget_but_other_calls_stay_short(self):
+        self.assertEqual(smoke.request_timeout("POST", "/session", 85), 85)
+        self.assertEqual(smoke.request_timeout("POST", "/session", 4), 4)
+        self.assertEqual(smoke.request_timeout("GET", "/status", 85), 10)
+        self.assertEqual(smoke.request_timeout("POST", "/session/owned/execute/async", 85), 10)
+
     def test_display_backend_uses_only_reciprocal_socket_peers(self):
         rows = [
             'u_str ESTAB 0 0 * 101 * 202 users:(("aperture",pid=42,fd=5))',
@@ -121,6 +127,12 @@ class DesktopSmokeTests(unittest.TestCase):
                 smoke.ppm_spread(capture, [100, 10, 180, 120])
             capture.write_bytes(b"P6\n200 150\n255\n" + bytes([44] * 200 * 150 * 3))
             self.assertEqual(smoke.ppm_spread(capture, [10, 10, 180, 120])["spread"], 0)
+            pixels = bytearray([44] * 200 * 150 * 3)
+            pixels[(70 * 200 + 100) * 3:(70 * 200 + 100) * 3 + 3] = bytes([240] * 3)
+            capture.write_bytes(b"P6\n200 150\n255\n" + pixels)
+            result = smoke.ppm_spread(capture, [10, 10, 180, 120])
+            self.assertGreater(result["sample_range"], 35)
+            self.assertEqual(result["spread"], 0)
 
     @unittest.skipUnless(hasattr(smoke.os, "getuid"), "Linux executable and UID validation")
     def test_asset_and_helper_identity_verified_before_launch(self):
