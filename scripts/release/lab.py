@@ -10,6 +10,7 @@ import os
 from pathlib import Path
 import re
 import shutil
+import signal
 import stat
 import subprocess
 import sys
@@ -223,7 +224,26 @@ def qemu(root, args, mutate=False, timeout=180):
         command = ["bwrap", "--unshare-user", "--uid", str(os.getuid()), "--gid", str(os.getgid()),
                    "--ro-bind", str(rootfs), "/", "--proc", "/proc", "--dev", "/dev", "--tmpfs", "/tmp",
                    "--bind" if mutate else "--ro-bind", str(root), "/work", "/usr/bin/qemu-img", *map(guest, args)]
-    return subprocess.check_output(list(map(str, command)), text=True, timeout=timeout)
+    command = list(map(str, command))
+    process = subprocess.Popen(command, stdout=subprocess.PIPE, text=True, start_new_session=True)
+    try:
+        output, _ = process.communicate(timeout=timeout)
+    except subprocess.TimeoutExpired:
+        # bwrap can exit while its converter remains alive. Stop our whole group.
+        for sig in (signal.SIGTERM, signal.SIGKILL):
+            try:
+                os.killpg(process.pid, sig)
+            except ProcessLookupError:
+                pass
+            try:
+                process.communicate(timeout=5)
+            except subprocess.TimeoutExpired:
+                if sig == signal.SIGKILL:
+                    raise
+        raise
+    if process.returncode:
+        raise subprocess.CalledProcessError(process.returncode, command, output=output)
+    return output
 
 
 def recovered(root, receipt):

@@ -1,6 +1,11 @@
-"""Offline lab guards. Tests use disposable files and mocked qemu only."""
+"""Offline lab guards using disposable files/tools; no VM or real image mutation."""
 
 import json
+import os
+import signal
+import subprocess
+import sys
+import time
 from pathlib import Path
 import tempfile
 import unittest
@@ -201,12 +206,42 @@ class LabTests(unittest.TestCase):
         self.file("environments/debian12/rootfs/usr/bin/qemu-img")
         (self.root / "environments/debian12/rootfs/work").mkdir()
         with patch.object(lab.shutil, "which", side_effect=lambda name: "/usr/bin/bwrap" if name == "bwrap" else None), \
-                patch.object(lab.subprocess, "check_output", return_value="{}") as run:
+                patch.object(lab.subprocess, "Popen") as run:
+            run.return_value.communicate.return_value = ("{}", None)
+            run.return_value.returncode = 0
             lab.qemu(self.root, ["info", "--output=json", disk])
         argv = run.call_args.args[0]
         self.assertIn("/work", argv)
         self.assertIn("/work/" + lab.DISK, argv)
         self.assertNotIn("/lab", argv)
+        self.assertTrue(run.call_args.kwargs["start_new_session"])
+
+    def test_tool_timeout_stops_child_even_after_parent_exits_and_pipe_closes(self):
+        pidfile = self.root / "child.pid"
+        child = ("import os,signal,time;from pathlib import Path;"
+                 "signal.signal(signal.SIGTERM,signal.SIG_IGN);"
+                 f"Path({str(pidfile)!r}).write_text(str(os.getpid()));time.sleep(60)")
+        parent = self.file("parent.py", (
+            "import subprocess,sys,time\n"
+            f"subprocess.Popen([sys.executable,'-c',{child!r}],stdout=subprocess.DEVNULL,stderr=subprocess.DEVNULL)\n"
+            "time.sleep(60)\n").encode())
+        try:
+            with patch.object(lab.shutil, "which", return_value=sys.executable):
+                with self.assertRaises(subprocess.TimeoutExpired):
+                    lab.qemu(self.root, [parent], timeout=1)
+            self.assertTrue(pidfile.exists(), "child must be ready before the timeout")
+            process = Path("/proc") / pidfile.read_text()
+            for _ in range(50):
+                if not process.exists() or not (process / "cmdline").read_bytes():
+                    break
+                time.sleep(0.02)
+            self.assertTrue(not process.exists() or not (process / "cmdline").read_bytes())
+        finally:
+            if pidfile.exists():
+                try:
+                    os.kill(int(pidfile.read_text()), signal.SIGKILL)
+                except ProcessLookupError:
+                    pass
 
 
 if __name__ == "__main__":

@@ -69,8 +69,10 @@ for a temporary copy. It uses the existing `qemu-img convert -c`, compares all
 guest-visible sectors with `qemu-img compare`, and replaces the original only
 after successful comparison and an unchanged original identity. Conversion and
 comparison share one 30 minute maintenance deadline. The receipt preserves tool
-output and elapsed time. A failure keeps
-the original and temporary output for inspection. TPM and UEFI are untouched.
+output and elapsed time. Each tool runs in its own process group. A timeout
+sends TERM, then KILL to that group with bounded waits, including converter
+children left behind by bubblewrap; timeout always fails the operation. A failure
+keeps the original and temporary output for inspection. TPM and UEFI are untouched.
 Never compact an image that backs an overlay. A successful compaction receipt
 can certify the unchanged logical contents for base registration.
 
@@ -155,3 +157,13 @@ compaction, sector comparison and reviewed retirement of the rollback.
 Durable receipts are under `artifacts/bounded-process-resume-lab-20261014`;
 Linux still has verified live installer ISOs and no prepared persistent desktop
 bases.
+
+The release 0.2.0 preparation made one corrected conversion attempt with a shared
+480-second cap. Conversion timed out before comparison; the original disk and
+TPM/UEFI/private credentials remained unchanged. The verified cold original is
+now registered read-only, with a 200704-byte disposable Stage A overlay. No VM
+was booted. Exact reviewed cleanup removed the unverified temporary image after
+its converter stopped; 26421784576 exclusive extent bytes were retired, with
+failure, header, identity, reference and cleanup evidence retained under
+`artifacts/release-020-lab-preflight-20261014`. The rollback remains preserved;
+no compaction saving or 40-50 GiB retained-lab target is claimed.
