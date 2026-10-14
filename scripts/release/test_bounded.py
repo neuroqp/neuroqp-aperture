@@ -26,6 +26,21 @@ def smoke(expected, environment):
 
 
 class BoundedTests(unittest.TestCase):
+    def test_workflow_build_changes_invalidate_reusable_native_inputs(self):
+        files = {"src/main.ts": "1", "src-tauri/src/lib.rs": "2", **{f".github/workflows/{name}.yml": "3" for name in ("native-validation", "package-build", "release")}}
+        def inputs():
+            return b"\0".join(f"100644 blob {blob * 40}\t{path}".encode() for path, blob in files.items()) + b"\0"
+        with patch.object(bounded, "git_inputs", side_effect=lambda root: inputs()), patch.object(bounded.subprocess, "check_output", return_value="a" * 40):
+            before = bounded.identity()["component_inputs"]
+            for name in ("native-validation", "package-build", "release"):
+                path = f".github/workflows/{name}.yml"
+                files[path] = "4"
+                after = bounded.identity()["component_inputs"]
+                self.assertNotEqual(before["packaging"], after["packaging"])
+                self.assertEqual(before["frontend"], after["frontend"])
+                self.assertEqual(before["backend"], after["backend"])
+                files[path] = "3"
+
     def test_only_complete_exact_byte_native_smoke_passes(self):
         expected = identity()
         rows = [smoke(expected, name) for name in bounded.ENVIRONMENTS]

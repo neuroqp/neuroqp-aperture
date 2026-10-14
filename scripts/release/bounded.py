@@ -58,7 +58,7 @@ def identity(root=ROOT):
     for component, prefixes in (
         ("frontend", ("src/", "index.html", "package.json", "pnpm-lock.yaml", "tsconfig", "vite.config")),
         ("backend", ("src-tauri/",)),
-        ("packaging", ("scripts/release/build-portable.ps1", "scripts/release/windows-portable.nsi", "scripts/release/windows-installer-hooks.nsh", "scripts/release/prepare-", "scripts/release/package-linux.sh", "scripts/release/windows-dependencies.json")),
+        ("packaging", (".github/workflows/native-validation.yml", ".github/workflows/package-build.yml", ".github/workflows/release.yml", "scripts/release/build-portable.ps1", "scripts/release/windows-portable.nsi", "scripts/release/windows-installer-hooks.nsh", "scripts/release/prepare-", "scripts/release/package-linux.sh", "scripts/release/windows-dependencies.json")),
     ):
         rows = [entry for entry in entries if entry and entry.split(b"\t", 1)[1].decode().startswith(prefixes)]
         components[component] = hashlib.sha256(b"\0".join(rows)).hexdigest()
