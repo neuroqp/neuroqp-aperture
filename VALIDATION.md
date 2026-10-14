@@ -1,3 +1,18 @@
+# Validation history
+
+This is a chronological development log. Its results and pending items describe
+those dated builds, not the current release gate. Use [RELEASING.md](RELEASING.md)
+and the [candidate checklist](scripts/release/RELEASE-ACCEPTANCE.md) for releases.
+Keep historical failures and observations intact.
+
+The first stable release, [v0.1.1](https://github.com/neuroqp/neuroqp-aperture/releases/tag/v0.1.1),
+completed acceptance on Windows 11 as a standard user and Arch/Omarchy, Debian 12,
+Ubuntu 24 and Fedora 44 desktops. The
+[final acceptance record](https://github.com/neuroqp/neuroqp-aperture/pull/11#issuecomment-6161735702)
+records the tested source/checksum identities, upgrade fixtures, preserved assets,
+production verification and observation limits. Windows 10 remains unverified
+and Windows publisher signing remains pending.
+
 # Linux validation
 
 Validated the real Tauri debug binary on October 8, 2026 using WebKitWebDriver,
