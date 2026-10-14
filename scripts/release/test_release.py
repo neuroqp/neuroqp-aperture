@@ -19,11 +19,11 @@ notices = importlib.util.module_from_spec(spec)
 spec.loader.exec_module(notices)
 
 
-def reviewed_source(directory, root):
+def reviewed_source(directory, root, version="0.1.0"):
     (root / "scripts/release").mkdir(parents=True)
     (root / "CHANGELOG.md").write_text((release.ROOT / "CHANGELOG.md").read_text(encoding="utf-8"), encoding="utf-8")
     (root / "src-tauri").mkdir()
-    (root / "src-tauri/Cargo.lock").write_bytes(b'[[package]]\nname = "aperture"\nversion = "0.1.0"\n\n[[package]]\nname = "dep"\nversion = "1.0.0"\n')
+    (root / "src-tauri/Cargo.lock").write_bytes(('[[package]]\nname = "aperture"\nversion = "' + version + '"\n\n[[package]]\nname = "dep"\nversion = "1.0.0"\n').encode())
     (root / "pnpm-lock.yaml").write_bytes(b"lockfileVersion: '9.0'\n")
     locks = release.lockfile_hashes(root)
     inventory = json.dumps({"schema": 1, "files": [{"path": name, "sha256": checksum} for name, checksum in locks.items()]}).encode()
@@ -233,15 +233,15 @@ class ReleaseTests(unittest.TestCase):
             directory.mkdir()
             root = Path(folder) / "repository"
             for platform in ("linux", "windows"):
-                (directory / f"BUILDINFO-{platform}.json").write_text(json.dumps({"version": "0.1.0", "source_sha": "a" * 40}))
-            reviewed_source(directory, root)
+                (directory / f"BUILDINFO-{platform}.json").write_text(json.dumps({"version": "0.1.1", "source_sha": "a" * 40}))
+            reviewed_source(directory, root, version="0.1.1")
             for name in ("package.json", "src-tauri/tauri.conf.json"):
-                (root / name).write_text('{"version":"0.1.0"}')
-            (root / "src-tauri/Cargo.toml").write_text('[package]\nname = "aperture"\nversion = "0.1.0"\n')
+                (root / name).write_text('{"version":"0.1.1"}')
+            (root / "src-tauri/Cargo.toml").write_text('[package]\nname = "aperture"\nversion = "0.1.1"\n')
             production = (root / "src-tauri/Cargo.lock").read_bytes()
             delta = directory / "test-deltas/src-tauri/Cargo.lock"
             delta.parent.mkdir(parents=True)
-            delta.write_bytes(production.replace(b'name = "aperture"\nversion = "0.1.0"', b'name = "aperture"\nversion = "0.0.9"'))
+            delta.write_bytes(production.replace(b'name = "aperture"\nversion = "0.1.1"', b'name = "aperture"\nversion = "0.0.9"'))
             path = directory / "BUILDINFO-windows.json"
             info = json.loads(path.read_text())
             info["version"] = "0.0.9"
@@ -250,8 +250,9 @@ class ReleaseTests(unittest.TestCase):
             with self.assertRaisesRegex(ValueError, "windows application lockfiles"):
                 release.source_material(directory, root=root, platform="windows")
             release.source_material(directory, root=root, platform="windows", upgrade_fixture=True)
-            with mock.patch.object(release, "current_version", return_value="0.2.0"), self.assertRaisesRegex(ValueError, "0.1.0 to 0.0.9"):
-                release.source_material(directory, root=root, platform="windows", upgrade_fixture=True)
+            for other in ("0.1.0", "0.2.0"):
+                with self.subTest(candidate_version=other), mock.patch.object(release, "current_version", return_value=other), self.assertRaisesRegex(ValueError, "0.1.1 to 0.0.9"):
+                    release.source_material(directory, root=root, platform="windows", upgrade_fixture=True)
             plan = release.source_plan(root / "scripts/release/corresponding-source.json")
             with self.assertRaisesRegex(ValueError, "windows application lockfiles"):
                 release.verify_source_material(directory, plan, builds=True)

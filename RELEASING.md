@@ -22,7 +22,7 @@ This updates `package.json`, Tauri configuration, Cargo metadata, and Cargo's ro
 lockfile entry together. Move the relevant `CHANGELOG.md` entries from
 `Unreleased` into a dated `0.2.0` section. Describe user-visible improvements,
 fixes, limitations, and any action needed during an upgrade. Run the checks and
-open a PR; merge only after review. The first version is `0.1.0`.
+open a PR; merge only after review. The first stable version is `0.1.1`; the `0.1.0` candidate was not promoted.
 
 ## Build locations and checks
 
@@ -124,7 +124,7 @@ and libvips source hash. Notices and source links alone are not presented as a
 completed corresponding-source distribution.
 
 The reviewed first-release archive is published under
-[`source-v0.1.0`](https://github.com/neuroqp/neuroqp-aperture/releases/tag/source-v0.1.0),
+[`source-v0.1.1`](https://github.com/neuroqp/neuroqp-aperture/releases/tag/source-v0.1.1),
 separate from application releases and excluded from latest.
 `scripts/release/corresponding-source.json` pins its checksum, both native
 dependency identities, exact Cargo/pnpm lock hashes and the archived application
@@ -176,7 +176,7 @@ To refresh the source artifact when dependencies change:
 
 The separate unsigned prior-version fixture must use `source-material --platform
 windows --upgrade-fixture`. Its preserved `test-deltas/src-tauri/Cargo.lock` may
-change only the aperture root version from `0.1.0` to `0.0.9`; its actual BUILDINFO must hash
+change only the aperture root version from `0.1.1` to `0.0.9`; its actual BUILDINFO must hash
 that exact file. Production upload and metadata gates have no fixture exception.
 
 The gate checks reviewed byte/dependency identities. It does not determine
@@ -230,12 +230,14 @@ Use disposable copies of generated fixtures for saving. Never modify source
 microscopy datasets. Record actual results rather than marking an untested item
 as passed.
 
-For `0.1.0`, Windows acceptance covers Windows 11. Windows 10 remains unverified
+For `0.1.1`, Windows acceptance covers Windows 11. Windows 10 remains unverified
 and does not block the first release; do not describe it as validated.
 
 1. **Windows 11 x64 standard user:** install without elevation, launch from
    shortcut, open PNG/JPEG/BMP/TIFF/BigTIFF, and save/reopen point annotations.
-   Test on a clean machine without libvips, Rust, Node, or an installed WebView2.
+   Test on a clean machine without libvips, Rust, or Node. Verify its WebView2
+   processes use the bundled Fixed runtime, including offline launch, and record
+   any system Evergreen runtime; stock Windows 11 can include a protected runtime.
    Check non-ASCII names, spaces/brackets, paths on another drive, and an allowed
    network share. Verify worker processes exit on close and cancellation.
 2. **Portable:** run offline as a standard user, check first extraction and warm

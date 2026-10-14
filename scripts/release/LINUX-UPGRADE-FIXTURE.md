@@ -1,6 +1,6 @@
 # Local Linux upgrade fixture
 
-Build the first-release `0.0.9` prior AppImage from the exact reviewed `0.1.0`
+Build the first-release `0.0.9` prior AppImage from the exact reviewed `0.1.1`
 candidate commit. Keep the candidate AppImage, signature and BUILDINFO in their
 original checkout or download directory. This recipe uses a separate local QA
 feature checkout and the package workflow's Debian 12 baseline and toolchains.
@@ -35,7 +35,7 @@ sh /tmp/rustup.sh -y --profile minimal --default-toolchain 1.98.0
 . "$HOME/.cargo/env"
 corepack enable && corepack prepare pnpm@9.15.9 --activate
 test "$(git -c safe.directory="$PWD" rev-parse HEAD)" = "$SOURCE_SHA"
-test "$(python3 scripts/release/release.py check)" = 0.1.0
+test "$(python3 scripts/release/release.py check)" = 0.1.1
 python3 scripts/release/release.py version 0.0.9
 pnpm install --frozen-lockfile
 python3 - <<'PY'
@@ -60,7 +60,7 @@ assert info['version'] == '0.0.9' and info['source_sha'] == os.environ['SOURCE_S
 def sha(path):
     with path.open('rb') as source: return hashlib.file_digest(source, 'sha256').hexdigest()
 paths = sorted(out.rglob('*')) + [Path('build/release') / name for name in ('Aperture-x86_64.AppImage', 'BUILDINFO-linux.json', 'THIRD-PARTY-NOTICES-linux.txt')] + [Path('build/linux/dependencies.json')]
-receipt = {'purpose': 'Private unsigned Linux desktop acceptance fixture', 'base_source_sha': info['source_sha'], 'candidate_version': '0.1.0', 'prior_version': info['version'], 'toolchains': info['toolchains'], 'native_dependencies': info['native_dependencies'], 'files_sha256': {str(path): sha(path) for path in paths if path.is_file()}}
+receipt = {'purpose': 'Private unsigned Linux desktop acceptance fixture', 'base_source_sha': info['source_sha'], 'candidate_version': '0.1.1', 'prior_version': info['version'], 'toolchains': info['toolchains'], 'native_dependencies': info['native_dependencies'], 'files_sha256': {str(path): sha(path) for path in paths if path.is_file()}}
 (out / 'FIXTURE.json').write_text(json.dumps(receipt, indent=2) + '\n')
 PY
 BUILD
@@ -70,7 +70,7 @@ The prior package is `$QA_ROOT/build/release/Aperture-x86_64.AppImage`; provenan
 overlay and all four replacement version files are under
 `$QA_ROOT/build/linux-upgrade-fixture`. Keep those files with the acceptance result.
 The package helper reads the current version directly when creating BUILDINFO;
-it does not require a `0.0.9` changelog entry. Only the pre-change `0.1.0` check
+it does not require a `0.0.9` changelog entry. Only the pre-change `0.1.1` check
 above reads release notes. The existing public key and signed-version requirement
 are retained; only this private fixture allows its loopback HTTP feed.
 
@@ -112,7 +112,7 @@ python3 scripts/native-appimage-update.py \
   --prior "$QA_ROOT/build/release/Aperture-x86_64.AppImage" \
   --candidate "$CANDIDATE_DIR/Aperture-x86_64.AppImage" \
   --signature "$CANDIDATE_DIR/Aperture-x86_64.AppImage.sig" \
-  --version 0.1.0 --prior-version 0.0.9 --output "$QA_SESSION/result.json"
+  --version 0.1.1 --prior-version 0.0.9 --output "$QA_SESSION/result.json"
 ```
 
 Exit that shell after acceptance to stop its owned driver. The harness copies

@@ -104,8 +104,8 @@ def verify_source_material(directory, plan, builds=False, platform=None, fixture
 def upgrade_fixture_locks(directory, root, plan):
     # Only this separate, unsigned acceptance fixture may change the root version.
     info = json.loads((directory / "BUILDINFO-windows.json").read_text(encoding="utf-8"))
-    if info["version"] != "0.0.9" or current_version(root) != "0.1.0":
-        raise ValueError("Upgrade fixture must be the separate 0.1.0 to 0.0.9 Windows acceptance build")
+    if info["version"] != "0.0.9" or current_version(root) != "0.1.1":
+        raise ValueError("Upgrade fixture must be the separate 0.1.1 to 0.0.9 Windows acceptance build")
     production = (root / "src-tauri/Cargo.lock").read_bytes()
     replacement, count = re.subn(rb'(?m)^name = "aperture"\nversion = "[^"\n]+"$', b'name = "aperture"\nversion = "0.0.9"', production)
     delta = directory / "test-deltas/src-tauri/Cargo.lock"

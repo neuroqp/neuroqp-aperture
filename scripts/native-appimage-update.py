@@ -70,7 +70,7 @@ def main():
     parser.add_argument('--prior', type=Path, required=True)
     parser.add_argument('--candidate', type=Path, required=True)
     parser.add_argument('--signature', type=Path, required=True)
-    parser.add_argument('--version', default='0.1.0')
+    parser.add_argument('--version', required=True, help='Exact signed candidate version')
     parser.add_argument('--prior-version', default='0.0.9')
     parser.add_argument('--feed-port', type=int, default=8763)
     parser.add_argument('--driver-url', default='http://127.0.0.1:4444')
