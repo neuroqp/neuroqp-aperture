@@ -7,7 +7,7 @@ import hashlib
 import json
 import math
 import os
-from pathlib import Path, PureWindowsPath
+from pathlib import Path, PurePosixPath, PureWindowsPath
 import re
 import subprocess
 import sys
@@ -43,9 +43,9 @@ def write_report(path, report):
 
 
 def git_inputs(root=ROOT):
-    subprocess.run(["git", "diff", "--exit-code", "HEAD", "--"], cwd=root, check=True, stdout=subprocess.DEVNULL)
+    subprocess.run(["git", "-c", f"safe.directory={root}", "diff", "--exit-code", "HEAD", "--"], cwd=root, check=True, stdout=subprocess.DEVNULL)
     # Git blobs normalize checkout line endings and include tracked file modes.
-    return subprocess.check_output(["git", "ls-tree", "-rz", "HEAD"], cwd=root)
+    return subprocess.check_output(["git", "-c", f"safe.directory={root}", "ls-tree", "-rz", "HEAD"], cwd=root)
 
 
 def build_inputs(root=ROOT):
@@ -62,7 +62,7 @@ def identity(root=ROOT):
     ):
         rows = [entry for entry in entries if entry and entry.split(b"\t", 1)[1].decode().startswith(prefixes)]
         components[component] = hashlib.sha256(b"\0".join(rows)).hexdigest()
-    return {"schema": 1, "source_sha": subprocess.check_output(["git", "rev-parse", "HEAD"], cwd=root, text=True).strip(), "build_inputs_sha256": build_inputs(root), "component_inputs": components}
+    return {"schema": 1, "source_sha": subprocess.check_output(["git", "-c", f"safe.directory={root}", "rev-parse", "HEAD"], cwd=root, text=True).strip(), "build_inputs_sha256": build_inputs(root), "component_inputs": components}
 
 
 def same_identity(report, expected):
@@ -120,7 +120,7 @@ def validate_readiness(report, expected, now=None):
             raise ValueError("Native desktop, fixed tiny TIFF and tools must be ready before freeze")
         if any(not isinstance(tool, dict) or not tool.get("name") or not re.fullmatch(r"[0-9a-f]{64}", tool.get("sha256", "")) for tool in row["tools"]):
             raise ValueError("Stage A must pin every prepared smoke tool")
-        path_type = PureWindowsPath if row["environment"].startswith("windows") else Path
+        path_type = PureWindowsPath if row["environment"].startswith("windows") else PurePosixPath
         if any(not path_type(tool.get("path", "")).is_absolute() for tool in row["tools"]):
             raise ValueError("Prepared observer tool paths must be absolute")
         for field in ("tiny_tiff_sha256", "helper_sha256"):

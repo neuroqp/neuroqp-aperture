@@ -68,7 +68,7 @@ jobs:
           python3 scripts/release/notices.py linux build/linux/native-notices.txt build/development/linux/THIRD-PARTY-NOTICES-linux.txt
           # Reuse reviewed native/vendor bytes and current public Git source.
           # Baseline sources stay outside the development artifact; no new archive assembly.
-          python3 scripts/release/release.py development-source --platform linux --source-sha "$(git rev-parse HEAD)" --directory build/development/linux --baseline-directory build/source-baseline --fetch
+          python3 scripts/release/release.py development-source --platform linux --source-sha "${{ inputs.source_sha || github.sha }}" --directory build/development/linux --baseline-directory build/source-baseline --fetch
           tar -czf build/evidence/development-linux.tar.gz -C build/development linux
       - name: Record successful development validation
         run: python3 scripts/release/bounded.py automated linux src-tauri/target/release/aperture build/evidence/stage-a-linux.json

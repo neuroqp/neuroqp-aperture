@@ -2,12 +2,29 @@
 
 import copy
 import datetime as dt
+import os
 from pathlib import Path
+import subprocess
 import tempfile
 import unittest
 from unittest.mock import patch
 
 import bounded
+
+
+class CheckoutTests(unittest.TestCase):
+    def test_container_ownership_exception_still_rejects_dirty_source(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory).resolve()
+            subprocess.run(["git", "init", "-q", str(root)], check=True)
+            (root / "input.txt").write_text("reviewed")
+            subprocess.run(["git", "add", "."], cwd=root, check=True)
+            subprocess.run(["git", "-c", "user.name=Test", "-c", "user.email=test@example.invalid", "commit", "-qm", "input"], cwd=root, check=True)
+            with patch.dict(os.environ, {"GIT_TEST_ASSUME_DIFFERENT_OWNER": "1"}):
+                self.assertIn(b"input.txt", bounded.git_inputs(root))
+                (root / "input.txt").write_text("changed")
+                with self.assertRaises(subprocess.CalledProcessError):
+                    bounded.git_inputs(root)
 
 
 def identity():
