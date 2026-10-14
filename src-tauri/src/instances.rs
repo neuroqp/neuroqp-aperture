@@ -66,7 +66,7 @@ impl Instances {
     pub fn set_images(&self, paths: &[PathBuf]) -> io::Result<()> {
         let paths = paths
             .iter()
-            .map(|path| path_key(path).map(|path| self.image_directory(&path)))
+            .map(|path| self.image_directory(path))
             .collect::<io::Result<Vec<_>>>()?;
         let mut images = self.images.lock().unwrap();
         let mut added = BTreeMap::new();
@@ -86,7 +86,7 @@ impl Instances {
     }
 
     pub fn others_open(&self, path: &Path) -> io::Result<bool> {
-        let directory = self.image_directory(&path_key(path)?);
+        let directory = self.image_directory(path)?;
         let entries = match fs::read_dir(directory) {
             Ok(entries) => entries,
             Err(error) if error.kind() == io::ErrorKind::NotFound => return Ok(false),
@@ -109,11 +109,29 @@ impl Instances {
     /// Serialize writes to the destination. Hold through the final changed-file
     /// check and atomic replacement; image-presence leases do not affect this.
     pub fn save_lock(&self, path: &Path) -> io::Result<SaveGuard> {
+        Ok(self.save_locks(&[path.to_path_buf()])?.pop().unwrap())
+    }
+
+    /// Sort and deduplicate coordination keys, rather than I/O paths, to avoid
+    /// locking an alias twice or taking source/destination locks in reverse order.
+    pub fn save_locks(&self, paths: &[PathBuf]) -> io::Result<Vec<SaveGuard>> {
         let directory = self.coordination.join("saves");
         fs::create_dir_all(&directory)?;
-        let lock = lock_file(&directory.join(format!("{}.lock", path_hash(&path_key(path)?))))?;
-        lock.lock()?;
-        Ok(SaveGuard { _lock: lock })
+        let paths = paths
+            .iter()
+            .map(|path| {
+                coordination_key(path)
+                    .map(|key| directory.join(format!("{}.lock", path_hash(&key))))
+            })
+            .collect::<io::Result<std::collections::BTreeSet<_>>>()?;
+        paths
+            .into_iter()
+            .map(|path| {
+                let lock = lock_file(&path)?;
+                lock.lock()?;
+                Ok(SaveGuard { _lock: lock })
+            })
+            .collect()
     }
 
     pub fn begin_update(&self) -> io::Result<UpdateGuard<'_>> {
@@ -142,8 +160,11 @@ impl Instances {
         }
     }
 
-    fn image_directory(&self, path: &Path) -> PathBuf {
-        self.coordination.join("images").join(path_hash(path))
+    fn image_directory(&self, path: &Path) -> io::Result<PathBuf> {
+        Ok(self
+            .coordination
+            .join("images")
+            .join(path_hash(&coordination_key(path)?)))
     }
 }
 
@@ -202,9 +223,55 @@ pub fn path_key(path: &Path) -> io::Result<PathBuf> {
         }
         Err(error) => return Err(error),
     };
-    #[cfg(windows)]
-    let normalized = PathBuf::from(normalized.as_os_str().to_string_lossy().to_lowercase());
     Ok(normalized)
+}
+
+fn coordination_key(path: &Path) -> io::Result<PathBuf> {
+    let path = path_key(path)?;
+    #[cfg(windows)]
+    {
+        let parent = path
+            .parent()
+            .ok_or_else(|| io::Error::other("Image path has no parent."))?;
+        if !case_sensitive_directory(parent) {
+            // Fold only coordination keys. Unicode case conversion can expand or
+            // change filesystem names, and must never feed image I/O paths.
+            let filename = path
+                .file_name()
+                .ok_or_else(|| io::Error::other("Image path has no filename."))?;
+            return Ok(parent.join(filename.to_string_lossy().to_uppercase()));
+        }
+    }
+    Ok(path)
+}
+
+#[cfg(windows)]
+fn case_sensitive_directory(path: &Path) -> bool {
+    use std::os::windows::{fs::OpenOptionsExt, io::AsRawHandle};
+    use windows_sys::Win32::Storage::FileSystem::{
+        FileCaseSensitiveInfo, GetFileInformationByHandleEx, FILE_CASE_SENSITIVE_INFO,
+        FILE_FLAG_BACKUP_SEMANTICS, FILE_READ_ATTRIBUTES,
+    };
+    // ponytail: unknown directory flags can merge unrelated coordination keys.
+    // This only adds warnings or serialization; actual I/O paths stay distinct.
+    let directory = match OpenOptions::new()
+        .access_mode(FILE_READ_ATTRIBUTES)
+        .custom_flags(FILE_FLAG_BACKUP_SEMANTICS)
+        .open(path)
+    {
+        Ok(directory) => directory,
+        Err(_) => return false,
+    };
+    let mut info = FILE_CASE_SENSITIVE_INFO { Flags: 0 };
+    let result = unsafe {
+        GetFileInformationByHandleEx(
+            directory.as_raw_handle(),
+            FileCaseSensitiveInfo,
+            (&mut info as *mut FILE_CASE_SENSITIVE_INFO).cast(),
+            std::mem::size_of::<FILE_CASE_SENSITIVE_INFO>() as u32,
+        )
+    };
+    result != 0 && info.Flags & 1 != 0
 }
 
 fn path_hash(path: &Path) -> String {
@@ -456,5 +523,87 @@ mod tests {
             instance.set_images(&[image, alias]).unwrap();
             assert_eq!(instance.images.lock().unwrap().len(), 1);
         }
+    }
+
+    #[test]
+    fn unicode_io_paths_are_preserved_and_save_keys_are_deduplicated() {
+        let root = Directory::new();
+        let image = root.0.join("İ_cells.tif");
+        fs::write(&image, "original").unwrap();
+        let actual = path_key(&image).unwrap();
+        assert_eq!(actual, fs::canonicalize(&image).unwrap());
+        assert_eq!(actual.file_name().unwrap(), "İ_cells.tif");
+        assert_eq!(fingerprint(&actual).unwrap(), fingerprint(&image).unwrap());
+        let before = fingerprint(&actual).unwrap();
+        fs::write(&image, "changed length").unwrap();
+        assert_ne!(before, fingerprint(&actual).unwrap());
+        let instance = Instances::new(root.0.join("cache")).unwrap();
+        assert_eq!(
+            instance.save_locks(&[actual.clone(), image]).unwrap().len(),
+            1
+        );
+        #[cfg(windows)]
+        if !case_sensitive_directory(&root.0) {
+            let upper = root.0.join("MISSING.tif");
+            let lower = root.0.join("missing.tif");
+            assert_eq!(
+                coordination_key(&upper).unwrap(),
+                coordination_key(&lower).unwrap()
+            );
+            assert_ne!(path_key(&upper).unwrap(), path_key(&lower).unwrap());
+            assert_eq!(instance.save_locks(&[upper, lower]).unwrap().len(), 1);
+            let sigma = root.0.join("σ.tif");
+            let final_sigma = root.0.join("ς.tif");
+            assert_eq!(
+                coordination_key(&sigma).unwrap(),
+                coordination_key(&final_sigma).unwrap()
+            );
+            assert_eq!(instance.save_locks(&[sigma, final_sigma]).unwrap().len(), 1);
+        }
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn case_sensitive_windows_directories_keep_distinct_paths_and_locks() {
+        use std::os::windows::{fs::OpenOptionsExt, io::AsRawHandle};
+        use windows_sys::Win32::Storage::FileSystem::{
+            FileCaseSensitiveInfo, SetFileInformationByHandle, FILE_CASE_SENSITIVE_INFO,
+            FILE_FLAG_BACKUP_SEMANTICS, FILE_READ_ATTRIBUTES, FILE_WRITE_ATTRIBUTES,
+        };
+        let root = Directory::new();
+        let directory = OpenOptions::new()
+            .access_mode(FILE_READ_ATTRIBUTES | FILE_WRITE_ATTRIBUTES)
+            .custom_flags(FILE_FLAG_BACKUP_SEMANTICS)
+            .open(&root.0)
+            .unwrap();
+        let info = FILE_CASE_SENSITIVE_INFO { Flags: 1 };
+        let enabled = unsafe {
+            SetFileInformationByHandle(
+                directory.as_raw_handle(),
+                FileCaseSensitiveInfo,
+                (&info as *const FILE_CASE_SENSITIVE_INFO).cast(),
+                std::mem::size_of::<FILE_CASE_SENSITIVE_INFO>() as u32,
+            )
+        };
+        if enabled == 0 {
+            let error = io::Error::last_os_error();
+            drop(directory);
+            eprintln!("Per-directory case-sensitive regression unavailable on this Windows filesystem: {error}");
+            return;
+        }
+        drop(directory);
+        assert!(case_sensitive_directory(&root.0));
+        let upper = root.0.join("A.tif");
+        let lower = root.0.join("a.tif");
+        assert_ne!(
+            coordination_key(&upper).unwrap(),
+            coordination_key(&lower).unwrap()
+        );
+        fs::write(&upper, "uppercase").unwrap();
+        fs::write(&lower, "lowercase longer").unwrap();
+        assert_ne!(path_key(&upper).unwrap(), path_key(&lower).unwrap());
+        assert_ne!(fingerprint(&upper).unwrap(), fingerprint(&lower).unwrap());
+        let instance = Instances::new(root.0.join("cache")).unwrap();
+        assert_eq!(instance.save_locks(&[upper, lower]).unwrap().len(), 2);
     }
 }

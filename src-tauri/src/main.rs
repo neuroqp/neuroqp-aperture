@@ -377,16 +377,9 @@ async fn save_annotations(
         };
         // Lock both paths in stable order so another Aperture cannot replace a
         // Save As source between the final fingerprint check and destination commit.
-        let mut paths = vec![
-            path_key(&job.source).map_err(|e| e.to_string())?,
-            path_key(target).map_err(|e| e.to_string())?,
-        ];
-        paths.sort();
-        paths.dedup();
-        let _writing = paths
-            .iter()
-            .map(|path| session.instances.save_lock(path))
-            .collect::<Result<Vec<_>, _>>()
+        let _writing = session
+            .instances
+            .save_locks(&[job.source.clone(), target.to_path_buf()])
             .map_err(|e| e.to_string())?;
         let mut status = save_warning(&session, &id, target)?;
         if fingerprint(&job.source).map_err(|e| e.to_string())? != staged_source {
