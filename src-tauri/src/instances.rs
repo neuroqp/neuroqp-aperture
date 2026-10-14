@@ -56,9 +56,8 @@ impl Instances {
         &self.cache_root
     }
 
-    pub fn set_image(&self, path: Option<&Path>) -> io::Result<bool> {
-        self.set_images(&path.into_iter().map(Path::to_path_buf).collect::<Vec<_>>())?;
-        path.map(|path| self.others_open(path)).unwrap_or(Ok(false))
+    pub fn set_image(&self, path: Option<&Path>) -> io::Result<()> {
+        self.set_images(&path.into_iter().map(Path::to_path_buf).collect::<Vec<_>>())
     }
 
     /// Hold independent leases for the loaded source and its latest Save As path.
@@ -560,6 +559,27 @@ mod tests {
             );
             assert_eq!(instance.save_locks(&[sigma, final_sigma]).unwrap().len(), 1);
         }
+    }
+
+    #[test]
+    fn image_registration_does_not_probe_other_entries_and_clear_releases_lease() {
+        let root = Directory::new();
+        let image = root.0.join("image.tif");
+        fs::write(&image, "synthetic image").unwrap();
+        let instance = Instances::new(root.0.join("cache")).unwrap();
+        let malformed = instance
+            .image_directory(&image)
+            .unwrap()
+            .join("malformed.lock");
+        fs::create_dir_all(&malformed).unwrap();
+        assert!(instance.others_open(&image).is_err());
+        instance.set_image(Some(&image)).unwrap();
+        assert!(instance.others_open(&image).is_err());
+        fs::remove_dir(&malformed).unwrap();
+        let observer = Instances::new(root.0.join("cache")).unwrap();
+        assert!(observer.others_open(&image).unwrap());
+        instance.set_image(None).unwrap();
+        assert!(!observer.others_open(&image).unwrap());
     }
 
     #[cfg(windows)]
