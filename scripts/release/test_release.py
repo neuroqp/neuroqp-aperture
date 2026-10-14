@@ -3,6 +3,7 @@
 import importlib.util
 import io
 import json
+import os
 from pathlib import Path
 import shutil
 import tarfile
@@ -362,7 +363,8 @@ class FrozenSourceTests(unittest.TestCase):
             release.subprocess.run(["git", "add", "."], cwd=root, check=True)
             release.subprocess.run(["git", "-c", "user.name=Fixture", "-c", "user.email=fixture@example.invalid", "commit", "-qm", "Fixture export attributes"], cwd=root, check=True)
             source_sha = release.subprocess.check_output(["git", "rev-parse", "HEAD"], cwd=root, text=True).strip()
-            files = release.application_snapshot(root, source_sha)
+            with mock.patch.dict(os.environ, {"GIT_TEST_ASSUME_DIFFERENT_OWNER": "1"}):
+                files = release.application_snapshot(root, source_sha)
             self.assertEqual(files["application.txt"][0], b"Frozen application implementation.\n")
             self.assertEqual(files["substitute.txt"][0], b"$Format:%H$")
             tree_sha = release.subprocess.check_output(["git", "rev-parse", "HEAD^{tree}"], cwd=root, text=True).strip()
