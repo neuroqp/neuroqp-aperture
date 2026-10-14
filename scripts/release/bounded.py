@@ -257,8 +257,8 @@ def validate_render(render, asset):
     state = observation.get("state", {})
     pixels = render.get("pixel_observation", {})
     screenshot_hash = render.get("screenshot_sha256", pixels.get("screenshot_sha256", ""))
-    if render.get("dialog_input") != "prepared fixed TIFF chooser response" or observation.get("chooser_restored") is not True or observation.get("rendered_canvas") is not True:
-        raise ValueError("Native smoke must open its fixed TIFF through the restored frontend handler and observe its visible canvas")
+    if render.get("image_input") != "startup image command line" or observation.get("rendered_canvas") is not True:
+        raise ValueError("Native smoke must open its fixed TIFF through the startup path and observe its visible canvas")
     if state.get("phase") != "ready" or state.get("previewReady") is not True or observation.get("error") is not False or observation.get("phase") != "ready":
         raise ValueError("Native smoke must observe ready image state without errors")
     spread = pixels.get("spread")
@@ -335,7 +335,7 @@ def compact_reports(expected, reports):
             def render(value):
                 observation = value.get("observation", {})
                 state = observation.get("state", {})
-                return {"observation": {"phase": observation.get("phase"), "error": observation.get("error"), "chooser_restored": observation.get("chooser_restored"), "rendered_canvas": observation.get("rendered_canvas"), "state": {key: state.get(key) for key in ("phase", "previewReady", "path", "width", "height")}}, "pixel_observation": {key: val for key, val in value.get("pixel_observation", {}).items() if key != "samples"}, **{key: value[key] for key in ("screenshot", "screenshot_sha256", "dialog_input") if key in value}}
+                return {"observation": {"phase": observation.get("phase"), "error": observation.get("error"), "rendered_canvas": observation.get("rendered_canvas"), "state": {key: state.get(key) for key in ("phase", "previewReady", "path", "width", "height")}}, "pixel_observation": {key: val for key, val in value.get("pixel_observation", {}).items() if key != "samples"}, **{key: value[key] for key in ("screenshot", "screenshot_sha256", "image_input") if key in value}}
             if step["name"] == "launch": detail = launch(detail)
             elif step["name"] == "render": detail = render(detail)
             elif step["name"] == "fuse-fallback": detail = {"launch": launch(detail.get("launch", {})), "render": render(detail.get("render", {})), "clean-exit": detail.get("clean-exit", {})}

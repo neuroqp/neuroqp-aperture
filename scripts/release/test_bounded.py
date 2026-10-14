@@ -20,7 +20,7 @@ def smoke(expected, environment):
     result = {**{key: expected[key] for key in ("schema", "source_sha", "build_inputs_sha256", "checksums_sha256", "freeze_started_at", "deadline_at")}, "stage": "C", "status": "pass", "forced_kill": False, "environment": environment, "asset_sha256": "f" * 64, "tiny_tiff_sha256": "1" * 64, "helper_sha256": "2" * 64, "attempts": 1, "started_at": now, "finished_at": now, "observer_tools": expected["assets"][environment]["tools"], "steps": [{"name": name, "status": "pass", "forced_kill": False, "started_at": now, "finished_at": now, "timeout_seconds": bounded.STEP_LIMITS[name], "detail": {}} for name in bounded.SMOKE_STEPS]}
     result.update(uid=1000, os={"Caption": "Windows 11"}, privilege={"is_admin": False, "session_id": 1})
     result["steps"][0]["detail"] = {"pid": 123, "launcher_pid": 122, "hwnd": 1234, "native_windows": [{"role": "frame"}], "process_identity": {"buildinfo": {"source_sha": expected["source_sha"]}}, "embedded_buildinfo": {"source_sha": expected["source_sha"]}, "backend": "native-Windows-WebView2" if environment.startswith("windows") else "wayland", "installer_exit_code": 0, "installed_marker_verified": True, "cold_baseline": True, "incoming_payload_id": "5" * 64}
-    result["steps"][1]["detail"] = {"dialog_input": "prepared fixed TIFF chooser response", "observation": {"phase": "ready", "error": False, "chooser_restored": True, "rendered_canvas": True, "state": {"phase": "ready", "previewReady": True, "width": 16, "height": 16}}, "pixel_observation": {"spread": 100}, "screenshot_sha256": "3" * 64}
+    result["steps"][1]["detail"] = {"image_input": "startup image command line", "observation": {"phase": "ready", "error": False, "rendered_canvas": True, "state": {"phase": "ready", "previewReady": True, "width": 16, "height": 16}}, "pixel_observation": {"spread": 100}, "screenshot_sha256": "3" * 64}
     result["steps"][2]["detail"] = {"pid": 123 if environment.startswith("windows") else 122, "exit_code": 0, "app_pid": 123, "app_exited": True, "exit_code_source": "exact AppImage launcher wait", "forced_cleanup": False, "action": "actual mouse SendInput"}
     return result
 
@@ -240,6 +240,8 @@ class BoundedTests(unittest.TestCase):
         self.assertIn("bounded.py run", packages)
         development = (root / ".github/workflows/native-validation.yml").read_text()
         self.assertIn("cargo test", development)
+        self.assertIn("--release --features custom-protocol --locked", development)
+        self.assertNotIn("target/debug/aperture", development)
         self.assertNotIn("tauri build", development)
         self.assertNotIn("package-linux.sh", development)
         for platform, job in zip(("linux", "windows"), development.split("  windows:\n")):

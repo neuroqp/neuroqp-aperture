@@ -197,7 +197,7 @@ jobs:
           if ($installers.Count -ne 1) { throw 'Expected exactly one installer' }
           Copy-Item $installers[0].FullName build/release/Aperture-Setup-x64.exe
           if (Test-Path ($installers[0].FullName + '.sig')) { Copy-Item ($installers[0].FullName + '.sig') build/release/Aperture-Setup-x64.exe.sig }
-          python scripts/release/bounded.py run build/evidence/frozen-attempt.json build/evidence/windows-portable-build.json --seconds 240 -- pwsh scripts/release/build-portable.ps1 -Version (python scripts/release/release.py check)
+          python scripts/release/bounded.py run build/evidence/frozen-attempt.json build/evidence/windows-portable-build.json --seconds 480 -- pwsh scripts/release/build-portable.ps1 -Version (python scripts/release/release.py check)
           if ($LASTEXITCODE) { exit $LASTEXITCODE }
       - name: Sign portable updater asset
         env:

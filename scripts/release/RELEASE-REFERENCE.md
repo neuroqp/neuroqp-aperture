@@ -8,7 +8,7 @@ paths below are relative to the repository root.
 
 `native-validation.yml` is Stage A. It compiles development binaries with their
 pinned native runtimes, runs the automated functional/regression suites and
-produces reusable development evidence. Prepare native Windows/Linux desktops
+produces reusable development evidence. Its release-profile native binaries warm the same dependency compilation cache used by Stage B without creating any Setup, portable or AppImage package. Prepare native Windows/Linux desktops
 and perform changed-area functional validation here. Optional prior-version
 fixtures are development inputs; reuse verified ones while their baseline and
 configuration stay applicable.

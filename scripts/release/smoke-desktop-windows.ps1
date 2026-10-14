@@ -112,7 +112,7 @@ function Evaluate-JavaScript($Expression) {
     } finally { $cancel.Dispose();$socket.Dispose() }
 }
 function Actual-State {
-    Evaluate-JavaScript '(async()=>{const state=await window.__TAURI_INTERNALS__.invoke("image_state"),canvas=document.querySelector("#viewer canvas")?.getBoundingClientRect();return {state,phase:document.querySelector("#viewer")?.dataset.phase??null,error:document.querySelector("#status")?.classList.contains("error")??false,chooser_restored:window.__apertureSmokeChooser?.restored===true,rendered_canvas:!!canvas&&canvas.width>0&&canvas.height>0};})()'
+    Evaluate-JavaScript '(async()=>{const state=await window.__TAURI_INTERNALS__.invoke("image_state"),canvas=document.querySelector("#viewer canvas")?.getBoundingClientRect();return {state,phase:document.querySelector("#viewer")?.dataset.phase??null,error:document.querySelector("#status")?.classList.contains("error")??false,rendered_canvas:!!canvas&&canvas.width>0&&canvas.height>0};})()'
 }
 function Assert-Rendered($Observation) {
     if (-not $Observation) { return $false }
@@ -219,7 +219,7 @@ public static class SmokeDesktop {
             $launcher=$i.asset_path
         }
         if ((Remaining) -le 0) { throw 'Frozen attempt deadline reached before app launch' }
-        $script:launcher=Start-Process -FilePath $launcher -PassThru
+        $script:launcher=Start-Process -FilePath $launcher -ArgumentList ('"'+$i.tiny_tiff_path+'"') -PassThru
         $r.launcher_pid=$script:launcher.Id
         $script:app=Wait-Until {
             if ($script:launcher.HasExited -and $script:launcher.ExitCode -ne 0) { throw "Actual launcher exit $($script:launcher.ExitCode) before native window" }
@@ -241,17 +241,15 @@ public static class SmokeDesktop {
         $script:target=Wait-Until {
             try { $pages=@(Invoke-RestMethod -Uri ('http://127.0.0.1:'+$i.devtools_port+'/json') -TimeoutSec 1|Where-Object {$_.type -eq 'page' -and $_.url -match '^https?://tauri\.localhost/'});if ($pages.Count -eq 1) {$pages[0]} } catch {}
         }
-        $detail=@{pid=$script:app.Id;process_started_ticks=$script:appStarted;hwnd=$h.ToInt64();path=$script:app.Path;embedded_buildinfo=$info;page_id=$script:target.id;runtime=$runtime;exe_sha256=(Get-FileHash -LiteralPath $script:app.Path).Hash.ToLowerInvariant();backend='native-Windows-WebView2'}
+        $detail=@{pid=$script:app.Id;process_started_ticks=$script:appStarted;hwnd=$h.ToInt64();path=$script:app.Path;embedded_buildinfo=$info;page_id=$script:target.id;runtime=$runtime;exe_sha256=(Get-FileHash -LiteralPath $script:app.Path).Hash.ToLowerInvariant();backend='native-Windows-WebView2';image_argument=$i.tiny_tiff_path}
         if ($Environment -eq 'windows11-setup') { $detail.installed_marker_verified=$true;$detail.installer_exit_code=$r.installer_exit_code } else { $detail.cold_baseline=$true;$detail.incoming_payload_id=$i.portable_payload_id }
         return $detail
     }
     Step 'render' {
-        $path=$i.tiny_tiff_path|ConvertTo-Json -Compress
-        Evaluate-JavaScript "(()=>{const api=window.__TAURI_INTERNALS__,original=api.invoke,path=$path;window.__apertureSmokeChooser={restored:false};api.invoke=function(command){if(command==='plugin:dialog|open'){api.invoke=original;window.__apertureSmokeChooser.restored=true;return Promise.resolve(path);}return original.apply(this,arguments);};document.getElementById('open-button').click();return true;})()"|Out-Null
-        $observation=Wait-Until { $value=Actual-State;if ((Assert-Rendered $value) -and $value.chooser_restored -and $value.rendered_canvas) {$value} }
+        $observation=Wait-Until { $value=Actual-State;if ((Assert-Rendered $value) -and $value.rendered_canvas) {$value} }
         $viewer=Wait-Until { $v=Find-Name 'Image viewer';if ($v -and -not $v.Current.IsOffscreen) {$v} }
         $pixels=Wait-Until { Capture-Pixels $viewer.Current.BoundingRectangle }
-        return @{observation=$observation;pixel_observation=$pixels;dialog_input='prepared fixed TIFF chooser response'}
+        return @{observation=$observation;pixel_observation=$pixels;image_input='startup image command line'}
     }
     Step 'clean-exit' {
         $live=Get-Process -Id $script:app.Id

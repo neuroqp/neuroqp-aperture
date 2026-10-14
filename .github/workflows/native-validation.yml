@@ -42,15 +42,15 @@ jobs:
         with:
           workspaces: src-tauri
           cache-on-failure: true
-          key: debian12-vips8.18-stage-a
+          key: debian12-vips8.18-signed
       - run: pnpm install --frozen-lockfile
       - run: python3 scripts/release/release.py check && python3 scripts/release/test_release.py && python3 scripts/release/test_bounded.py && python3 scripts/release/test_smoke_desktop.py && python3 scripts/release/test-source-windows.py
       - run: pnpm format:check && pnpm test && pnpm build
       - run: cargo fmt --manifest-path src-tauri/Cargo.toml --all -- --check
-      - run: cargo build --manifest-path src-tauri/Cargo.toml --features custom-protocol --locked
+      - run: cargo build --manifest-path src-tauri/Cargo.toml --release --features custom-protocol --locked
       - run: cargo test --manifest-path src-tauri/Cargo.toml --locked
         env:
-          APERTURE_WORKER_EXECUTABLE: ${{ github.workspace }}/src-tauri/target/debug/aperture
+          APERTURE_WORKER_EXECUTABLE: ${{ github.workspace }}/src-tauri/target/release/aperture
       - run: cargo clippy --manifest-path src-tauri/Cargo.toml --all-targets --locked -- -D warnings
       - uses: actions/cache@0057852bfaa89a56745cba8c7296529d2fc39830 # v4
         with:
@@ -59,7 +59,7 @@ jobs:
       - name: Stage native development runtime
         run: |
           mkdir -p build/evidence build/development/linux/bin build/development/linux/lib
-          cp src-tauri/target/debug/aperture /usr/bin/vips /usr/bin/vipsheader /usr/bin/tiffinfo build/development/linux/bin/
+          cp src-tauri/target/release/aperture /usr/bin/vips /usr/bin/vipsheader /usr/bin/tiffinfo build/development/linux/bin/
           # The Stage A Debian desktop already supplies GTK/WebKit and system codecs.
           cp -L /usr/lib/x86_64-linux-gnu/libvips.so.42 build/development/linux/lib/
           cp build/linux/dependencies.json build/development/linux/
@@ -71,7 +71,7 @@ jobs:
           python3 scripts/release/release.py development-source --platform linux --source-sha "$(git rev-parse HEAD)" --directory build/development/linux --baseline-directory build/source-baseline --fetch
           tar -czf build/evidence/development-linux.tar.gz -C build/development linux
       - name: Record successful development validation
-        run: python3 scripts/release/bounded.py automated linux src-tauri/target/debug/aperture build/evidence/stage-a-linux.json
+        run: python3 scripts/release/bounded.py automated linux src-tauri/target/release/aperture build/evidence/stage-a-linux.json
       - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
         with:
           name: stage-a-linux
@@ -128,15 +128,15 @@ jobs:
         with:
           workspaces: src-tauri
           cache-on-failure: true
-          key: windows-msvc-vips8.18.7-stage-a
+          key: windows-msvc-vips8.18.7-signed
           env-vars: APERTURE_NATIVE_DIR LIBCLANG_PATH
       - run: pnpm format:check; if ($LASTEXITCODE) { exit $LASTEXITCODE }; pnpm test; if ($LASTEXITCODE) { exit $LASTEXITCODE }; pnpm build
       - run: cargo fmt --manifest-path src-tauri/Cargo.toml --all -- --check
       - run: pwsh scripts/release/test-smoke-desktop-windows.ps1
-      - run: cargo build --manifest-path src-tauri/Cargo.toml --target x86_64-pc-windows-msvc --features custom-protocol --locked
+      - run: cargo build --manifest-path src-tauri/Cargo.toml --target x86_64-pc-windows-msvc --release --features custom-protocol --locked
       - run: cargo test --manifest-path src-tauri/Cargo.toml --target x86_64-pc-windows-msvc --locked
         env:
-          APERTURE_WORKER_EXECUTABLE: ${{ github.workspace }}\src-tauri\target\x86_64-pc-windows-msvc\debug\aperture.exe
+          APERTURE_WORKER_EXECUTABLE: ${{ github.workspace }}\src-tauri\target\x86_64-pc-windows-msvc\release\aperture.exe
       - run: cargo clippy --manifest-path src-tauri/Cargo.toml --target x86_64-pc-windows-msvc --all-targets --locked -- -D warnings
       - uses: actions/cache@0057852bfaa89a56745cba8c7296529d2fc39830 # v4
         with:
@@ -144,7 +144,7 @@ jobs:
           key: development-source-${{ runner.os }}-${{ hashFiles('scripts/release/corresponding-source.json') }}
       - name: Stage native development runtime
         run: |
-          Copy-Item src-tauri/target/x86_64-pc-windows-msvc/debug/aperture.exe build/windows/payload/aperture.exe
+          Copy-Item src-tauri/target/x86_64-pc-windows-msvc/release/aperture.exe build/windows/payload/aperture.exe
           python scripts/release/release.py buildinfo windows build/windows/payload build/windows/dependencies.json
           if ($LASTEXITCODE) { exit $LASTEXITCODE }
           python scripts/release/notices.py windows build/windows/native-notices.txt build/windows/payload/THIRD-PARTY-NOTICES-windows.txt
@@ -156,7 +156,7 @@ jobs:
           python -c "import shutil; shutil.make_archive('build/evidence/development-windows', 'zip', 'build/windows/payload')"
           if ($LASTEXITCODE) { exit $LASTEXITCODE }
       - name: Record successful development validation
-        run: python scripts/release/bounded.py automated windows src-tauri/target/x86_64-pc-windows-msvc/debug/aperture.exe build/evidence/stage-a-windows.json
+        run: python scripts/release/bounded.py automated windows src-tauri/target/x86_64-pc-windows-msvc/release/aperture.exe build/evidence/stage-a-windows.json
       - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
         with:
           name: stage-a-windows

@@ -55,3 +55,5 @@ Do not perform annotation/save/pixel-preservation suites, full formats, cancella
 ## Evidence retention
 
 Put the compact result and essential observations in a durable GitHub PR/release record. Link it from concise final release notes. CI artifacts expire; retain current/previous relevant package identities and compact reports independently. Record every helper/environment failure honestly. Detailed lab preparation, VM cleanup and crash recovery belong in [LAB.md](LAB.md), outside release execution.
+
+The native adapters open the fixed TIFF through the real startup command-line path introduced in 0.2.0. Use a verified 0.2.0 development or existing validation fixture when preparing this helper. A 0.1.1 fixture does not implement that entry point. Observers only read application state; they do not replace Tauri invoke or mock image loading.
