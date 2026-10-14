@@ -30,6 +30,11 @@ def utc():
     return datetime.now(timezone.utc).isoformat()
 
 
+def request_timeout(method, suffix, remaining):
+    # Session creation includes real native WebKit startup on software-rendered VMs.
+    return max(.1, remaining if method == "POST" and suffix == "/session" else min(remaining, 10))
+
+
 @contextmanager
 def bounded_action(seconds):
     """Interrupt blocking observer work without terminating the application."""
@@ -163,7 +168,9 @@ def ppm_spread(path, rect):
         for fy in (.25, .4, .5, .6, .75):
             offset = (int(y + h * fy) * width + int(x + w * fx)) * 3
             values.append(sum(pixels[offset:offset + 3]) / 3)
-    return {"spread": max(values) - min(values), "samples": values, "viewer_rect": rect, "desktop_size": [width, height]}
+    ordered = sorted(values)
+    # A cursor or one transitional bright pixel must not prove a rendered image.
+    return {"spread": ordered[-5] - ordered[4], "sample_range": max(values) - min(values), "samples": values, "viewer_rect": rect, "desktop_size": [width, height]}
 
 
 def native_nodes(pid, deadline):
@@ -295,7 +302,7 @@ def main():
     def request(method, suffix, body=None):
         if remaining() <= 0:
             raise TimeoutError("Frozen attempt deadline reached")
-        with urlopen(Request(identity["driver_url"] + suffix, data=json.dumps(body).encode() if body is not None else None, method=method, headers={"Content-Type": "application/json"}), timeout=max(.1, min(remaining(), 10))) as response:
+        with urlopen(Request(identity["driver_url"] + suffix, data=json.dumps(body).encode() if body is not None else None, method=method, headers={"Content-Type": "application/json"}), timeout=request_timeout(method, suffix, remaining())) as response:
             value = json.load(response)["value"]
         if isinstance(value, dict) and value.get("error"):
             raise RuntimeError(str(value))
@@ -371,13 +378,18 @@ def main():
         if identity.get("screenshot_scope") == "owned-window":
             subprocess.run(command, check=True, timeout=max(.1, remaining()))
         foreground = wait(active_window)
-        viewer = wait(lambda: next((row for _, row in native_nodes(pid, time.monotonic() + remaining()) if row["name"] == "Image viewer" and row["rect"]), None))
-        rect = viewer["rect"]
-        if identity.get("screenshot_scope") == "owned-window":
-            frame = foreground["rect"]
-            rect = [rect[0] - frame[0], rect[1] - frame[1], rect[2], rect[3]]
         def visible_pixels():
+            nonlocal foreground
             subprocess.run(command, check=True, timeout=max(.1, remaining()))
+            # Prepared capture can maximize the owned window. Observe its new bounds.
+            foreground = active_window()
+            viewer = next((row for _, row in native_nodes(pid, time.monotonic() + remaining()) if row["name"] == "Image viewer" and row["rect"]), None)
+            if not foreground or not viewer:
+                return None
+            rect = viewer["rect"]
+            if identity.get("screenshot_scope") == "owned-window":
+                frame = foreground["rect"]
+                rect = [rect[0] - frame[0], rect[1] - frame[1], rect[2], rect[3]]
             pixels = ppm_spread(capture, rect)
             return pixels if pixels["spread"] >= 35 else None
         pixels = wait(visible_pixels)
