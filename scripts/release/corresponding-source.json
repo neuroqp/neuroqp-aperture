@@ -3,14 +3,14 @@
     "pnpm-lock.yaml": "ce391502197571c39a3558c88de3d7c701c91f9175404e9718c84b3e62e53f84",
     "src-tauri/Cargo.lock": "fc1650e02594c79b2fa4d79c6e9fdee41fb508ad69f0ca423b5929e13df07b0a"
   },
-  "application_source_inventory_sha256": "61082ceddcb44fc575d1ca8bac55580fdb252da7f210929d54ac9f7753830faf",
+  "application_source_inventory_sha256": "e52b8cb47e8bc84c0d395143b3a6ec312d63ded7d703d7ecc3448e2c47f6b3e9",
   "asset": "Aperture-Corresponding-Source.tar.xz",
   "native_dependencies_sha256": {
     "linux": "1b13443ba7fcea076e5b8b9c0b2c38c890a025a24a70e98098ef84576d6ee461",
     "windows": "a0c0dd5352e715e83696a73ca66444e5d60a045bd1a045d38fe1daee96f84a19"
   },
   "schema": 1,
-  "sha256": "d2e11f654143a454345ee7980d958929873004e5027e99b30e7007b413be3eea",
-  "status": "assembled-awaiting-review",
+  "sha256": "91696ff543b46f157116be75f6c6ee9aaa8e173cd0e294aeae632be6ed0c8dc0",
+  "status": "ready",
   "url": "https://github.com/neuroqp/neuroqp-aperture/releases/download/source-v0.2.0-r3/Aperture-Corresponding-Source.tar.xz"
 }
