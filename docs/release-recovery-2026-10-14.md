@@ -44,12 +44,12 @@ this process repair. Rehearsals used unchanged published `0.1.1` packages and on
 `951d023f7442080f97d8201cebffae609df2ac53a45cccd0389197e9bc0090c7`.
 These are helper-development observations, not release acceptance.
 
-| Rehearsal            | Measured result                                                                                                                                                                               |
-| -------------------- | --------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
-| Linux on Omarchy     | Native launch observation failed after 90.15 seconds; no rendering pass. A later native Close request produced launcher exit 0, which proves cleanup only                                     |
-| Windows 11 Setup     | Standard-user install returned 0, installed marker and actual WebView2 process lineage passed. Overall helper failed after 63.01 seconds because it mishandled the empty pre-load image state |
-| Windows parser/seams | Passed on the licensed standard interactive account before the final observer-watchdog changes; later changes require their own Windows regression result                                     |
-| Windows portable     | No new native rehearsal performed                                                                                                                                                             |
+| Rehearsal            | Measured result                                                                                                                                                                                                                                                                                          |
+| -------------------- | -------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| Linux on Omarchy     | Native launch observation failed after 90.15 seconds; no rendering pass. A later native Close request produced launcher exit 0, which proves cleanup only                                                                                                                                                |
+| Windows 11 Setup     | Standard-user install returned 0, installed marker and actual WebView2 process lineage passed. Overall helper failed after 63.01 seconds because it mishandled the empty pre-load image state                                                                                                            |
+| Windows parser/seams | Passed on the licensed standard interactive account before final watchdog changes. Final helper/watchdog regressions then passed under Windows PowerShell 5.1 and PowerShell 7 in [PR CI](https://github.com/neuroqp/neuroqp-aperture/actions/runs/38643442294); this is helper evidence, not a GUI pass |
+| Windows portable     | No new native rehearsal performed                                                                                                                                                                                                                                                                        |
 
 The Linux rehearsal also found OS-ID and executable-permission preflight problems.
 These and the Windows image-state failure were helper/environment defects, not
@@ -61,3 +61,39 @@ The native smoke suite has not yet passed on the complete supported matrix.
 Reusable Linux desktop bases are not yet prepared. Readiness must block any new
 release until those Stage A tasks finish. The new signed build and successful
 post-build smoke durations are unmeasured, and the 30-minute target remains unproven.
+
+## Owned lab storage and shutdown
+
+The initial inventory measured 90.020 GiB of allocated files in the owned tree,
+including 76.839 GiB in `environments`. Obsolete Windows 10 files reclaimed
+14.781 GiB. A recovery reflink then protected the existing Windows 11 disk before
+boot; its shared sectors must not be counted twice.
+
+| Btrfs referenced extents, deduplicating shared sectors | Before resumed maintenance | After      |
+| ------------------------------------------------------ | -------------------------- | ---------- |
+| Whole owned release-test tree                          | 74.967 GiB                 | 67.429 GiB |
+| Environments only                                      | 62.950 GiB                 | 57.061 GiB |
+
+After a verified disk-only boot, native app exit 0 and `shutdown /s /t 0`, QMP
+recorded guest shutdown and QEMU exit 0 with no hybrid-suspend event. The owned
+VM, TPM, controller and HTTP transport are stopped. The obsolete Windows 11
+installer ISO reclaimed 7.660 GiB. A separately allocated, fully hash-equal source
+archive was replaced with a canonical hardlink, preserving its path and bytes and
+reclaiming 1.650 GiB. These operations removed 24.090 GiB across the complete
+cleanup campaign; resumed VM writes grew retained extents, so net before/after
+savings differ. Host free space and nominal disk capacities are not savings metrics.
+
+The 40–50 GiB target is not achieved. The retained Windows disk allocates
+41.336 GiB, sharing most sectors with its recovery checkpoint; the checkpoint
+still has 1.557 GiB of exclusive sectors. Linux live ISOs total 11.434 GiB.
+Offline conversion with full logical-sector comparison, followed by retiring the
+proven rollback, remains separate maintenance. No compaction or base freeze was
+performed during this bounded rehearsal.
+
+Keep one verified sparse base and small disposable CoW overlays per required OS,
+current/previous relevant packages and fixtures, and compact durable reports.
+Discard completed-run overlays and redundant caches only with reviewed exact-path
+ownership records while shut down. Preserve keys, TPM/UEFI, source datasets and
+unrelated VMs. [LAB.md](../scripts/release/LAB.md) provides inventory, exact cleanup,
+offline compaction, base freeze and overlay commands. Prepared Linux bases remain
+a Stage A prerequisite, not work to perform during a release attempt.
