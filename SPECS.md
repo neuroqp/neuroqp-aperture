@@ -15,8 +15,11 @@ preview as soon as possible, and stays responsive while loading large images.
   must never remove another running process's working files or display cache.
 - Before overwriting, warn if the destination is open in another Aperture process
   or has changed on disk. Offer Cancel, Save as and Overwrite anyway. All windows
-  remain editable; presence is advisory. Serialize only the final destination
-  check and atomic replacement. Preserve edits on cancellation or failed saves.
+  remain editable; presence is advisory and tracks the selected source until
+  replacement or window closure. Cancelled or failed background processing can
+  retain a usable preview or loaded annotations, so it does not release presence.
+  Serialize only the final destination check and atomic replacement. Preserve
+  edits on cancellation or failed saves.
 - Install updates only after other Aperture processes close. Block new starts
   during replacement and retain the existing unsaved-work warning.
 - Start with standard image formats, including JPEG/JPG, PNG, BMP, and TIFF/TIF.
