@@ -153,6 +153,25 @@ class SourceRefreshTests(unittest.TestCase):
 
 
 class SourcePublicationTests(unittest.TestCase):
+    def test_source_draft_lookup_uses_authenticated_list_then_numeric_release_id(self):
+        publisher = helper_module("publish-reviewed-source")
+        tag = "source-v0.2.0-r2"
+        candidate = {"id": 412902093, "tag_name": tag, "draft": True, "published_at": None, "assets": []}
+        published = {"id": 1, "tag_name": "v0.1.1", "draft": False, "published_at": "2026-10-13", "assets": []}
+        pages = [[published], [candidate]]
+        with mock.patch.object(publisher, "gh", side_effect=[json.dumps(pages), json.dumps(candidate)]) as api:
+            self.assertEqual(publisher.draft_release_id(tag), candidate["id"])
+            self.assertEqual(api.call_args_list, [
+                mock.call("api", "--paginate", "--slurp", "repos/neuroqp/neuroqp-aperture/releases?per_page=100"),
+                mock.call("api", "repos/neuroqp/neuroqp-aperture/releases/412902093"),
+            ])
+        for releases in ([[published]], [[candidate, candidate]], [[{**candidate, "draft": False, "published_at": "2026-10-14"}]]):
+            with mock.patch.object(publisher, "gh", return_value=json.dumps(releases)) as api, self.assertRaises(ValueError):
+                publisher.draft_release_id(tag)
+            api.assert_called_once()
+        with mock.patch.object(publisher, "gh", side_effect=[json.dumps(pages), json.dumps({**candidate, "id": 99})]), self.assertRaises(ValueError):
+            publisher.draft_release_id(tag)
+
     def test_source_publication_requires_manual_repo_scope_and_unpublished_source_draft(self):
         publisher = helper_module("publish-reviewed-source")
         context = {"GITHUB_REPOSITORY": "neuroqp/neuroqp-aperture", "GITHUB_EVENT_NAME": "workflow_dispatch", "PREPARE_SOURCE": "true"}

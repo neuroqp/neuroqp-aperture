@@ -43,16 +43,28 @@ def source_tag(plan):
     return tag
 
 
-def draft(candidate, tag):
-    if candidate.get("tag_name") != tag or not candidate.get("draft") or candidate.get("published_at"):
+def draft(candidate, tag, release_id=None):
+    if candidate.get("tag_name") != tag or not candidate.get("draft") or candidate.get("published_at") or (release_id is not None and candidate.get("id") != release_id):
         raise ValueError("Only the existing unpublished source draft can receive reviewed material")
     names = [asset["name"] for asset in candidate["assets"]]
     if len(set(names)) != len(names) or set(names) - {release.SOURCE_ASSET, release.SOURCE_REVIEW}:
         raise ValueError("Source draft has duplicate or unexpected assets")
 
 
-def check_assets(candidate, tag, directory):
-    draft(candidate, tag)
+def draft_release_id(tag):
+    # The REST tag endpoint omits drafts. Authenticated listing includes them.
+    pages = json.loads(gh("api", "--paginate", "--slurp", f"repos/{REPO}/releases?per_page=100"))
+    matches = [candidate for page in pages for candidate in page if candidate.get("tag_name") == tag]
+    if len(matches) != 1:
+        raise ValueError("Expected exactly one existing release for the reviewed source tag")
+    release_id = matches[0]["id"]
+    draft(matches[0], tag, release_id)
+    draft(json.loads(gh("api", f"repos/{REPO}/releases/{release_id}")), tag, release_id)
+    return release_id
+
+
+def check_assets(candidate, tag, directory, release_id=None):
+    draft(candidate, tag, release_id)
     for asset in candidate["assets"]:
         local = directory / asset["name"]
         if asset.get("state") != "uploaded" or asset["size"] != local.stat().st_size:
@@ -81,8 +93,8 @@ def main():
         raise ValueError("Source tag must already point to the exact reviewed application snapshot")
     if subprocess.check_output(["git", "rev-parse", "refs/tags/v0.1.1^{commit}"], cwd=root, text=True).strip() != PRIOR_SHA:
         raise ValueError("Previous stable source tag differs from the reviewed baseline")
-    endpoint = f"repos/{REPO}/releases/tags/{tag}"
-    draft(json.loads(gh("api", endpoint)), tag)
+    release_id = draft_release_id(tag)
+    endpoint = f"repos/{REPO}/releases/{release_id}"
     work = root / "build/source-publication"
     prior_root = work / "previous-locks"
     for name in ("scripts/release/corresponding-source.json", *release.LOCKFILES):
@@ -108,13 +120,13 @@ def main():
     candidate = json.loads(gh("api", endpoint))
     if tag_commit(tag) != source_sha:
         raise ValueError("Source tag changed before publication")
-    check_assets(candidate, tag, directory)
+    check_assets(candidate, tag, directory, release_id)
     existing = {asset["name"] for asset in candidate["assets"]}
     for name in (release.SOURCE_ASSET, release.SOURCE_REVIEW):
         if name not in existing:
             gh("release", "upload", tag, str(directory / name), "--repo", REPO)
     before = json.loads(gh("api", endpoint))
-    check_assets(before, tag, directory)
+    check_assets(before, tag, directory, release_id)
     if {asset["name"] for asset in before["assets"]} != {release.SOURCE_ASSET, release.SOURCE_REVIEW}:
         raise ValueError("Verified source asset set is incomplete")
     if tag_commit(tag) != source_sha:
@@ -122,7 +134,7 @@ def main():
     gh("release", "edit", tag, "--repo", REPO, "--draft=false", "--prerelease", "--latest=false")
     after = json.loads(gh("api", endpoint))
     identities = lambda value: {(asset["id"], asset["name"], asset["size"], asset.get("digest")) for asset in value["assets"]}
-    if after["draft"] or not after["prerelease"] or identities(after) != identities(before):
+    if after.get("id") != release_id or after.get("tag_name") != tag or after["draft"] or not after["prerelease"] or identities(after) != identities(before):
         raise ValueError("Source publication did not preserve verified assets as a prerelease")
     if json.loads(gh("api", f"repos/{REPO}/releases/latest"))["tag_name"] == tag:
         raise ValueError("Source material must remain outside latest")
