@@ -11,6 +11,6 @@
   },
   "schema": 1,
   "sha256": "d2e11f654143a454345ee7980d958929873004e5027e99b30e7007b413be3eea",
-  "status": "ready",
-  "url": "https://github.com/neuroqp/neuroqp-aperture/releases/download/source-v0.2.0-r2/Aperture-Corresponding-Source.tar.xz"
+  "status": "assembled-awaiting-review",
+  "url": "https://github.com/neuroqp/neuroqp-aperture/releases/download/source-v0.2.0-r3/Aperture-Corresponding-Source.tar.xz"
 }

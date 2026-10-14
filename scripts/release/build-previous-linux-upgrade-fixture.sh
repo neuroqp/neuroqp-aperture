@@ -11,6 +11,18 @@ prior="$root/build/previous-stable-linux-checkout"
 target="$root/src-tauri/target"
 bundle="$target/release/bundle/appimage"
 helper="$root/scripts/release/previous-upgrade-fixture.py"
+# Checkout's temporary HOME trust does not reach shell/Python Git commands.
+# Append exact paths to this process's config, preserving inherited entries.
+git_config_count=${GIT_CONFIG_COUNT:-0}
+[[ $git_config_count =~ ^[0-9]+$ ]]
+git_config_count=$((10#$git_config_count))
+for directory in "$root" "$prior"; do
+  printf -v "GIT_CONFIG_KEY_$git_config_count" '%s' safe.directory
+  printf -v "GIT_CONFIG_VALUE_$git_config_count" '%s' "$directory"
+  export "GIT_CONFIG_KEY_$git_config_count" "GIT_CONFIG_VALUE_$git_config_count"
+  git_config_count=$((git_config_count + 1))
+done
+export GIT_CONFIG_COUNT=$git_config_count
 [[ ! -e "$prior" && ! -e "$output" && -z ${CARGO_TARGET_DIR:-} ]]
 case "$output/" in "$root/build/release/"*) echo 'Fixture output must be separate from production assets.' >&2; exit 1 ;; esac
 cd "$root"

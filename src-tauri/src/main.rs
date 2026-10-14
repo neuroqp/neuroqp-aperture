@@ -653,13 +653,19 @@ mod startup_tests {
             Some(PathBuf::from(filename))
         );
         assert_eq!(startup_path(["aperture".into()]).unwrap(), None);
+        #[cfg(windows)]
+        let (uri, expected) = (
+            "file:///C:/tmp/cells%20%C3%A9tude%2001.tif",
+            PathBuf::from(r"C:\tmp\cells étude 01.tif"),
+        );
+        #[cfg(not(windows))]
+        let (uri, expected) = (
+            "file:///tmp/cells%20%C3%A9tude%2001.tif",
+            PathBuf::from("/tmp/cells étude 01.tif"),
+        );
         assert_eq!(
-            startup_path([
-                "aperture".into(),
-                "file:///tmp/cells%20%C3%A9tude%2001.tif".into()
-            ])
-            .unwrap(),
-            Some(PathBuf::from("/tmp/cells étude 01.tif"))
+            startup_path(["aperture".into(), uri.into()]).unwrap(),
+            Some(expected)
         );
     }
 
@@ -795,6 +801,7 @@ mod startup_tests {
             .unwrap();
         let committed = std::fs::read(&target).unwrap();
         let images = root.join("cache/instance-locks-v1/images");
+        session.instances.set_image(None).unwrap();
         std::fs::rename(&images, root.join("image-leases-backup")).unwrap();
         std::fs::write(&images, b"unusable lease directory").unwrap();
         let result = finish_save(&session, "image", &target, before);
