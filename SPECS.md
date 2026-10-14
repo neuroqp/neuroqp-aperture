@@ -267,9 +267,14 @@ using representative Linux files, including tiled and strip-based TIFFs.
 - Download and verify before asking to restart. Preserve unsaved-work warnings;
   cancellation and save failure leave edits intact. Stop background image work
   before replacement. Failed installation must leave a recoverable application.
-- Build candidates on native Windows runners and the Linux baseline container.
-  Verify packages, then perform desktop acceptance before stable promotion. Promote
-  the tested bytes; never rebuild or move tags to replace an existing release.
+- Run automated source regressions before optimized release packaging. Build
+  candidates on native Windows runners and the Linux baseline container, then
+  test the exact downloads on the supported native desktop matrix before promotion.
+  Apply the routine checklist to every candidate and select expanded checks from
+  the diff since the previous stable release. Record results tied to the source
+  commit and asset hashes; required failures or inconclusive checks block promotion.
+  Promote tested bytes without rebuilding or moving tags, then verify public
+  download routes and the production updater. Follow [RELEASING.md](RELEASING.md).
 - Keep PR checks fast. Full native builds and package validation are separate from
   ordinary PR checks. Record source identity, dependency versions, checksums,
   third-party notices, and release notes with each candidate.
