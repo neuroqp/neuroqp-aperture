@@ -72,7 +72,7 @@ fn open_image_path(
             .map_err(|e| e.to_string())?;
         initial
     };
-    let state = match backend.open(path) {
+    let state = match backend.open_resolved(path, &source) {
         Ok(state) => state,
         Err(error) => {
             session

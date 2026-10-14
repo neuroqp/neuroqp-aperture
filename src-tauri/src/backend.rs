@@ -152,6 +152,7 @@ impl Backend {
         self.notifier = Some(Arc::new(callback));
     }
 
+    #[cfg(test)]
     pub fn open(&self, path: &Path) -> Result<ImageState, String> {
         let _opening = self.open_lock.lock().unwrap();
         self.cancel();
@@ -159,6 +160,21 @@ impl Backend {
             return Err("Viewer shutting down.".into());
         }
         let source = fs::canonicalize(path).map_err(|e| format!("Cannot open image: {e}"))?;
+        self.open_source(path, source)
+    }
+
+    /// Keep the selected filename for display/format detection while loading the
+    /// exact source already resolved for presence and fingerprint tracking.
+    pub fn open_resolved(&self, path: &Path, source: &Path) -> Result<ImageState, String> {
+        let _opening = self.open_lock.lock().unwrap();
+        self.cancel();
+        self.open_source(path, source.to_path_buf())
+    }
+
+    fn open_source(&self, path: &Path, source: PathBuf) -> Result<ImageState, String> {
+        if self.closing.load(Ordering::Relaxed) {
+            return Err("Viewer shutting down.".into());
+        }
         #[cfg(windows)]
         let source_file = File::open(&source).map_err(|e| e.to_string())?;
         #[cfg(windows)]
@@ -1863,6 +1879,36 @@ fn prune_except(root: &Path, limit: u64, protected: Option<&Path>) -> Result<(),
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[cfg(unix)]
+    #[test]
+    fn resolved_source_stays_pinned_when_selected_symlink_is_retargeted() {
+        let root = std::env::temp_dir().join(format!(
+            "aperture-pinned-source-{}-{}",
+            std::process::id(),
+            NEXT_ID.fetch_add(1, Ordering::Relaxed)
+        ));
+        fs::create_dir(&root).unwrap();
+        let original = root.join("original.data");
+        let replacement = root.join("replacement.data");
+        let selected = root.join("selected alias.png");
+        fs::write(&original, b"original source").unwrap();
+        fs::write(&replacement, b"replacement source").unwrap();
+        std::os::unix::fs::symlink(&original, &selected).unwrap();
+        let resolved = crate::instances::path_key(&selected).unwrap();
+        fs::remove_file(&selected).unwrap();
+        std::os::unix::fs::symlink(&replacement, &selected).unwrap();
+        let backend = Backend::new(root.join("cache")).unwrap();
+        let state = backend.open_resolved(&selected, &resolved).unwrap();
+        assert_eq!(state.name, "selected alias.png");
+        assert_eq!(Path::new(&state.path), selected);
+        let job = backend.current.lock().unwrap().clone().unwrap();
+        assert_eq!(job.source, fs::canonicalize(&original).unwrap());
+        assert_ne!(job.source, fs::canonicalize(&selected).unwrap());
+        assert_eq!(fs::read(&job.source).unwrap(), b"original source");
+        backend.shutdown();
+        fs::remove_dir_all(root).unwrap();
+    }
 
     #[cfg(target_os = "linux")]
     #[test]
