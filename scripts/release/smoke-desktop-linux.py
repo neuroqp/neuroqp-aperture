@@ -18,6 +18,7 @@ import shutil
 import signal
 import subprocess
 import sys
+import tempfile
 import time
 from urllib.request import Request, urlopen
 from urllib.parse import urlsplit
@@ -249,6 +250,18 @@ def application_process(launcher_pid, identity, deadline):
     return matches[0] if matches else None
 
 
+def publish_receipt(receipt, result):
+    with tempfile.NamedTemporaryFile(mode="w", encoding="utf-8", dir=receipt.parent,
+                                     prefix=f".{receipt.name}.", delete=False) as stream:
+        temporary = Path(stream.name)
+        try:
+            json.dump(result, stream)
+            stream.close()
+            temporary.replace(receipt)
+        finally:
+            temporary.unlink(missing_ok=True)
+
+
 def launcher(identity, receipt, extra):
     verify_inputs(identity)
     command = [identity["asset_path"]]
@@ -263,11 +276,11 @@ def launcher(identity, receipt, extra):
             child = subprocess.Popen(command, stdout=log, stderr=subprocess.STDOUT, env=environment)
         except OSError as error:
             log.write((str(error) + "\n").encode())
-            receipt.write_text(json.dumps({"pid": None, "exit_code": 1, "error": str(error), "finished_at": utc()}))
+            publish_receipt(receipt, {"pid": None, "exit_code": 1, "error": str(error), "finished_at": utc()})
             return 1
         Path(str(receipt) + ".pid").write_text(str(child.pid))
         code = child.wait()
-    receipt.write_text(json.dumps({"pid": child.pid, "exit_code": code, "finished_at": utc()}))
+    publish_receipt(receipt, {"pid": child.pid, "exit_code": code, "finished_at": utc()})
     return code
 
 
