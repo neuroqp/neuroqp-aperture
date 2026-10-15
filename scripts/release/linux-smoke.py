@@ -7,16 +7,19 @@ after --, for example: -- ssh -p 2224 user@127.0.0.1.
 """
 
 import argparse
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 import hashlib
 import json
 import os
 from pathlib import Path
 import re
 import shlex
+import signal
 import subprocess
 import sys
 import tempfile
+import threading
+import time
 
 
 def sha(path):
@@ -25,6 +28,141 @@ def sha(path):
         for block in iter(lambda: stream.read(1024 * 1024), b""):
             digest.update(block)
     return digest.hexdigest()
+
+
+def desktop_bus(environment):
+    from gi.repository import Gio
+    return Gio.DBusConnection.new_for_address_sync(
+        environment["DBUS_SESSION_BUS_ADDRESS"],
+        Gio.DBusConnectionFlags.AUTHENTICATION_CLIENT | Gio.DBusConnectionFlags.MESSAGE_BUS_CONNECTION,
+        None, None)
+
+
+def bus_call(bus, destination, path, interface, method, signature=None, values=()):
+    from gi.repository import Gio, GLib
+    return bus.call_sync(destination, path, interface, method,
+                         GLib.Variant(signature, values) if signature else None, None,
+                         Gio.DBusCallFlags.NO_AUTO_START, 5000, None).unpack()
+
+
+def idle_probe(bus, session_id, owner=None):
+    output = subprocess.check_output(["loginctl", "show-session", session_id,
+                                      "-p", "Id", "-p", "Active", "-p", "LockedHint", "-p", "User",
+                                      "-p", "Type", "-p", "Class"], text=True, timeout=5)
+    session = dict(line.split("=", 1) for line in output.splitlines() if "=" in line)
+    expected = dict(Id=session_id, Active="yes", LockedHint="no", User=str(os.getuid()), Type="x11", Class="user")
+    if any(session.get(key) != value for key, value in expected.items()):
+        raise ValueError("Idle guard requires the owned, active, unlocked X11 desktop session: " + str(session))
+    current_owner, = bus_call(bus, "org.freedesktop.DBus", "/org/freedesktop/DBus",
+                              "org.freedesktop.DBus", "GetNameOwner", "(s)", ("org.freedesktop.ScreenSaver",))
+    if owner is not None and current_owner != owner:
+        raise ValueError("Prepared screen locker restarted; idle inhibition was lost")
+    active, = bus_call(bus, current_owner, "/org/freedesktop/ScreenSaver", "org.freedesktop.ScreenSaver", "GetActive")
+    if active is not False:
+        raise ValueError("Desktop screensaver is already active; unlock before readiness")
+    return session, current_owner
+
+
+def start_ticks(pid):
+    return int(Path("/proc", str(pid), "stat").read_text().rsplit(")", 1)[1].split()[19])
+
+
+def write_guard_record(path, record, fresh=False):
+    with tempfile.NamedTemporaryFile(mode="w", dir=path.parent, delete=False) as stream:
+        temporary = Path(stream.name)
+        try:
+            stream.write(json.dumps(record, indent=2) + "\n")
+            stream.flush()
+            if fresh:
+                os.link(temporary, path)
+            else:
+                temporary.replace(path)
+        finally:
+            temporary.unlink(missing_ok=True)
+
+
+def idle_guard(args):
+    """Hold light-locker's acknowledged, connection-scoped inhibition for the lab lifetime."""
+    plan = json.loads(args.driver_plan.read_text())
+    report = Path(plan["idle_guard"])
+    if not report.is_absolute() or report.exists() or not 0 < args.seconds <= 7200 or os.getuid() == 0:
+        raise ValueError("Idle guard requires a fresh absolute receipt, ordinary user and 1-7200 seconds")
+    if plan["environment"].get("XDG_SESSION_TYPE") != "x11":
+        raise ValueError("Idle guard is prepared only for the Debian X11 lab")
+    stopped = threading.Event()
+    previous = {sig: signal.signal(sig, lambda *_: stopped.set()) for sig in (signal.SIGTERM, signal.SIGINT, signal.SIGHUP)}
+    bus = None
+    wrote_receipt = False
+    record = dict(schema=1, status="starting", pid=os.getpid(), start_ticks=start_ticks(os.getpid()),
+                  runner_path=str(Path(__file__).resolve()), runner_sha256=sha(__file__),
+                  driver_plan_sha256=sha(args.driver_plan), session_id=args.session_id)
+    deadline = time.monotonic() + args.seconds
+    try:
+        bus = desktop_bus(plan["environment"])
+        session, owner = idle_probe(bus, args.session_id)
+        cookie, = bus_call(bus, owner, "/org/freedesktop/ScreenSaver", "org.freedesktop.ScreenSaver", "Inhibit",
+                           "(ss)", ("Aperture smoke lab", "Keep prepared Debian desktop active through final smoke"))
+        idle_probe(bus, args.session_id, owner)
+        record.update(status="active", session=session, locker_owner=owner, cookie=cookie,
+                      bus_name=bus.get_unique_name(), started_at=datetime.now(timezone.utc).isoformat(),
+                      expires_at=(datetime.now(timezone.utc) + timedelta(seconds=max(0, deadline - time.monotonic()))).isoformat())
+        write_guard_record(report, record, fresh=True)
+        wrote_receipt = True
+        print(json.dumps(record), flush=True)
+        while not stopped.wait(min(5, max(0, deadline - time.monotonic()))):
+            if time.monotonic() >= deadline:
+                raise TimeoutError("Idle guard lab lifetime expired")
+            idle_probe(bus, args.session_id, owner)
+        record["status"] = "closed"
+        return 0
+    except Exception as error:
+        record.update(status="fail", error=str(error))
+        raise
+    finally:
+        # Closing the private connection also releases the cookie after a crash
+        # or SIGHUP. No xset, xfconf or user preferences require restoration.
+        try:
+            if bus is not None:
+                bus.close_sync(None)
+        except Exception as error:
+            record.update(status="fail", error="Idle guard connection closure failed: " + str(error))
+            raise
+        finally:
+            try:
+                if wrote_receipt:
+                    record["finished_at"] = datetime.now(timezone.utc).isoformat()
+                    write_guard_record(report, record)
+            finally:
+                for sig, handler in previous.items():
+                    signal.signal(sig, handler)
+
+
+def require_idle_guard(plan_path, environment):
+    plan = json.loads(plan_path.read_text())
+    report = Path(plan.get("idle_guard", ""))
+    if not report.is_absolute() or report.stat().st_uid != os.getuid():
+        raise ValueError("Debian smoke requires the prepared idle guard receipt")
+    record = json.loads(report.read_text())
+    proc = Path("/proc", str(record["pid"]))
+    command = (proc / "cmdline").read_bytes().split(b"\0")
+    if (record.get("status") != "active" or record.get("runner_sha256") != sha(__file__)
+            or record.get("runner_path") != str(Path(__file__).resolve())
+            or record.get("driver_plan_sha256") != sha(plan_path)):
+        raise ValueError("Prepared Debian idle guard identity differs")
+    if datetime.now(timezone.utc) >= datetime.fromisoformat(record["expires_at"]):
+        raise ValueError("Prepared Debian idle guard lifetime expired")
+    if (proc.stat().st_uid != os.getuid() or start_ticks(record["pid"]) != record["start_ticks"]
+            or str(Path(__file__).resolve()).encode() not in command or b"idle-guard" not in command):
+        raise ValueError("Prepared Debian idle guard process is no longer alive")
+    bus = desktop_bus(environment)
+    try:
+        present, = bus_call(bus, "org.freedesktop.DBus", "/org/freedesktop/DBus", "org.freedesktop.DBus",
+                            "NameHasOwner", "(s)", (record["bus_name"],))
+        if present is not True:
+            raise ValueError("Prepared Debian idle guard connection is no longer alive")
+        idle_probe(bus, record["session_id"], record["locker_owner"])
+    finally:
+        bus.close_sync(None)
 
 
 # The receiver verifies before atomic replacement, preserving a previous copy on
@@ -90,6 +228,8 @@ def run(identity_path, report, driver_plan, rehearsal=False):
     environment = os.environ.copy()
     environment.update(json.loads(driver_plan.read_text())["environment"])
     environment.pop("NO_AT_BRIDGE", None)
+    if identity["readiness"]["environment"] == "debian12":
+        require_idle_guard(driver_plan, environment)
     remaining = (datetime.fromisoformat(identity["deadline_at"].replace("Z", "+00:00")) - datetime.now(timezone.utc)).total_seconds()
     if remaining <= 0:
         raise ValueError("Smoke identity deadline already expired")
@@ -99,9 +239,18 @@ def run(identity_path, report, driver_plan, rehearsal=False):
         code = subprocess.run([sys.executable, str(helper), "--identity", str(identity_path),
                                "--environment", identity["readiness"]["environment"],
                                "--report", str(report)], env=environment, timeout=remaining + 5).returncode
+        guard_error = None
+        if identity["readiness"]["environment"] == "debian12":
+            try:
+                require_idle_guard(driver_plan, environment)
+            except Exception as error:
+                guard_error = "Debian idle inhibition lost during smoke: " + str(error)
+                code = code or 1
         if report.exists():
             summary = compact_smoke(json.loads(report.read_text()))
             summary["raw_report_sha256"] = sha(report)
+            if guard_error:
+                summary.update(status="fail", error=guard_error)
             report.with_suffix(".summary.json").write_text(json.dumps(summary, indent=2) + "\n")
         return code
     except subprocess.TimeoutExpired:
@@ -189,6 +338,10 @@ def preflight(args):
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
     sub = parser.add_subparsers(dest="command", required=True)
+    child = sub.add_parser("idle-guard", help="Hold Debian X11 inhibition from readiness through final smoke")
+    child.add_argument("--driver-plan", type=Path, required=True)
+    child.add_argument("--session-id", required=True, help="Observed graphical loginctl session, never the SSH session")
+    child.add_argument("--seconds", type=int, required=True)
     for name in ("copy-to", "copy-from"):
         child = sub.add_parser(name)
         child.add_argument("source")
@@ -209,6 +362,8 @@ def main():
         if name == "preflight":
             child.add_argument("--transport-report", type=Path)
     args = parser.parse_args()
+    if args.command == "idle-guard":
+        return idle_guard(args)
     if args.command == "run":
         return run(args.identity, args.report, args.driver_plan)
     if args.command == "preflight":

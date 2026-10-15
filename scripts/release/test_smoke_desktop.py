@@ -1,9 +1,11 @@
 """Functional adapter seams only. These checks are not native GUI evidence."""
 import importlib.util
+from concurrent.futures import ThreadPoolExecutor
 import json
 from pathlib import Path
 import subprocess
 import tempfile
+import threading
 import time
 from types import SimpleNamespace
 import unittest
@@ -178,6 +180,43 @@ class DesktopSmokeTests(unittest.TestCase):
             self.assertIn("Permission denied", result["error"])
             self.assertIn("Permission denied", Path(str(receipt) + ".log").read_text())
             self.assertFalse(Path(str(receipt) + ".pid").exists())
+
+    def test_launcher_receipt_is_hidden_until_complete_json_is_published(self):
+        with tempfile.TemporaryDirectory() as folder:
+            receipt = Path(folder) / "exit.json"
+            partial, finish = threading.Event(), threading.Event()
+            def slow_write(value, stream):
+                encoded = json.dumps(value)
+                stream.write(encoded[:1])
+                stream.flush()
+                partial.set()
+                if not finish.wait(2):
+                    raise TimeoutError("Test writer was not released")
+                stream.write(encoded[1:])
+            child = SimpleNamespace(pid=42, wait=lambda: 0)
+            with patch.object(smoke, "verify_inputs"), patch.object(smoke.subprocess, "Popen", return_value=child), patch.object(smoke.json, "dump", side_effect=slow_write), ThreadPoolExecutor(max_workers=1) as pool:
+                result = pool.submit(smoke.launcher, dict(asset_path="/prepared/AppImage"), receipt, [])
+                try:
+                    self.assertTrue(partial.wait(1), "Writer never reached its partial write")
+                    self.assertFalse(receipt.exists(), "Observer could read an incomplete receipt")
+                finally:
+                    finish.set()
+                self.assertEqual(result.result(timeout=2), 0)
+            self.assertEqual(json.loads(receipt.read_text())["exit_code"], 0)
+            self.assertEqual(json.loads(receipt.read_text())["pid"], 42)
+
+    def test_failed_receipt_write_preserves_previous_json_and_removes_temporary(self):
+        with tempfile.TemporaryDirectory() as folder:
+            receipt = Path(folder) / "exit.json"
+            receipt.write_text('{"previous":true}')
+            def fail_write(value, stream):
+                stream.write("{")
+                raise OSError("Interrupted receipt write")
+            with patch.object(smoke.json, "dump", side_effect=fail_write):
+                with self.assertRaisesRegex(OSError, "Interrupted"):
+                    smoke.publish_receipt(receipt, dict(pid=42, exit_code=0))
+            self.assertEqual(json.loads(receipt.read_text()), dict(previous=True))
+            self.assertEqual(list(Path(folder).iterdir()), [receipt])
 
     def test_launcher_clears_inherited_extract_mode_and_uses_explicit_fallback(self):
         for fallback in (False, True):

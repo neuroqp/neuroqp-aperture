@@ -73,6 +73,7 @@ jobs:
       - run: python3 scripts/release/test_smoke_desktop.py
       - run: python3 scripts/release/test_debian_render.py
       - run: python3 scripts/release/test_linux_smoke.py
+      - run: python3 scripts/release/test_linux_idle.py
       - run: python3 scripts/release/test_capture_linux.py
       - run: python3 scripts/release/test_lab.py
       - run: python3 scripts/release/test-source-windows.py

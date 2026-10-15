@@ -50,6 +50,40 @@ the reviewed helpers. Embed the resulting `preflight.readiness.json` receipt as
 record and pin `linux-smoke.py` with the other tools. Missing or failed rehearsals
 block readiness. Tool hashes and a typed `ready: true` alone are insufficient.
 
+For the Debian X11/light-locker lab, hold the reviewed idle guard from before
+preflight until the final smoke finishes. Add `"idle_guard": "/prepared/idle-guard.json"`
+to the immutable driver plan, alongside the observed desktop environment. Run
+this command as its ordinary desktop user in an owned, supervised SSH session:
+
+```sh
+/usr/bin/python3 /prepared/linux-smoke.py idle-guard --driver-plan /prepared/driver-plan.json --session-id OBSERVED_GRAPHICAL_SESSION --seconds 5400
+```
+
+Discover the graphical session with `loginctl`; never substitute the SSH session.
+Wait for the command's JSON `status: active` acknowledgment before preflight.
+Keep the same process and plan through packaging and Stage C. Both `preflight`
+and `run` verify its owned PID/start identity, runner/plan hashes, live D-Bus
+connection and current unlocked, active graphical session. An already locked
+desktop or a restarted locker fails readiness. This is a Debian lab adapter,
+not a Wayland inhibitor. It does not unlock the desktop or send input.
+
+The guard holds light-locker's connection-scoped `ScreenSaver.Inhibit` cookie.
+[The locker forwards this to X11 suspension](https://github.com/the-cavalry/light-locker/blob/master/src/gs-listener-x11.c)
+and [releases inhibitors when their bus owner disconnects](https://github.com/the-cavalry/light-locker/blob/master/src/gs-listener-dbus.c).
+No xset, XFCE or host preferences change. Stop only the recorded owned guard with
+TERM after smoke or abort, wait for its exit and retain the `closed` receipt.
+HUP, INT, process exit and the bounded lab lifetime also release the connection.
+The guard's lifetime never changes a frozen release deadline.
+
+During Stage A, prove the adapter on the actual Debian desktop: retain its
+baseline idle/lock settings, show an already locked/inactive session is rejected,
+then keep the native desktop idle past its original lock threshold and run the
+fixed smoke. A temporary shorter lab-only idle interval may accelerate this
+check if its exact baseline is restored afterward. After stopping the guard,
+verify normal idle locking resumes and baseline settings match. Retain native
+screenshots, elapsed time, active/locked session observations and guard closure.
+Unit adapter fixtures do not establish native idle prevention.
+
 Fedora GNOME uses the reviewed `capture-gnome.py --pid {pid} --output {output}
 --bridge-url PREPARED_URL` adapter and `screenshot_scope: owned-window`. Prepare
 `capture-qemu.py --pid QEMU_PID --work-directory OWNED_QEMU_DIRECTORY --qmp

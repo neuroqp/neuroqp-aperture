@@ -7,6 +7,51 @@ acceptance. Every mutation requires all owned QEMU and swtpm processes to have
 stopped. Launchers must hold `environments/bounded-lab/operation.lock` for their
 entire VM lifetime so maintenance cannot race a launch.
 
+## Windows transport checks during Stage A
+
+Probe the prepared guest before recording readiness. A successful TCP connection
+to host port 15985 only proves that QEMU accepted the forwarded connection. Use
+an unauthenticated HTTP request with a short timeout to check for a response:
+
+```sh
+curl --noproxy '*' -i --connect-timeout 2 --max-time 3 http://127.0.0.1:15985/wsman
+```
+
+HTTP 405 from this GET counts as a responding endpoint, not authenticated WSMan
+readiness. A timeout does not establish bad credentials. If the host request
+times out, use the observed guest desktop and these read-only `cmd.exe` queries:
+
+```bat
+sc query WinRM
+sc qc WinRM
+ipconfig
+netstat -ano | findstr ":5985"
+curl.exe --noproxy "*" -i --connect-timeout 2 --max-time 3 http://127.0.0.1:5985/wsman
+netsh advfirewall firewall show rule name="Aperture isolated VM WinRM" verbose
+netsh advfirewall show currentprofile
+```
+
+On 2026-10-15, WinRM was running, port 5985 listened on all interfaces and the
+guest-local request returned 405, but the host request timed out. The original
+custom inbound rule was absent and the Public firewall profile blocked inbound
+traffic. Restoring only that missing rule in an existing administrator's elevated
+command prompt restored the host HTTP response:
+
+```bat
+netsh advfirewall firewall add rule name="Aperture isolated VM WinRM" dir=in action=allow protocol=TCP localport=5985 remoteip=10.0.2.2 profile=any enable=yes
+```
+
+This repair belongs to authorized Stage A lab maintenance. First confirm that
+the exact rule is missing; preserve an existing rule and investigate differences.
+Keep the allowance restricted to the QEMU host address `10.0.2.2`. Do not disable
+the firewall, change credentials or weaken authentication settings.
+
+After repair, repeat the host HTTP probe and run the existing authenticated NTLM
+observer using its private credential file without emitting secrets. Verify the
+guest user/session, UTC, prepared helper and TIFF hashes, observer executable hash
+and clean application/payload baseline before issuing fresh readiness. HTTP 405
+or an authentication failure alone cannot certify these checks.
+
 ## Inventory and exact cleanup
 
 Record inventory outside the lab so the before and after totals cover the same
