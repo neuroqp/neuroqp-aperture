@@ -3,9 +3,9 @@
   "tag": "v0.2.0",
   "source_sha": "3c17c5cc19ce1da706c47031ad1ffb1b2a7338e3",
   "reservation_id": 413786308,
-  "body_sha256": "fce6ec46215f7ff23e85ec5094d9034dc71ed75ad815dc60efd79051f09ecb86",
+  "body_sha256": "4fd716181ce4f53d68549f179a7186b93370bccdd68c354a8056652ba2cf9e0a",
   "origin_run_id": 38735118987,
-  "invalidated_frozen_sha256": "d264c9d4c3d70e3adc70140c7e259e7aa0800eef78f0a10802d7c8622ab3fffe",
+  "invalidated_frozen_sha256": "97d35c533bc44b046100ff6734e7ae2cb417ff43512f2bdd6d809de0f9930297",
   "claim_runs": [
     {
       "run_id": 38736596537,
@@ -28,6 +28,18 @@
         "packages / linux": "failure",
         "packages / windows": "cancelled",
         "candidate": "cancelled"
+      }
+    },
+    {
+      "run_id": 38762835028,
+      "orchestration_sha": "5211aa4959d880383acdd861631e446832c88a25",
+      "conclusion": "failure",
+      "jobs": {
+        "identity": "success",
+        "source": "success",
+        "packages / linux": "success",
+        "packages / windows": "failure",
+        "candidate": "skipped"
       }
     }
   ]
