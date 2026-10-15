@@ -17,6 +17,7 @@ from release import ASSETS, SOURCE_ASSET, SOURCE_REVIEW, digest, source_plan
 
 REPOSITORY = "neuroqp/neuroqp-aperture"
 RECORD = Path(__file__).with_name("resume-publication.json")
+PUBLIC_RECORD = Path(__file__).with_name("public-candidate-recovery.json")
 FROZEN = None
 
 
@@ -65,7 +66,7 @@ def validate_prior(run, jobs, record):
         raise ValueError("Prior verification must pass before interrupted publication")
 
 
-def validate_lineage(candidate, run):
+def validate_original_lineage(candidate, run):
     record = read(RECORD)
     recovery = candidate.get("recovery", {})
     expected = {key: record[key] for key in ("prior_run_id", "prior_orchestration_sha", "prior_conclusion", "prior_frozen_sha256", "prior_candidate_sha256", "prior_freeze_started_at", "prior_deadline_at", "release_id")}
@@ -93,6 +94,122 @@ def validate_lineage(candidate, run):
             raise ValueError("Completion changed a frozen package")
 
 
+def public_recovery(run, public):
+    return {"kind": "public-candidate", "record_sha256": digest(PUBLIC_RECORD),
+            **{key: public[key] for key in ("previous_run_id", "previous_orchestration_sha", "previous_frozen_sha256", "previous_candidate_sha256", "previous_freeze_started_at", "previous_deadline_at", "previous_recovery")},
+            "completion_run_id": str(run["id"]), "orchestration_sha": run["head_sha"]}
+
+
+def validate_lineage(candidate, run):
+    if candidate.get("recovery", {}).get("kind") != "public-candidate":
+        return validate_original_lineage(candidate, run)
+    public = read(PUBLIC_RECORD)
+    if candidate["recovery"] != public_recovery(run, public):
+        raise ValueError("Public candidate recovery lineage changed")
+    # Validate the original completion proof without relaxing its exact schema.
+    previous = {**candidate, "recovery": public["previous_recovery"],
+                "freeze_started_at": public["previous_freeze_started_at"], "deadline_at": public["previous_deadline_at"]}
+    validate_original_lineage(previous, {"id": public["previous_run_id"], "head_sha": public["previous_orchestration_sha"]})
+    if (asset_rows(candidate.get("release_assets", [])) != public["release_assets"]
+            or (parsed(candidate["deadline_at"]) - parsed(candidate["freeze_started_at"])).total_seconds() != ATTEMPT_SECONDS
+            or parsed(candidate["freeze_started_at"]) <= parsed(public["previous_freeze_started_at"])):
+        raise ValueError("Public recovery changed retained assets or its separate deadline")
+
+
+def validate_public(release, record, public):
+    source = [row for row in public["release_assets"] if row["name"] == SOURCE_ASSET]
+    if len(source) != 1:
+        raise ValueError("Public recovery must pin one corresponding source archive")
+    validate_draft(release, record, source[0], published=True)
+    if asset_rows(release["assets"]) != public["release_assets"] or release.get("published_at") != public["published_at"]:
+        raise ValueError("Public candidate assets or original publication changed")
+
+
+def validate_tag(record):
+    subprocess.run(["git", "merge-base", "--is-ancestor", record["source_sha"], "origin/main"], cwd=ROOT, check=True, timeout=30)
+    tag = subprocess.check_output(["git", "rev-parse", f"refs/tags/{record['tag']}^{{commit}}"], cwd=ROOT, text=True, timeout=30).strip()
+    remote = api(f"git/ref/tags/{record['tag']}")["object"]
+    while remote["type"] == "tag":
+        remote = api(f"git/tags/{remote['sha']}")["object"]
+    if tag != record["source_sha"] or (remote.get("type") != "commit" or remote.get("sha") != record["source_sha"]):
+        raise ValueError("Immutable application tag changed")
+
+
+def preflight_public(inputs, record, public):
+    frozen_path, candidate_path = inputs / "completed/frozen-attempt.json", inputs / "completed/frozen-candidate.json"
+    if digest(frozen_path) != public["previous_frozen_sha256"] or digest(candidate_path) != public["previous_candidate_sha256"]:
+        raise ValueError("Previous successful completion receipt bytes changed")
+    old, candidate = read(frozen_path), read(candidate_path)
+    run = trusted_run(public["previous_run_id"], "resume-release.yml")
+    if (run.get("id") != public["previous_run_id"] or run.get("head_sha") != public["previous_orchestration_sha"]
+            or run.get("status") != "completed"):
+        raise ValueError("Previous successful completion run changed")
+    validate_original_lineage(candidate, run)
+    if (old.get("recovery") != public["previous_recovery"]
+            or any(old.get(key) != candidate.get(key) or old.get(key) != public["previous_" + key] for key in ("freeze_started_at", "deadline_at"))):
+        raise ValueError("Previous completion frozen identity changed")
+    same_identity(old, identity())
+    same_identity(candidate, old)
+    if asset_rows(candidate.get("release_assets", [])) != public["release_assets"]:
+        raise ValueError("Previous completion retained asset proof changed")
+    validate_public(api(f"releases/{record['release_id']}"), record, public)
+    validate_tag(record)
+    readiness = read(inputs / "readiness/release-readiness.json")
+    trusted_run(os.environ["READINESS_RUN_ID"], "release-evidence.yml")
+    validate_readiness(readiness, old)
+    if parsed(readiness["completed_at"]) <= parsed(old["readiness"]["completed_at"]):
+        raise ValueError("Public recovery needs refreshed Stage A readiness")
+    for row in readiness["automated"]:
+        if row["binary_sha256"] != old["validated_inputs"][row["platform"]]["binary_sha256"]:
+            raise ValueError("Refreshed readiness changed the packaged executable identity")
+    return old, candidate, readiness
+
+
+def current_run():
+    if (os.environ.get("GITHUB_REPOSITORY") != REPOSITORY or os.environ.get("GITHUB_REF") != "refs/heads/main"
+            or os.environ.get("GITHUB_RUN_ATTEMPT") != "1"):
+        raise ValueError("Only a first-attempt reviewed main completion workflow may publish")
+    current = api(f"actions/runs/{os.environ['GITHUB_RUN_ID']}")
+    if (current.get("id") != int(os.environ["GITHUB_RUN_ID"]) or current.get("head_sha") != os.environ["GITHUB_SHA"] or current.get("head_branch") != "main"
+            or current.get("path") != ".github/workflows/resume-release.yml" or current.get("event") != "workflow_dispatch"
+            or current.get("repository", {}).get("full_name") != REPOSITORY or current.get("run_attempt") != 1):
+        raise ValueError("Current completion workflow identity differs")
+    return current
+
+
+def complete_public(inputs, output, record, public):
+    global FROZEN
+    current = current_run()
+    old, historical, readiness = preflight_public(inputs, record, public)
+    start = timestamp()
+    recovery = public_recovery(current, public)
+    FROZEN = {**old, "readiness": readiness, "readiness_run_id": os.environ["READINESS_RUN_ID"], "freeze_started_at": start,
+              "deadline_at": (parsed(start) + dt.timedelta(seconds=ATTEMPT_SECONDS)).isoformat().replace("+00:00", "Z"), "recovery": recovery}
+    write_report(output / "frozen-attempt.json", FROZEN)
+    directory = output / "release"
+    directory.mkdir(parents=True, exist_ok=False)
+    gh("release", "download", record["tag"], "--repo", REPOSITORY, "--dir", str(directory), seconds=600)
+    if {path.name for path in directory.iterdir()} != {row["name"] for row in public["release_assets"]}:
+        raise ValueError("Downloaded public candidate asset set changed")
+    for row in public["release_assets"]:
+        path = directory / row["name"]
+        if path.stat().st_size != row["size"] or "sha256:" + digest(path) != row["digest"]:
+            raise ValueError("Downloaded public candidate asset changed")
+    plan = source_plan(directory / SOURCE_REVIEW, record["source_review_sha256"])
+    if plan["sha256"] != record["source_archive_sha256"] or plan["url"] != f"https://github.com/{REPOSITORY}/releases/download/{record['source_release_tag']}/{SOURCE_ASSET}":
+        raise ValueError("Historical corresponding source identity changed")
+    subprocess.run([sys.executable, str(Path(__file__).with_name("release.py")), "verify", str(directory), "--version", record["tag"][1:], "--source-sha", record["source_sha"], "--cryptographic"], check=True, timeout=min(300, deadline_remaining(FROZEN)))
+    candidate = candidate_identity(FROZEN, directory)
+    if candidate["checksums_sha256"] != historical["checksums_sha256"] or candidate["source_review_sha256"] != historical["source_review_sha256"]:
+        raise ValueError("Public candidate differs from historical verified bytes")
+    validate_public(api(f"releases/{record['release_id']}"), record, public)
+    candidate["release_assets"] = public["release_assets"]
+    validate_lineage(candidate, current)
+    validate_deadline(FROZEN)
+    write_report(output / "frozen-candidate.json", candidate)
+    return {"status": "pass", "forced_kill": False, "recovery": recovery, "checksums_sha256": candidate["checksums_sha256"]}
+
+
 def preflight(inputs, record):
     old_path, candidate_path = inputs / "prior/frozen-attempt.json", inputs / "prior/frozen-candidate.json"
     if digest(old_path) != record["prior_frozen_sha256"] or digest(candidate_path) != record["prior_candidate_sha256"]:
@@ -117,26 +234,13 @@ def preflight(inputs, record):
     validate_prior(run, jobs, record)
     draft = api(f"releases/{record['release_id']}")
     validate_draft(draft, record)
-    subprocess.run(["git", "merge-base", "--is-ancestor", record["source_sha"], "origin/main"], cwd=ROOT, check=True, timeout=30)
-    tag = subprocess.check_output(["git", "rev-parse", f"refs/tags/{record['tag']}^{{commit}}"], cwd=ROOT, text=True, timeout=30).strip()
-    remote = api(f"git/ref/tags/{record['tag']}")["object"]
-    while remote["type"] == "tag":
-        remote = api(f"git/tags/{remote['sha']}")["object"]
-    if tag != record["source_sha"] or (remote.get("type") != "commit" or remote.get("sha") != record["source_sha"]):
-        raise ValueError("Immutable application tag changed")
+    validate_tag(record)
     return old, candidate, readiness
 
 
 def complete(inputs, output, record):
     global FROZEN
-    if (os.environ.get("GITHUB_REPOSITORY") != REPOSITORY or os.environ.get("GITHUB_REF") != "refs/heads/main"
-            or os.environ.get("GITHUB_RUN_ATTEMPT") != "1"):
-        raise ValueError("Only a first-attempt reviewed main completion workflow may publish")
-    current = api(f"actions/runs/{os.environ['GITHUB_RUN_ID']}")
-    if (current.get("id") != int(os.environ["GITHUB_RUN_ID"]) or current.get("head_sha") != os.environ["GITHUB_SHA"] or current.get("head_branch") != "main"
-            or current.get("path") != ".github/workflows/resume-release.yml" or current.get("event") != "workflow_dispatch"
-            or current.get("repository", {}).get("full_name") != REPOSITORY or current.get("run_attempt") != 1):
-        raise ValueError("Current completion workflow identity differs")
+    current = current_run()
     old, historical, readiness = preflight(inputs, record)
     start = timestamp()
     recovery = {key: record[key] for key in ("prior_run_id", "prior_orchestration_sha", "prior_conclusion", "prior_frozen_sha256", "prior_candidate_sha256", "prior_freeze_started_at", "prior_deadline_at", "release_id")}
@@ -182,7 +286,7 @@ def complete(inputs, output, record):
 
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument("command", choices=("check", "complete"))
+    parser.add_argument("command", choices=("check", "complete", "check-public", "complete-public"))
     parser.add_argument("inputs", type=Path)
     parser.add_argument("--output", type=Path, default=Path("build/evidence"))
     args = parser.parse_args()
@@ -190,7 +294,12 @@ def main():
     try:
         record = read(RECORD)
         report.update(source_sha=record["source_sha"], prior_run_id=record["prior_run_id"], release_id=record["release_id"], record_sha256=digest(RECORD))
-        if args.command == "check":
+        if args.command == "check-public":
+            preflight_public(args.inputs, record, read(PUBLIC_RECORD))
+            report["status"] = "pass"
+        elif args.command == "complete-public":
+            report.update(complete_public(args.inputs, args.output, record, read(PUBLIC_RECORD)))
+        elif args.command == "check":
             preflight(args.inputs, record)
             report["status"] = "pass"
         else:

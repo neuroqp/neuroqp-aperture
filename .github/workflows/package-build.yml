@@ -42,7 +42,7 @@ jobs:
         shell: bash
         run: |
           mkdir -p build/tools
-          for helper in bounded.py release.py prepared-inputs.py promote.py resume_publication.py resume-publication.json; do
+          for helper in bounded.py release.py prepared-inputs.py promote.py resume_publication.py resume-publication.json public-candidate-recovery.json; do
             git show "$GITHUB_SHA:scripts/release/$helper" > "build/tools/$helper"
           done
       - name: Require frozen trusted dispatch and load reviewed packaging helpers
@@ -141,7 +141,7 @@ jobs:
         shell: bash
         run: |
           mkdir -p build/tools
-          for helper in bounded.py release.py prepared-inputs.py promote.py resume_publication.py resume-publication.json; do
+          for helper in bounded.py release.py prepared-inputs.py promote.py resume_publication.py resume-publication.json public-candidate-recovery.json; do
             git show "$GITHUB_SHA:scripts/release/$helper" > "build/tools/$helper"
           done
       - name: Require frozen trusted dispatch and load reviewed packaging helpers
