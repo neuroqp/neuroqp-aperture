@@ -1,0 +1,48 @@
+name: Stage A source transport
+
+on:
+  workflow_dispatch:
+    inputs:
+      transport_manifest_json:
+        description: Reviewed transport manifest pinning source, patch, review and target bytes
+        required: true
+      transport_manifest_sha256:
+        description: Independently reviewed SHA256 of the exact manifest JSON bytes
+        required: true
+
+permissions:
+  contents: read
+
+concurrency:
+  group: source-transport
+  cancel-in-progress: false
+
+jobs:
+  transfer:
+    if: github.ref == 'refs/heads/main'
+    runs-on: ubuntu-24.04
+    timeout-minutes: 5
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+        with:
+          ref: ${{ github.sha }}
+          fetch-depth: 0
+          persist-credentials: false
+      - name: Reconstruct and fully verify the already assembled source archive
+        env:
+          GH_TOKEN: ${{ github.token }}
+          TRANSPORT_MANIFEST_JSON: ${{ inputs.transport_manifest_json }}
+          TRANSPORT_MANIFEST_SHA256: ${{ inputs.transport_manifest_sha256 }}
+        run: |
+          mkdir -p build
+          python3 -c 'import os; from pathlib import Path; Path("build/source-transfer.json").write_text(os.environ["TRANSPORT_MANIFEST_JSON"], encoding="utf-8")'
+          python3 scripts/release/source-transfer.py build/source-transfer.json --sha256 "$TRANSPORT_MANIFEST_SHA256"
+      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
+        if: always()
+        with:
+          name: source-transport-receipt
+          path: build/source-transport-receipt.json
+          if-no-files-found: error
+          retention-days: 30
