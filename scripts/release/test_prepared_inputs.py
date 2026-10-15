@@ -176,6 +176,8 @@ class PreparedInputsTests(unittest.TestCase):
         workflow = (Path(__file__).resolve().parents[2] / ".github/workflows/package-build.yml").read_text()
         for forbidden in ("pnpm install", "apt-get", "choco install", "cargo build", "tauri build", "prepare-linux.sh", "prepare-windows.ps1"):
             self.assertNotIn(forbidden, workflow)
+        self.assertNotIn("actions/setup-python", workflow)
+        self.assertIn("Use preinstalled runner Python", workflow)
         self.assertNotIn("actions/setup-node", workflow)
         self.assertNotIn("dtolnay/rust-toolchain", workflow)
         self.assertIn("prepare-windows-rust.ps1 -CheckOnly", workflow)
