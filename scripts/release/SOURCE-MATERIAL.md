@@ -35,6 +35,18 @@ is excluded; missing, changed, duplicate, extra or unsafe members fail.
 also checks the assembly proof against the original freeze and deadline. Preserve
 the original receipt bytes. Reformatting or recreating that file changes its identity.
 
+After an orchestration-only stop, reuse an already reviewed archive only when the
+frozen application commit, archive hash, native inputs and locks are unchanged.
+In the new bounded attempt, rerun full
+`verify_source_material(root=ROOT, source_sha=FROZEN_SHA)` verification, including
+the archived Git inventory, then approve a new external manifest. Its legacy
+`assembly_attempt` field records the new freeze identity, timestamps and passing
+verification result with `kind: verified-reuse`, `archive_written: false` and
+`verification_receipt_sha256`. Preserve `original_assembly_attempt` unchanged and
+`original_review_sha256`; keep `refresh_receipt_sha256` bound to the original
+`REFRESH` proof. This records fresh verification without recompressing bytes or
+claiming another assembly.
+
 ## Development runtime coverage
 
 The reviewed `0.2.0` development baseline is `source-v0.2.0-r3`, pinned by the

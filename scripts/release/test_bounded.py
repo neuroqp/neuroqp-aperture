@@ -274,6 +274,30 @@ class BoundedTests(unittest.TestCase):
             self.assertIn("--baseline-directory build/source-baseline --fetch", job)
             self.assertNotIn("build/source-baseline", job[upload:])
 
+    def test_run_cli_accepts_workflow_option_order(self):
+        import sys
+        with tempfile.TemporaryDirectory() as folder:
+            root = Path(folder)
+            expected = identity()
+            frozen = root / "frozen-attempt.json"
+            report = root / "command.json"
+            bounded.write_report(frozen, expected)
+            workflow = (bounded.ROOT / ".github/workflows/release.yml").read_text()
+            caller = next(line for line in workflow.splitlines() if "bounded.py run " in line)
+            arguments = caller.split("bounded.py ", 1)[1].split(" -- ", 1)[0].split()
+            replacements = {"build/evidence/frozen-attempt.json": str(frozen), "build/evidence/source-material.json": str(report)}
+            arguments = [replacements.get(value, value) for value in arguments]
+            arguments[arguments.index("--seconds") + 1] = "5"
+            command = [sys.executable, "-c", "print('bounded command completed')"]
+            result = subprocess.run([sys.executable, str(Path(bounded.__file__)), *arguments, "--", *command], capture_output=True, text=True, timeout=15)
+            self.assertEqual(result.returncode, 0, result.stderr)
+            self.assertEqual(result.stdout.strip(), "bounded command completed")
+            evidence = bounded.read(report)
+            self.assertEqual(evidence["command"], command)
+            self.assertEqual(evidence["status"], "pass")
+            self.assertFalse(evidence["forced_kill"])
+            self.assertEqual(evidence["timeout_seconds"], 5)
+
     def test_runner_forced_timeout_is_fail_and_records_evidence(self):
         import sys
         with tempfile.TemporaryDirectory() as folder:
