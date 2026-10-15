@@ -71,20 +71,22 @@ jobs:
           remote_sha=$(git ls-remote origin "refs/tags/$RELEASE_TAG" "refs/tags/$RELEASE_TAG^{}" | sort -k2 | tail -n1 | cut -f1)
           test "$remote_sha" = "$SOURCE_SHA"
           python3 scripts/release/bounded.py trusted-run "$FROZEN_RUN_ID" release-evidence.yml
-          if gh release view "$RELEASE_TAG" >/dev/null 2>&1; then
-            echo 'Release already exists. Never rebuild or overwrite release assets.' >&2
-            exit 1
-          fi
           FROZEN_SHA256="$FROZEN_SHA256" python3 -c 'import os,sys; sys.path.insert(0,"scripts/release"); from bounded import read,identity,same_identity,validate_readiness,validate_deadline; from release import digest; from pathlib import Path; p=Path("build/evidence/frozen-attempt.json"); assert digest(p)==os.environ["FROZEN_SHA256"], "Frozen attempt bytes differ"; r=read(p); current=identity(); same_identity(r,current); validate_readiness(r["readiness"],current); validate_deadline(r)'
           python3 scripts/release/bounded.py deadline build/evidence/frozen-attempt.json
-          # A durable one-way tag reservation prevents both reruns and new dispatches
-          # from rebuilding the same final packages after any failed Stage B job.
-          gh release create "$RELEASE_TAG" --verify-tag --target "$SOURCE_SHA" --title "Aperture $version build reservation" --notes "Frozen attempt: $FROZEN_RUN_ID/$FROZEN_SHA256. Stage B run: $GITHUB_RUN_ID. Failed reservations are retained; never rebuild this tag." --draft --prerelease --latest=false
-          reservation_id=$(gh api "repos/$GITHUB_REPOSITORY/releases?per_page=100" --jq ".[] | select(.tag_name == \"$RELEASE_TAG\" and .draft == true) | .id")
+          # Use the reviewed orchestration helper while the checkout stays frozen.
+          git show "$GITHUB_SHA:scripts/release/reservation.py" > build/evidence/reservation-helper.py
+          reservation_id=$(python3 build/evidence/reservation-helper.py --tag "$RELEASE_TAG" --source-sha "$SOURCE_SHA")
           test -n "$reservation_id"
           echo "reservation_id=$reservation_id" >> "$GITHUB_OUTPUT"
           echo "source_sha=$SOURCE_SHA" >> "$GITHUB_OUTPUT"
           echo "version=$version" >> "$GITHUB_OUTPUT"
+      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
+        if: always()
+        with:
+          name: package-reservation
+          path: build/evidence/reservation.json
+          if-no-files-found: ignore
+          retention-days: 30
       - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
         with:
           name: frozen-attempt

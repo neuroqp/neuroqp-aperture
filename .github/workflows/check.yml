@@ -46,6 +46,7 @@ jobs:
       - run: python3 scripts/release/test_release.py
       - run: python3 scripts/release/test_bounded.py
       - run: python3 scripts/release/test_source_transfer.py
+      - run: python3 scripts/release/test_reservation.py
       - run: python3 scripts/release/test_smoke_desktop.py
       - run: python3 scripts/release/test_lab.py
       - run: python3 scripts/release/test-source-windows.py

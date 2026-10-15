@@ -1,0 +1,110 @@
+#!/usr/bin/env python3
+"""Claim a release once, permitting only proven pre-build identity failures."""
+
+import argparse
+import json
+import os
+from pathlib import Path
+import re
+import subprocess
+
+REPOSITORY = "neuroqp/neuroqp-aperture"
+CLAIM = "Package build claim"
+
+
+def api(endpoint, method="GET", body=None, pages=False):
+    command = ["gh", "api", endpoint, "--method", method]
+    if pages:
+        command += ["--paginate", "--slurp"]
+    if body is not None:
+        command += ["--input", "-"]
+    return json.loads(subprocess.check_output(command, input=None if body is None else json.dumps(body), text=True, timeout=30))
+
+
+def destination(record, tag, source_sha):
+    if record.get("tag_name") != tag or record.get("target_commitish") != source_sha or record.get("draft") is not True or record.get("prerelease") is not True or record.get("assets") != []:
+        raise ValueError("Reservation must be the exact frozen tag/source, draft prerelease, with zero assets")
+
+
+def unclaimed_origin(record, tag, source_sha):
+    destination(record, tag, source_sha)
+    body = record.get("body") or ""
+    if CLAIM.lower() in body.lower():
+        raise ValueError("A package build claim permanently prevents tag reuse; use a new version")
+    origins = re.findall(r"Stage B run: ([1-9][0-9]*)\.", body)
+    if len(origins) != 1:
+        raise ValueError("Reservation requires one retained Stage B origin run")
+    run_id = int(origins[0])
+    run = api(f"repos/{REPOSITORY}/actions/runs/{run_id}")
+    if run.get("id") != run_id or run.get("repository", {}).get("full_name") != REPOSITORY or run.get("path") != ".github/workflows/release.yml" or run.get("event") != "workflow_dispatch" or run.get("head_branch") != "main" or run.get("run_attempt") != 1 or run.get("status") != "completed" or run.get("conclusion") != "failure":
+        raise ValueError("Reservation origin must be a trusted first-attempt Stage B failure on main")
+    pages = api(f"repos/{REPOSITORY}/actions/runs/{run_id}/attempts/1/jobs?per_page=100", pages=True)
+    jobs = [job for page in pages for job in page["jobs"]]
+    expected = {"identity": "failure", "source": "skipped", "packages": "skipped", "candidate": "skipped"}
+    if len(jobs) != len(expected) or {job["name"]: job.get("conclusion") for job in jobs} != expected or any(job.get("status") != "completed" for job in jobs):
+        raise ValueError("Only identity may have run; every other Stage B job must be explicitly skipped")
+    return {"run": run, "jobs": jobs, "original_body": body}
+
+
+def reserve(tag, source_sha, check_only=False):
+    resolved = subprocess.check_output(["git", "rev-parse", "--verify", f"refs/tags/{tag}^{{commit}}"], text=True).strip()
+    if resolved != source_sha:
+        raise ValueError("Application tag differs from the frozen source")
+    pages = api(f"repos/{REPOSITORY}/releases?per_page=100", pages=True)
+    matches = [record for page in pages for record in page if record.get("tag_name") == tag]
+    if len(matches) > 1:
+        raise ValueError("Ambiguous existing reservation")
+    existing = matches[0] if matches else None
+    audit = {"tag": tag, "source_sha": source_sha, "check_only": check_only}
+    if existing:
+        # Re-read the exact ID before evaluating and mutating its retained body.
+        existing = api(f"repos/{REPOSITORY}/releases/{existing['id']}")
+        audit.update(reservation_id=existing["id"], origin=unclaimed_origin(existing, tag, source_sha))
+    if check_only:
+        return {**audit, "status": "eligible", "mutated": False}
+    if os.environ.get("GITHUB_REPOSITORY") != REPOSITORY or os.environ.get("GITHUB_REF") != "refs/heads/main" or os.environ.get("GITHUB_RUN_ATTEMPT") != "1":
+        raise ValueError("Only a first-attempt Stage B run on repository main may claim packages")
+    run_id, workflow_sha = os.environ["GITHUB_RUN_ID"], os.environ["GITHUB_SHA"]
+    if not run_id.isdecimal() or not re.fullmatch(r"[0-9a-f]{40}", workflow_sha):
+        raise ValueError("Current workflow requires exact run and orchestration identities")
+    frozen = f"Frozen attempt: {os.environ['FROZEN_RUN_ID']}/{os.environ['FROZEN_SHA256']}."
+    claim = f"{CLAIM}: Stage B run {run_id}; orchestration {workflow_sha}. {frozen}"
+    if existing:
+        body = audit["origin"]["original_body"] + "\n\n" + claim
+        record = api(f"repos/{REPOSITORY}/releases/{existing['id']}", "PATCH", {"body": body})
+        if record.get("id") != existing["id"]:
+            raise ValueError("Reservation identity changed")
+    else:
+        body = f"{frozen} Stage B run: {run_id}.\n\n{claim}"
+        record = api(f"repos/{REPOSITORY}/releases", "POST", {
+            "tag_name": tag, "target_commitish": source_sha, "name": f"Aperture {tag[1:]} build reservation",
+            "body": body, "draft": True, "prerelease": True, "make_latest": "false"})
+    destination(record, tag, source_sha)
+    if type(record.get("id")) is not int or record["id"] <= 0 or record.get("body") != body:
+        raise ValueError("GitHub did not return the durable package build claim")
+    return {**audit, "status": "claimed", "reservation_id": record["id"], "claim": claim, "orchestration_sha": workflow_sha}
+
+
+def main():
+    parser = argparse.ArgumentParser(description=__doc__)
+    parser.add_argument("--tag", required=True)
+    parser.add_argument("--source-sha", required=True)
+    parser.add_argument("--check-only", action="store_true")
+    parser.add_argument("--receipt", type=Path, default=Path("build/evidence/reservation.json"))
+    args = parser.parse_args()
+    if not re.fullmatch(r"v[0-9]+\.[0-9]+\.[0-9]+", args.tag) or not re.fullmatch(r"[0-9a-f]{40}", args.source_sha):
+        parser.error("Exact application version tag and frozen source SHA required")
+    receipt = {"status": "failed", "tag": args.tag, "source_sha": args.source_sha}
+    try:
+        receipt = reserve(args.tag, args.source_sha, args.check_only)
+        print(json.dumps(receipt) if args.check_only else receipt["reservation_id"])
+    except Exception as error:
+        receipt["error"] = str(error)
+        raise
+    finally:
+        args.receipt.parent.mkdir(parents=True, exist_ok=True)
+        args.receipt.write_text(json.dumps(receipt, indent=2) + "\n")
+
+
+if __name__ == "__main__":
+    main()
