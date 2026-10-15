@@ -18,9 +18,11 @@ from bounded import identity, passing, read, same_identity, trusted_run, write_r
 
 REPOSITORY = "neuroqp/neuroqp-aperture"
 FIELDS = ("binary_sha256", "native_dependencies_sha256")
+SOURCE_MATERIAL_FIELDS = ("asset", "url", "sha256", "application_source_inventory_sha256",
+                          "application_source_sha", "application_lockfiles_sha256", "native_dependencies_sha256")
 PATHS = {
     "linux": ("node_modules", "dist", "build/prepared/linux-runtime.tar.gz"),
-    "windows": ("node_modules", "dist", "build/windows/payload", "build/windows-packaging-tools.tar.gz", "build/packaging-cargo-home",
+    "windows": ("node_modules", "dist", "build/windows/payload", "build/windows-packaging-tools.tar.gz", "build/packaging-cargo-home", "build/windows-packaging-rust",
                 "build/release/BUILDINFO-windows.json", "build/release/THIRD-PARTY-NOTICES-windows.txt",
                 "src-tauri/target/x86_64-pc-windows-msvc/release/aperture.exe"),
 }
@@ -32,12 +34,19 @@ def hex_value(value, size):
     return value
 
 
+def source_material(plan, source_sha):
+    return {key: plan.get(key, source_sha) if key == "application_source_sha" else plan[key]
+            for key in SOURCE_MATERIAL_FIELDS}
+
+
 def check_plan(manifest, path, sha256):
     plan = source_plan(path, sha256)
     if (plan.get("application_source_sha", manifest["source_sha"]) != manifest["source_sha"]
             or plan["application_lockfiles_sha256"] != lockfile_hashes(ROOT)
             or plan["native_dependencies_sha256"][manifest["platform"]] != manifest["native_dependencies_sha256"]):
         raise ValueError("Prepared source, lockfiles or native dependencies differ from reviewed source")
+    if manifest.get("source_material") != source_material(plan, manifest["source_sha"]):
+        raise ValueError("Reviewed source material differs from prepared archive coverage")
 
 
 def create(args):
@@ -57,6 +66,7 @@ def create(args):
                 "native_dependencies_sha256": native_identity(info["native_dependencies"]),
                 "development_archive_sha256": digest(args.development_archive),
                 "tool_archive_sha256": digest(args.tool_archive), "source_plan_sha256": args.source_plan_sha256}
+    manifest["source_material"] = source_material(source_plan(args.source_plan, args.source_plan_sha256), args.source_sha)
     check_plan(manifest, args.source_plan, args.source_plan_sha256)
     if args.platform == "linux":
         manifest["verifier_archive_sha256"] = digest(args.verifier_archive)
@@ -92,6 +102,11 @@ def validate(manifest_path, frozen, platform):
         hex_value(manifest.get(key), 64)
     if platform == "linux":
         hex_value(manifest.get("verifier_archive_sha256"), 64)
+    material = manifest.get("source_material")
+    if (not isinstance(material, dict) or set(material) != set(SOURCE_MATERIAL_FIELDS)
+            or material["application_source_sha"] != manifest["source_sha"]
+            or material.get("native_dependencies_sha256", {}).get(platform) != manifest["native_dependencies_sha256"]):
+        raise ValueError("Prepared source material identity is missing or inconsistent")
     return manifest
 
 

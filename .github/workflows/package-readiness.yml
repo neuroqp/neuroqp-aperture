@@ -41,6 +41,7 @@ jobs:
       - name: Load reviewed orchestration helpers
         run: |
           mkdir -p build/tools build/prepared
+          echo "PREPARED_RESTORE_DIR=$RUNNER_TEMP/aperture-packaging-restore" >> "$GITHUB_ENV"
           for helper in prepared-inputs.py linux-runtime.py; do
             git show "$GITHUB_SHA:scripts/release/$helper" > "build/tools/$helper"
           done
@@ -63,7 +64,7 @@ jobs:
         with:
           node-version: 22.22.0
           cache: pnpm
-      - run: pnpm install --frozen-lockfile
+      - run: pnpm install --frozen-lockfile --config.node-linker=hoisted
       - name: Stage sealed tested Debian runtime and reviewed source identity
         env:
           RUNTIME_URL: ${{ inputs.linux_runtime_url }}
@@ -98,10 +99,11 @@ jobs:
           SOURCE_REVIEW_SHA256: ${{ inputs.source_review_sha256 }}
         run: |
           python3 build/tools/prepared-inputs.py create --platform linux --source-sha "$SOURCE_SHA" --validation-run-id "$VALIDATION_RUN_ID" --packaging-run-id "$GITHUB_RUN_ID" --archive build/prepared/prepared-linux.tar.gz --manifest build/prepared/prepared-linux.json --automated-report "$(cat build/prepared/report-path.txt)" --buildinfo build/linux-prepared/runtime/usr/share/aperture/BUILDINFO.json --executable build/linux-prepared/runtime/usr/bin/aperture --development-archive build/native-validation/build/evidence/development-linux.tar.gz --tool-archive build/prepared/linux-runtime.tar.gz --source-plan build/prepared/source-review.json --source-plan-sha256 "$SOURCE_REVIEW_SHA256" --verifier-archive build/prepared/verifier.tar.gz
-          mkdir -p build/restore-check
-          python3 -c 'import importlib.util; from pathlib import Path; s=importlib.util.spec_from_file_location("prepared","build/tools/prepared-inputs.py"); m=importlib.util.module_from_spec(s); s.loader.exec_module(m); m.extract(Path("build/prepared/prepared-linux.tar.gz"),Path("build/restore-check"),m.PATHS["linux"])'
-          node build/restore-check/node_modules/@tauri-apps/cli/tauri.js --version
-          node build/restore-check/node_modules/@tauri-apps/cli/tauri.js signer sign --help
+          test ! -e "$PREPARED_RESTORE_DIR"
+          mkdir -p "$PREPARED_RESTORE_DIR"
+          python3 -c 'import importlib.util,os; from pathlib import Path; s=importlib.util.spec_from_file_location("prepared","build/tools/prepared-inputs.py"); m=importlib.util.module_from_spec(s); s.loader.exec_module(m); m.extract(Path("build/prepared/prepared-linux.tar.gz"),Path(os.environ["PREPARED_RESTORE_DIR"]),m.PATHS["linux"])'
+          node "$PREPARED_RESTORE_DIR/node_modules/@tauri-apps/cli/tauri.js" --version
+          node "$PREPARED_RESTORE_DIR/node_modules/@tauri-apps/cli/tauri.js" signer sign --help
       - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
         with:
           name: prepared-linux
@@ -139,7 +141,8 @@ jobs:
       - name: Load reviewed orchestration helpers
         run: |
           New-Item -ItemType Directory -Force build/tools, build/prepared | Out-Null
-          foreach ($helper in @('prepared-inputs.py', 'stage-tested-windows.ps1', 'prepare-windows-packaging.ps1')) {
+          "PREPARED_RESTORE_DIR=$env:RUNNER_TEMP/aperture-packaging-restore" >> $env:GITHUB_ENV
+          foreach ($helper in @('prepared-inputs.py', 'stage-tested-windows.ps1', 'prepare-windows-packaging.ps1', 'prepare-windows-rust.ps1')) {
             git show "${env:GITHUB_SHA}:scripts/release/$helper" | Set-Content "build/tools/$helper" -Encoding utf8
             if ($LASTEXITCODE) { exit $LASTEXITCODE }
           }
@@ -169,11 +172,13 @@ jobs:
         with:
           toolchain: 1.98.0
           targets: x86_64-pc-windows-msvc
-      - run: pnpm install --frozen-lockfile
+      - run: pnpm install --frozen-lockfile --config.node-linker=hoisted
       - name: Prepare locked Cargo metadata cache
         env:
           CARGO_NET_OFFLINE: "false"
         run: cargo fetch --manifest-path src-tauri/Cargo.toml --locked --target x86_64-pc-windows-msvc
+      - name: Seal exact Cargo and Rust packaging tools before freeze
+        run: pwsh build/tools/prepare-windows-rust.ps1
       - name: Stage exact tested Windows executable and runtime
         env:
           SOURCE_REVIEW_URL: ${{ inputs.source_review_url }}
@@ -206,18 +211,21 @@ jobs:
         run: |
           python build/tools/prepared-inputs.py create --platform windows --source-sha $env:SOURCE_SHA --validation-run-id $env:VALIDATION_RUN_ID --packaging-run-id $env:GITHUB_RUN_ID --archive build/prepared/prepared-windows.tar.gz --manifest build/prepared/prepared-windows.json --automated-report build/native-validation/build/evidence/stage-a-windows.json --buildinfo build/release/BUILDINFO-windows.json --executable src-tauri/target/x86_64-pc-windows-msvc/release/aperture.exe --development-archive build/native-validation/build/evidence/development-windows.zip --tool-archive build/windows-packaging-tools.tar.gz --source-plan build/prepared/source-review.json --source-plan-sha256 $env:SOURCE_REVIEW_SHA256
           if ($LASTEXITCODE) { exit $LASTEXITCODE }
-          python -c "import importlib.util; from pathlib import Path; s=importlib.util.spec_from_file_location('prepared','build/tools/prepared-inputs.py'); m=importlib.util.module_from_spec(s); s.loader.exec_module(m); m.extract(Path('build/prepared/prepared-windows.tar.gz'),Path('build/restore-check'),m.PATHS['windows'])"
+          if (Test-Path -LiteralPath $env:PREPARED_RESTORE_DIR) { throw 'Restore preflight directory already exists' }
+          python -c "import importlib.util,os; from pathlib import Path; s=importlib.util.spec_from_file_location('prepared','build/tools/prepared-inputs.py'); m=importlib.util.module_from_spec(s); s.loader.exec_module(m); m.extract(Path('build/prepared/prepared-windows.tar.gz'),Path(os.environ['PREPARED_RESTORE_DIR']),m.PATHS['windows'])"
           if ($LASTEXITCODE) { exit $LASTEXITCODE }
-          node build/restore-check/node_modules/@tauri-apps/cli/tauri.js --version
+          node "$env:PREPARED_RESTORE_DIR/node_modules/@tauri-apps/cli/tauri.js" --version
           if ($LASTEXITCODE) { exit $LASTEXITCODE }
-          node build/restore-check/node_modules/@tauri-apps/cli/tauri.js bundle --help
+          node "$env:PREPARED_RESTORE_DIR/node_modules/@tauri-apps/cli/tauri.js" bundle --help
           if ($LASTEXITCODE) { exit $LASTEXITCODE }
-          $env:CARGO_HOME = "$env:GITHUB_WORKSPACE/build/restore-check/build/packaging-cargo-home"
+          $env:CARGO_HOME = "$env:PREPARED_RESTORE_DIR/build/packaging-cargo-home"
           cargo metadata --manifest-path src-tauri/Cargo.toml --no-deps --format-version 1 --offline --locked | Out-Null
           if ($LASTEXITCODE) { exit $LASTEXITCODE }
-          python build/tools/prepared-inputs.py extract-tools build/restore-check/build/windows-packaging-tools.tar.gz build/restore-check
+          python build/tools/prepared-inputs.py extract-tools "$env:PREPARED_RESTORE_DIR/build/windows-packaging-tools.tar.gz" $env:PREPARED_RESTORE_DIR
           if ($LASTEXITCODE) { exit $LASTEXITCODE }
-          pwsh build/tools/prepare-windows-packaging.ps1 -ToolsDirectory build/restore-check/build/windows-packaging-tools -CheckOnly
+          pwsh build/tools/prepare-windows-packaging.ps1 -ToolsDirectory "$env:PREPARED_RESTORE_DIR/build/windows-packaging-tools" -CheckOnly
+          if ($LASTEXITCODE) { exit $LASTEXITCODE }
+          pwsh build/tools/prepare-windows-rust.ps1 -ToolchainDirectory "$env:PREPARED_RESTORE_DIR/build/windows-packaging-rust" -CheckOnly
           if ($LASTEXITCODE) { exit $LASTEXITCODE }
       - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
         with:

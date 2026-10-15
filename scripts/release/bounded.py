@@ -301,6 +301,8 @@ def frozen(readiness, readiness_run_id, prepared_directory, packaging_run_id, so
         manifests.append(prepared.validate(path, result, platform))
     if manifests[0]["validation_run_id"] != manifests[1]["validation_run_id"]:
         raise ValueError("Prepared platforms reference different automated validation runs")
+    if manifests[0]["source_material"] != manifests[1]["source_material"]:
+        raise ValueError("Prepared platforms reference different source material")
     prepared.preparation_run(str(packaging_run_id))
     trusted_run(manifests[0]["validation_run_id"], "native-validation.yml", current["source_sha"])
     start = timestamp()

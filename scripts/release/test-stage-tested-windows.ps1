@@ -3,7 +3,8 @@ $ErrorActionPreference = 'Stop'
 Set-StrictMode -Version Latest
 $stageHelper = Join-Path $PSScriptRoot 'stage-tested-windows.ps1'
 $toolsHelper = Join-Path $PSScriptRoot 'prepare-windows-packaging.ps1'
-foreach ($helper in @($stageHelper, $toolsHelper)) {
+$rustHelper = Join-Path $PSScriptRoot 'prepare-windows-rust.ps1'
+foreach ($helper in @($stageHelper, $toolsHelper, $rustHelper)) {
     $tokens = $null; $errors = $null
     [Management.Automation.Language.Parser]::ParseFile($helper, [ref]$tokens, [ref]$errors) | Out-Null
     if ($errors.Count) { throw ($errors | Out-String) }
@@ -72,6 +73,24 @@ try {
     New-Item -ItemType Directory -Force "$temp/tools/NSIS" | Out-Null
     Write-Json "$temp/tools/windows-packaging-tools.json" @{ schema = 1; cli = 'wrong'; nsis = '3.11'; nsis_archive_sha1 = 'x'; plugin = '0.5.3'; plugin_sha1 = 'x'; files = @() }
     Assert-Rejected { & $toolsHelper -ToolsDirectory "$temp/tools" -CheckOnly } 'tool identity differs'
+    Assert-Rejected { & $rustHelper -ToolchainDirectory "$temp/absent-rust" -Root $root -CheckOnly } 'readiness manifest missing'
+    $tokens = $null; $errors = $null
+    $ast = [Management.Automation.Language.Parser]::ParseFile($rustHelper, [ref]$tokens, [ref]$errors)
+    foreach ($name in @('Get-RustFileManifest', 'Assert-RustFiles')) {
+        $definition = $ast.Find({ param($node) $node -is [Management.Automation.Language.FunctionDefinitionAst] -and $node.Name -eq $name }, $true)
+        if (!$definition) { throw "Missing Rust packaging helper $name" }
+        Invoke-Expression $definition.Extent.Text
+    }
+    $sealed = "$temp/rust/toolchain"; $toolchain = '1.98.0-x86_64-pc-windows-msvc'
+    New-Item -ItemType Directory -Force "$sealed/bin", "$sealed/lib" | Out-Null
+    foreach ($file in @('bin/cargo.exe', 'bin/rustc.exe', 'lib/driver.dll')) { [IO.File]::WriteAllText("$sealed/$file", "prepared $file") }
+    $rustManifest = [pscustomobject]@{ schema = 1; toolchain = $toolchain; layout = 'cargo-rustc-runtime-dlls'; files = @(Get-RustFileManifest) }
+    Assert-RustFiles $rustManifest
+    [IO.File]::WriteAllText("$sealed/lib/driver.dll", 'changed Rust runtime')
+    Assert-Rejected { Assert-RustFiles $rustManifest } 'file bytes differ'
+    [IO.File]::WriteAllText("$sealed/lib/driver.dll", 'prepared lib/driver.dll')
+    Remove-Item -LiteralPath "$sealed/bin/cargo.exe"
+    Assert-Rejected { Assert-RustFiles $rustManifest } 'Rust tool missing'
     Write-Output 'Windows tested-byte staging, input rejection, metadata preservation and fail-closed tool readiness checks passed.'
 } finally {
     Remove-Item -LiteralPath $temp -Recurse -Force

@@ -146,7 +146,7 @@ jobs:
         run: |
           if ($env:GITHUB_RUN_ATTEMPT -ne '1' -or $env:GITHUB_REPOSITORY -ne 'neuroqp/neuroqp-aperture' -or $env:GITHUB_EVENT_NAME -ne 'workflow_dispatch' -or $env:GITHUB_REF -ne 'refs/heads/main' -or !$env:SIGNING_KEY) { throw 'Trusted main dispatch and signing key required' }
           New-Item -ItemType Directory -Force build/tools | Out-Null
-          foreach ($helper in @('prepared-inputs.py', 'prepare-windows-packaging.ps1', 'smoke-windows.ps1')) {
+          foreach ($helper in @('prepared-inputs.py', 'prepare-windows-packaging.ps1', 'prepare-windows-rust.ps1', 'smoke-windows.ps1')) {
             git show "${env:GITHUB_SHA}:scripts/release/$helper" | Set-Content "build/tools/$helper" -Encoding utf8
             if ($LASTEXITCODE) { exit $LASTEXITCODE }
           }
@@ -195,13 +195,10 @@ jobs:
           if ($LASTEXITCODE) { exit $LASTEXITCODE }
           pwsh build/tools/prepare-windows-packaging.ps1 -CheckOnly
           if ($LASTEXITCODE) { exit $LASTEXITCODE }
+          pwsh build/tools/prepare-windows-rust.ps1 -CheckOnly
+          if ($LASTEXITCODE) { exit $LASTEXITCODE }
           python scripts/release/bounded.py deadline build/evidence/frozen-attempt.json
           if ($LASTEXITCODE) { exit $LASTEXITCODE }
-      - uses: dtolnay/rust-toolchain@e2a55d2ffb04f378e9626c28d38b36d230d1e12f
-        timeout-minutes: 3
-        with:
-          toolchain: 1.98.0
-          targets: x86_64-pc-windows-msvc
       - name: Bundle exact tested executable into updater-signed installer
         env:
           TAURI_SIGNING_PRIVATE_KEY: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY }}

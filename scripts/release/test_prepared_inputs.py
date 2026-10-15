@@ -28,6 +28,12 @@ class PreparedInputsTests(unittest.TestCase):
                          "native_dependencies_sha256": "c" * 64, "archive_sha256": "d" * 64,
                          "tool_archive_sha256": "e" * 64, "development_archive_sha256": "f" * 64,
                          "source_plan_sha256": "0" * 64, "verifier_archive_sha256": "1" * 64}
+        self.material = {"asset": "Aperture-Corresponding-Source.tar.xz",
+                         "url": "https://github.com/neuroqp/neuroqp-aperture/releases/download/source/Aperture-Corresponding-Source.tar.xz",
+                         "sha256": "2" * 64, "application_source_inventory_sha256": "3" * 64,
+                         "application_source_sha": "a" * 40, "application_lockfiles_sha256": {"lock": "x"},
+                         "native_dependencies_sha256": {"linux": "c" * 64, "windows": "4" * 64}}
+        self.manifest["source_material"] = copy.deepcopy(self.material)
         self.path = self.root / "prepared-linux.json"
         self.path.write_text(json.dumps(self.manifest))
         self.frozen = {"source_sha": "a" * 40, "packaging_run_id": "456",
@@ -72,7 +78,7 @@ class PreparedInputsTests(unittest.TestCase):
                                executable=executable, validation_run_id="123", packaging_run_id="456",
                                development_archive=runtime, tool_archive=runtime, verifier_archive=runtime, source_plan=self.root / "plan.json",
                                source_plan_sha256="c" * 64, archive=self.root / "prepared.tar.gz", manifest=self.path)
-        with patch.object(prepared, "ROOT", self.root), patch.object(prepared, "identity", return_value=current), patch.object(prepared, "lockfile_hashes", return_value={}), patch.object(prepared, "check_plan"):
+        with patch.object(prepared, "ROOT", self.root), patch.object(prepared, "identity", return_value=current), patch.object(prepared, "lockfile_hashes", return_value={}), patch.object(prepared, "check_plan"), patch.object(prepared, "source_plan", return_value=self.material):
             prepared.create(args)
         (self.root / "store/cli").unlink()
         restored = self.root / "restored"
@@ -82,11 +88,17 @@ class PreparedInputsTests(unittest.TestCase):
         self.assertEqual(prepared.read(self.path)["archive_sha256"], prepared.digest(args.archive))
 
     def test_new_frozen_source_receipt_can_cover_same_source_and_dependencies(self):
-        plan = {"application_source_sha": "a" * 40, "application_lockfiles_sha256": {"lock": "x"},
-                "native_dependencies_sha256": {"linux": "c" * 64}}
+        plan = {**copy.deepcopy(self.material), "assembly_attempt": {"stage": "B", "new_receipt": True}}
         with patch.object(prepared, "source_plan", return_value=plan), patch.object(prepared, "lockfile_hashes", return_value={"lock": "x"}):
-            # Original plan digest is provenance; final reviewed plan has a new frozen receipt.
+            # Original plan digest is provenance; only the frozen assembly receipt changes.
             prepared.check_plan(self.manifest, self.root / "final-plan.json", "1" * 64)
+            for key, value in (("url", self.material["url"].replace("/source/", "/different/")),
+                               ("sha256", "9" * 64), ("application_source_inventory_sha256", "9" * 64)):
+                previous = plan[key]
+                plan[key] = value
+                with self.assertRaisesRegex(ValueError, "archive coverage"):
+                    prepared.check_plan(self.manifest, self.root / "final-plan.json", "1" * 64)
+                plan[key] = previous
             plan["native_dependencies_sha256"]["linux"] = "9" * 64
             with self.assertRaises(ValueError):
                 prepared.check_plan(self.manifest, self.root / "final-plan.json", "1" * 64)
@@ -151,6 +163,9 @@ class PreparedInputsTests(unittest.TestCase):
         workflow = (Path(__file__).resolve().parents[2] / ".github/workflows/package-build.yml").read_text()
         for forbidden in ("pnpm install", "apt-get", "choco install", "cargo build", "tauri build", "prepare-linux.sh", "prepare-windows.ps1"):
             self.assertNotIn(forbidden, workflow)
+        self.assertNotIn("dtolnay/rust-toolchain", workflow)
+        self.assertIn("prepare-windows-rust.ps1 -CheckOnly", workflow)
+        self.assertIn("build/windows-packaging-rust", prepared.PATHS["windows"])
         self.assertIn("--no-binary-patching", workflow)
         self.assertIn("prepare-windows-packaging.ps1 -CheckOnly", workflow)
         self.assertIn('CARGO_NET_OFFLINE: "true"', workflow)
