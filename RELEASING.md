@@ -69,6 +69,34 @@ Before dispatch, review the prior stopped run, successful package jobs, original
 
 Use the resulting successful resume run's frozen candidate for the same fixed Stage C smoke checks and promotion. The cancelled run remains cancelled, its deadline remains expired, and the original package/source identities stay unchanged. No functional matrix is repeated.
 
+### Revalidate an already-public candidate after a stopped smoke attempt
+
+An explicitly authorized new attempt may reuse the complete public v0.2.0
+candidate through the same workflow's `complete-public` mode. This is separate
+from `complete`, which still requires the original incomplete draft. Do not
+rerun a stopped workflow or edit its frozen receipts.
+
+The reviewed `public-candidate-recovery.json` pins the previous successful
+completion run, its frozen receipt hashes, the release body and all 14 asset
+IDs, sizes and hashes. Prepare fresh Stage A lab readiness with the reviewed
+helpers while retaining valid unchanged application checks. Exercise the
+read-only `resume_publication.py check-public INPUTS` entry point first; its
+inputs include the original attempt, the previous completed candidate and fresh
+trusted readiness. Then dispatch:
+
+```sh
+gh workflow run resume-release.yml --ref main \
+  --field mode=complete-public --field readiness_run_id=READINESS_RUN_ID
+```
+
+This mode verifies the previous successful run and immutable candidate, starts
+a separate 60-minute completion receipt linked to that history, and downloads
+the 14 assets once for hash, signature and corresponding-source verification.
+It does not compile, assemble source, upload assets or edit the release. Use its
+new trusted frozen candidate for the fixed Stage C smoke tests and normal
+promotion. A mismatch or required failure stops this attempt; it does not
+authorize another recovery or reset the clock.
+
 Prepare and review corresponding-source material **once** for that frozen commit. Transfer those verified bytes instead of assembling the same archive again on a runner. A pinned external review manifest lets source material be prepared without editing the frozen commit. Keep required dependency coverage, notices, hashes and native identities. The source gate remains mandatory. See [source material](scripts/release/SOURCE-MATERIAL.md) for cache reuse and the remaining archive-size limitation.
 
 Create an annotated application tag on the exact validated commit, which must be contained in `main`. This may be the reviewed feature commit after merge; do not substitute a merge commit with different source identity. Never move a published tag or replace an asset. Dispatch **Stage B signed candidate** with the trusted readiness/frozen-attempt records and reviewed source-manifest digest. A tag push alone does not begin packaging.
