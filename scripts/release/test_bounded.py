@@ -140,8 +140,39 @@ class BoundedTests(unittest.TestCase):
         automated = [{**expected, "platform": platform, "status": "pass", "forced_kill": False, "binary_sha256": "4" * 64} for platform in ("linux", "windows")]
         native = [{**row, "suite": "native-functional", "areas": ["changed areas"], "evidence": ["receipt.json"]} for row in automated]
         labs = [{"environment": name, "ready": True, "source_sha": expected["source_sha"], "status": "pass", "forced_kill": False, "native_desktop": True, "tools": [{"name": "native smoke helper", "path": "C:/observer.exe" if name.startswith("windows") else "/usr/bin/observer", "sha256": "2" * 64}], "expires_at": expected["deadline_at"], **{key: expected["assets"][name][key] for key in ("tiny_tiff_sha256", "helper_sha256", "tiny_tiff_width", "tiny_tiff_height")}} for name in bounded.ENVIRONMENTS]
+        for lab in labs:
+            if lab["environment"].startswith("windows"):
+                continue
+            lab["tools"].append({"name": "linux-smoke.py", "path": "/prepared/linux-smoke.py", "sha256": "3" * 64})
+            rehearsal = smoke(expected, lab["environment"])
+            rehearsal["observer_tools"] = lab["tools"]
+            lab["preflight"] = {"schema": 1, "status": "pass", "forced_kill": False,
+                **{key: lab[key] for key in ("environment", "helper_sha256", "tiny_tiff_sha256")},
+                "runner_sha256": "3" * 64, "driver_plan_sha256": "4" * 64, "smoke_report_sha256": "5" * 64,
+                "transport": {"status": "pass", "forced_kill": False, "transport": "local" if lab["environment"] == "arch-omarchy" else "ssh-stdin", **{key: lab["tiny_tiff_sha256"] for key in ("sha256", "fixture_sha256", "returned_sha256")}},
+                "smoke_report": rehearsal}
+        now = bounded.timestamp()
         report = {**expected, "stage": "A", "status": "pass", "forced_kill": False, "completed_at": now, "automated": automated, "native_functional": native, "labs": labs}
         bounded.validate_readiness(report, expected)
+        fallback_report = copy.deepcopy(report)
+        steps = fallback_report["labs"][2]["preflight"]["smoke_report"]["steps"]
+        fallback = {step["name"]: copy.deepcopy(step["detail"]) for step in steps}
+        fallback["launch"]["launch_method"] = "extract-and-run"
+        steps.append({**steps[-1], "name": "fuse-fallback", "timeout_seconds": 180, "detail": fallback})
+        bounded.validate_readiness(fallback_report, expected)
+        for mutate in (
+            lambda lab: lab.pop("preflight"),
+            lambda lab: lab["preflight"]["transport"].update(returned_sha256="9" * 64),
+            lambda lab: lab["preflight"].update(helper_sha256="9" * 64),
+            lambda lab: lab["preflight"]["smoke_report"]["steps"][2]["detail"].update(exit_code=1),
+            lambda lab: lab["preflight"]["smoke_report"]["steps"][1]["detail"]["pixel_observation"].update(spread=0),
+            lambda lab: lab["preflight"]["smoke_report"].update(observer_tools=[]),
+            lambda lab: lab["preflight"]["smoke_report"]["steps"][0].update(timeout_seconds=9999),
+        ):
+            invalid = copy.deepcopy(report)
+            mutate(invalid["labs"][2])
+            with self.assertRaises(ValueError):
+                bounded.validate_readiness(invalid, expected)
         for index, lab in enumerate(labs):
             for key, value in (("ready", None), ("ready", False), ("ready", 1), ("source_sha", None), ("source_sha", "9" * 40), ("environment", "other-desktop")):
                 with self.subTest(environment=lab["environment"], field=key, value=value):

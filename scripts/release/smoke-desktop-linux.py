@@ -363,14 +363,23 @@ def main():
         current_launch = dict(pid=pid, launcher_pid=launcher_pid, launch_method="extract-and-run" if identity.get("extract_and_run") else "FUSE", image_argument=identity["tiny_tiff_path"], process_identity=process_identity, native_windows=[row for _, row in nodes], socket_rows=peers, backend="wayland" if wayland and not x11 else "x11" if x11 and not wayland else "unproven")
         return current_launch
     def render():
+        diagnostic = {"gate": "application-state"}
+        report["steps"][-1]["diagnostic"] = diagnostic
         expression = "const done=arguments[arguments.length-1];window.__TAURI_INTERNALS__.invoke('image_state').then(state=>{const canvas=document.querySelector('#viewer canvas')?.getBoundingClientRect();done({state,phase:document.querySelector('#viewer')?.dataset.phase??null,error:document.querySelector('#status')?.classList.contains('error')??false,rendered_canvas:!!canvas&&canvas.width>0&&canvas.height>0});}).catch(e=>done({error:String(e)}));"
         def observation():
-            value = request("POST", route + "/execute/async", {"script": expression, "args": []})
+            try:
+                value = request("POST", route + "/execute/async", {"script": expression, "args": []})
+            except Exception as error:
+                diagnostic["observer_error"] = str(error)
+                raise
+            diagnostic["observation"] = value
             return value if assert_rendered(value, identity) and value.get("rendered_canvas") else None
         state = wait(observation)
+        diagnostic["gate"] = "foreground"
         pid = current_launch["pid"]
         def active_window():
             nodes = native_nodes(pid, time.monotonic() + remaining())
+            diagnostic["windows"] = [row for _, row in nodes if row["role"] in ("frame", "window")]
             return next((row for _, row in nodes if row["role"] in ("frame", "window") and row["active"]), None)
         # A prepared owned-window capture adapter may activate only this process.
         capture = receipt.with_suffix(".ppm")
@@ -378,12 +387,14 @@ def main():
         if identity.get("screenshot_scope") == "owned-window":
             subprocess.run(command, check=True, timeout=max(.1, remaining()))
         foreground = wait(active_window)
+        diagnostic["gate"] = "visible-pixels"
         def visible_pixels():
             nonlocal foreground
             subprocess.run(command, check=True, timeout=max(.1, remaining()))
             # Prepared capture can maximize the owned window. Observe its new bounds.
             foreground = active_window()
             viewer = next((row for _, row in native_nodes(pid, time.monotonic() + remaining()) if row["name"] == "Image viewer" and row["rect"]), None)
+            diagnostic["viewer"] = viewer
             if not foreground or not viewer:
                 return None
             rect = viewer["rect"]
@@ -391,10 +402,13 @@ def main():
                 frame = foreground["rect"]
                 rect = [rect[0] - frame[0], rect[1] - frame[1], rect[2], rect[3]]
             pixels = ppm_spread(capture, rect)
+            diagnostic["pixels"] = pixels
             return pixels if pixels["spread"] >= 35 else None
         pixels = wait(visible_pixels)
+        diagnostic["gate"] = "foreground-after-capture"
         if not active_window():
             raise ValueError("Owned native window lost foreground during capture")
+        diagnostic["gate"] = "complete"
         return dict(observation=state, screenshot=str(capture), screenshot_sha256=sha(capture), pixel_observation=pixels, foreground_window=foreground, image_input=IMAGE_INPUT)
     def close():
         pid = current_launch["pid"]

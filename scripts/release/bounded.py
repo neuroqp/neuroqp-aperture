@@ -131,6 +131,59 @@ def validate_readiness(report, expected, now=None):
             raise ValueError("Stage A requires a fixed tiny TIFF no larger than 1024 pixels per dimension")
         if not parsed(report["completed_at"]) <= current < parsed(row["expires_at"]):
             raise ValueError("Desktop lab readiness has expired or is from the future")
+        if not row["environment"].startswith("windows"):
+            validate_linux_preflight(row, report["completed_at"])
+
+
+def validate_linux_preflight(lab, completed_at):
+    """Require observed transfer/render/exit, rather than a declared ready flag."""
+    probe = lab.get("preflight", {})
+    passing(probe)
+    for key in ("environment", "helper_sha256", "tiny_tiff_sha256"):
+        if probe.get(key) != lab[key]:
+            raise ValueError("Linux preflight differs from prepared " + key)
+    runner = probe.get("runner_sha256", "")
+    if not re.fullmatch(r"[0-9a-f]{64}", runner) or not any(tool["name"] == "linux-smoke.py" and tool["sha256"] == runner for tool in lab["tools"]):
+        raise ValueError("Linux preflight invocation must be a pinned tool")
+    for key in ("driver_plan_sha256", "smoke_report_sha256"):
+        if not re.fullmatch(r"[0-9a-f]{64}", probe.get(key, "")):
+            raise ValueError("Linux preflight must retain input/report hashes")
+    transfer = probe.get("transport", {})
+    passing(transfer)
+    expected_transport = "local" if lab["environment"] == "arch-omarchy" else "ssh-stdin"
+    hashes = [transfer.get("sha256")] if expected_transport == "local" else [transfer.get("fixture_sha256"), transfer.get("returned_sha256")]
+    if transfer.get("transport") != expected_transport or any(value != lab["tiny_tiff_sha256"] for value in hashes):
+        raise ValueError("Linux preflight requires the fixed TIFF SSH roundtrip")
+    smoke = probe.get("smoke_report", {})
+    passing(smoke)
+    if smoke.get("stage") != "C" or smoke.get("uid") in (None, 0):
+        raise ValueError("Linux rehearsal must observe a native user desktop")
+    for key in ("environment", "helper_sha256", "tiny_tiff_sha256"):
+        if smoke.get(key) != lab[key]:
+            raise ValueError("Linux rehearsal differs from prepared " + key)
+    if smoke.get("observer_tools") != lab["tools"]:
+        raise ValueError("Linux rehearsal tools differ from prepared tools")
+    if not parsed(smoke["started_at"]) <= parsed(smoke["finished_at"]) <= parsed(completed_at):
+        raise ValueError("Linux rehearsal must finish before readiness")
+    steps = smoke.get("steps", [])
+    names = [step.get("name") for step in steps]
+    if names not in (list(SMOKE_STEPS), [*SMOKE_STEPS, "fuse-fallback"]):
+        raise ValueError("Linux preflight requires launch, render and clean exit")
+    for step in steps:
+        passing(step)
+        duration = (parsed(step["finished_at"]) - parsed(step["started_at"])).total_seconds()
+        if not 0 <= duration <= step.get("timeout_seconds", 0) <= STEP_LIMITS[step["name"]]:
+            raise ValueError("Linux rehearsal exceeded its fixed step timeout")
+    if lab["environment"] in ("arch-omarchy", "fedora-wayland") and steps[0].get("detail", {}).get("backend") != "wayland":
+        raise ValueError("Linux rehearsal requires native Wayland for this desktop")
+    validate_render(steps[1].get("detail", {}), lab)
+    validate_native_exit(steps[0].get("detail", {}), steps[2].get("detail", {}), lab["environment"], smoke)
+    if len(steps) == 4:
+        fallback = steps[3].get("detail", {})
+        validate_render(fallback.get("render", {}), lab)
+        validate_native_exit(fallback.get("launch", {}), fallback.get("clean-exit", {}), lab["environment"], smoke)
+        if lab["environment"] not in ("debian12", "ubuntu24") or fallback.get("launch", {}).get("launch_method") != "extract-and-run":
+            raise ValueError("Linux rehearsal fallback is confined to Debian/Ubuntu extraction")
 
 
 def validate_deadline(expected, now=None):
