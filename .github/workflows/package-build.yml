@@ -76,10 +76,6 @@ jobs:
         with:
           name: corresponding-source
           path: build/release
-      - uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4
-        timeout-minutes: 3
-        with:
-          node-version: 22.22.0
       - name: Restore frozen prepared inputs and verified Debian runtime
         timeout-minutes: 3
         env:
@@ -180,10 +176,6 @@ jobs:
         with:
           name: corresponding-source
           path: build/release
-      - uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4
-        timeout-minutes: 3
-        with:
-          node-version: 22.22.0
       - name: Restore frozen executable, dependencies and prepared installer tools
         timeout-minutes: 3
         env:

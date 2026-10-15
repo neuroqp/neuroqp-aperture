@@ -21,8 +21,8 @@ FIELDS = ("binary_sha256", "native_dependencies_sha256")
 SOURCE_MATERIAL_FIELDS = ("asset", "url", "sha256", "application_source_inventory_sha256",
                           "application_source_sha", "application_lockfiles_sha256", "native_dependencies_sha256")
 PATHS = {
-    "linux": ("node_modules", "dist", "build/prepared/linux-runtime.tar.gz"),
-    "windows": ("node_modules", "dist", "build/windows/payload", "build/windows-packaging-tools.tar.gz", "build/packaging-cargo-home", "build/windows-packaging-rust",
+    "linux": ("node_modules", "dist", "build/packaging-node", "build/prepared/linux-runtime.tar.gz"),
+    "windows": ("node_modules", "dist", "build/packaging-node", "build/windows/payload", "build/windows-packaging-tools.tar.gz", "build/packaging-cargo-home", "build/windows-packaging-rust",
                 "build/release/BUILDINFO-windows.json", "build/release/THIRD-PARTY-NOTICES-windows.txt",
                 "src-tauri/target/x86_64-pc-windows-msvc/release/aperture.exe"),
 }
@@ -32,6 +32,25 @@ def hex_value(value, size):
     if not isinstance(value, str) or not re.fullmatch(f"[0-9a-f]{{{size}}}", value):
         raise ValueError("Invalid hexadecimal input identity")
     return value
+
+
+def node_path(platform, root=ROOT):
+    return root / "build/packaging-node" / ("node.exe" if platform == "windows" else "node")
+
+
+def check_node(path, expected_sha256):
+    if digest(path) != expected_sha256:
+        raise ValueError("Prepared Node executable SHA256 differs")
+    if subprocess.check_output([str(path.resolve()), "--version"], text=True, timeout=30).strip() != "v22.22.0":
+        raise ValueError("Prepared Node executable version differs")
+
+
+def prepare_node(platform):
+    source = Path(subprocess.check_output(["node", "-p", "process.execPath"], text=True, timeout=30).strip()).resolve(strict=True)
+    destination = node_path(platform)
+    destination.parent.mkdir(parents=True, exist_ok=False)
+    shutil.copy2(source, destination)
+    check_node(destination, digest(source))
 
 
 def source_material(plan, source_sha):
@@ -65,7 +84,8 @@ def create(args):
                 "binary_sha256": report["binary_sha256"],
                 "native_dependencies_sha256": native_identity(info["native_dependencies"]),
                 "development_archive_sha256": digest(args.development_archive),
-                "tool_archive_sha256": digest(args.tool_archive), "source_plan_sha256": args.source_plan_sha256}
+                "tool_archive_sha256": digest(args.tool_archive), "source_plan_sha256": args.source_plan_sha256,
+                "node_sha256": digest(node_path(args.platform, ROOT))}
     manifest["source_material"] = source_material(source_plan(args.source_plan, args.source_plan_sha256), args.source_sha)
     check_plan(manifest, args.source_plan, args.source_plan_sha256)
     if args.platform == "linux":
@@ -98,7 +118,7 @@ def validate(manifest_path, frozen, platform):
         hex_value(manifest.get(key), 64)
         if manifest[key] != expected.get(key):
             raise ValueError(f"Prepared {key} differs from frozen inputs")
-    for key in ("archive_sha256", "tool_archive_sha256", "development_archive_sha256", "source_plan_sha256"):
+    for key in ("archive_sha256", "tool_archive_sha256", "development_archive_sha256", "source_plan_sha256", "node_sha256"):
         hex_value(manifest.get(key), 64)
     if platform == "linux":
         hex_value(manifest.get("verifier_archive_sha256"), 64)
@@ -188,6 +208,8 @@ def main():
     for name in ("archive", "manifest", "automated-report", "buildinfo", "executable", "development-archive", "tool-archive", "source-plan"):
         p.add_argument("--" + name, required=True, type=Path)
     p.add_argument("--verifier-archive", type=Path)
+    p = sub.add_parser("prepare-node")
+    p.add_argument("platform", choices=PATHS)
     p = sub.add_parser("prepare-verifier")
     p.add_argument("directory", type=Path)
     p.add_argument("archive", type=Path)
@@ -215,6 +237,8 @@ def main():
     args = parser.parse_args()
     if args.command == "create":
         create(args)
+    elif args.command == "prepare-node":
+        prepare_node(args.platform)
     elif args.command == "prepare-verifier":
         prepare_verifier(args.directory, args.archive)
     elif args.command == "restore-verifier":
@@ -243,6 +267,11 @@ def main():
         key = "binary_sha256" if args.platform == "windows" else "tool_archive_sha256"
         if digest(executable) != manifest[key]:
             raise ValueError("Restored prepared input differs")
+        node = node_path(args.platform, ROOT)
+        check_node(node, manifest["node_sha256"])
+        if os.environ.get("GITHUB_PATH"):
+            with Path(os.environ["GITHUB_PATH"]).open("a") as stream:
+                stream.write(str(node.parent.resolve()) + "\n")
         tools = ROOT / "build/windows-packaging-tools.tar.gz"
         if args.platform == "windows" and digest(tools) != manifest["tool_archive_sha256"]:
             raise ValueError("Restored packaging tools archive differs")

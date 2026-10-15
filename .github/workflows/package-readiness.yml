@@ -98,12 +98,13 @@ jobs:
           VALIDATION_RUN_ID: ${{ inputs.validation_run_id }}
           SOURCE_REVIEW_SHA256: ${{ inputs.source_review_sha256 }}
         run: |
+          python3 build/tools/prepared-inputs.py prepare-node linux
           python3 build/tools/prepared-inputs.py create --platform linux --source-sha "$SOURCE_SHA" --validation-run-id "$VALIDATION_RUN_ID" --packaging-run-id "$GITHUB_RUN_ID" --archive build/prepared/prepared-linux.tar.gz --manifest build/prepared/prepared-linux.json --automated-report "$(cat build/prepared/report-path.txt)" --buildinfo build/linux-prepared/runtime/usr/share/aperture/BUILDINFO.json --executable build/linux-prepared/runtime/usr/bin/aperture --development-archive build/native-validation/build/evidence/development-linux.tar.gz --tool-archive build/prepared/linux-runtime.tar.gz --source-plan build/prepared/source-review.json --source-plan-sha256 "$SOURCE_REVIEW_SHA256" --verifier-archive build/prepared/verifier.tar.gz
           test ! -e "$PREPARED_RESTORE_DIR"
           mkdir -p "$PREPARED_RESTORE_DIR"
           python3 -c 'import importlib.util,os; from pathlib import Path; s=importlib.util.spec_from_file_location("prepared","build/tools/prepared-inputs.py"); m=importlib.util.module_from_spec(s); s.loader.exec_module(m); m.extract(Path("build/prepared/prepared-linux.tar.gz"),Path(os.environ["PREPARED_RESTORE_DIR"]),m.PATHS["linux"])'
-          node "$PREPARED_RESTORE_DIR/node_modules/@tauri-apps/cli/tauri.js" --version
-          node "$PREPARED_RESTORE_DIR/node_modules/@tauri-apps/cli/tauri.js" signer sign --help
+          "$PREPARED_RESTORE_DIR/build/packaging-node/node" "$PREPARED_RESTORE_DIR/node_modules/@tauri-apps/cli/tauri.js" --version
+          "$PREPARED_RESTORE_DIR/build/packaging-node/node" "$PREPARED_RESTORE_DIR/node_modules/@tauri-apps/cli/tauri.js" signer sign --help
       - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
         with:
           name: prepared-linux
@@ -209,14 +210,16 @@ jobs:
           VALIDATION_RUN_ID: ${{ inputs.validation_run_id }}
           SOURCE_REVIEW_SHA256: ${{ inputs.source_review_sha256 }}
         run: |
+          python build/tools/prepared-inputs.py prepare-node windows
+          if ($LASTEXITCODE) { exit $LASTEXITCODE }
           python build/tools/prepared-inputs.py create --platform windows --source-sha $env:SOURCE_SHA --validation-run-id $env:VALIDATION_RUN_ID --packaging-run-id $env:GITHUB_RUN_ID --archive build/prepared/prepared-windows.tar.gz --manifest build/prepared/prepared-windows.json --automated-report build/native-validation/build/evidence/stage-a-windows.json --buildinfo build/release/BUILDINFO-windows.json --executable src-tauri/target/x86_64-pc-windows-msvc/release/aperture.exe --development-archive build/native-validation/build/evidence/development-windows.zip --tool-archive build/windows-packaging-tools.tar.gz --source-plan build/prepared/source-review.json --source-plan-sha256 $env:SOURCE_REVIEW_SHA256
           if ($LASTEXITCODE) { exit $LASTEXITCODE }
           if (Test-Path -LiteralPath $env:PREPARED_RESTORE_DIR) { throw 'Restore preflight directory already exists' }
           python -c "import importlib.util,os; from pathlib import Path; s=importlib.util.spec_from_file_location('prepared','build/tools/prepared-inputs.py'); m=importlib.util.module_from_spec(s); s.loader.exec_module(m); m.extract(Path('build/prepared/prepared-windows.tar.gz'),Path(os.environ['PREPARED_RESTORE_DIR']),m.PATHS['windows'])"
           if ($LASTEXITCODE) { exit $LASTEXITCODE }
-          node "$env:PREPARED_RESTORE_DIR/node_modules/@tauri-apps/cli/tauri.js" --version
+          & "$env:PREPARED_RESTORE_DIR/build/packaging-node/node.exe" "$env:PREPARED_RESTORE_DIR/node_modules/@tauri-apps/cli/tauri.js" --version
           if ($LASTEXITCODE) { exit $LASTEXITCODE }
-          node "$env:PREPARED_RESTORE_DIR/node_modules/@tauri-apps/cli/tauri.js" bundle --help
+          & "$env:PREPARED_RESTORE_DIR/build/packaging-node/node.exe" "$env:PREPARED_RESTORE_DIR/node_modules/@tauri-apps/cli/tauri.js" bundle --help
           if ($LASTEXITCODE) { exit $LASTEXITCODE }
           $env:CARGO_HOME = "$env:PREPARED_RESTORE_DIR/build/packaging-cargo-home"
           cargo metadata --manifest-path src-tauri/Cargo.toml --no-deps --format-version 1 --offline --locked | Out-Null

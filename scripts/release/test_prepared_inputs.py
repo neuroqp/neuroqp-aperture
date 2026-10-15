@@ -27,7 +27,7 @@ class PreparedInputsTests(unittest.TestCase):
                          "packaging_run_id": "456", "binary_sha256": "b" * 64,
                          "native_dependencies_sha256": "c" * 64, "archive_sha256": "d" * 64,
                          "tool_archive_sha256": "e" * 64, "development_archive_sha256": "f" * 64,
-                         "source_plan_sha256": "0" * 64, "verifier_archive_sha256": "1" * 64}
+                         "source_plan_sha256": "0" * 64, "verifier_archive_sha256": "1" * 64, "node_sha256": "5" * 64}
         self.material = {"asset": "Aperture-Corresponding-Source.tar.xz",
                          "url": "https://github.com/neuroqp/neuroqp-aperture/releases/download/source/Aperture-Corresponding-Source.tar.xz",
                          "sha256": "2" * 64, "application_source_inventory_sha256": "3" * 64,
@@ -64,6 +64,8 @@ class PreparedInputsTests(unittest.TestCase):
         (self.root / "dist").mkdir()
         (self.root / "dist/index.html").write_text("tested frontend")
         (self.root / "build/prepared").mkdir(parents=True)
+        (self.root / "build/packaging-node").mkdir()
+        (self.root / "build/packaging-node/node").write_bytes(b"pinned node")
         runtime = self.root / "build/prepared/linux-runtime.tar.gz"
         runtime.write_bytes(b"sealed runtime")
         executable = self.root / "app"
@@ -129,6 +131,17 @@ class PreparedInputsTests(unittest.TestCase):
         with self.assertRaises(ValueError):
             prepared.extract(path, restored, prepared.PATHS["linux"])
 
+    def test_prepared_node_requires_exact_bytes_and_pinned_version(self):
+        node = self.root / "node"
+        node.write_bytes(b"pinned executable")
+        with patch.object(prepared.subprocess, "check_output", return_value="v22.22.0\n"):
+            prepared.check_node(node, prepared.digest(node))
+            with self.assertRaisesRegex(ValueError, "SHA256 differs"):
+                prepared.check_node(node, "0" * 64)
+        with patch.object(prepared.subprocess, "check_output", return_value="v25.0.0\n"):
+            with self.assertRaisesRegex(ValueError, "version differs"):
+                prepared.check_node(node, prepared.digest(node))
+
     def test_signature_verifier_seals_closure_and_restores_only_frozen_archive(self):
         tools = self.root / "system"
         tools.mkdir()
@@ -163,6 +176,7 @@ class PreparedInputsTests(unittest.TestCase):
         workflow = (Path(__file__).resolve().parents[2] / ".github/workflows/package-build.yml").read_text()
         for forbidden in ("pnpm install", "apt-get", "choco install", "cargo build", "tauri build", "prepare-linux.sh", "prepare-windows.ps1"):
             self.assertNotIn(forbidden, workflow)
+        self.assertNotIn("actions/setup-node", workflow)
         self.assertNotIn("dtolnay/rust-toolchain", workflow)
         self.assertIn("prepare-windows-rust.ps1 -CheckOnly", workflow)
         self.assertIn("build/windows-packaging-rust", prepared.PATHS["windows"])

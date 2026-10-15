@@ -62,7 +62,7 @@ class BoundedTests(unittest.TestCase):
                         "native_dependencies_sha256": {"linux": "b" * 64, "windows": "b" * 64}},
                     **{key: "b" * 64 for key in ("binary_sha256", "native_dependencies_sha256",
                         "archive_sha256", "tool_archive_sha256", "development_archive_sha256",
-                        "source_plan_sha256", "verifier_archive_sha256")}})
+                        "source_plan_sha256", "verifier_archive_sha256", "node_sha256")}})
             with patch.object(bounded, "identity", return_value=current), patch.object(bounded, "validate_readiness"), \
                     patch.object(bounded, "trusted_run", return_value={"head_sha": "a" * 40}), patch.object(bounded.subprocess, "run"):
                 result = bounded.frozen(readiness, "789", directory, "456")
