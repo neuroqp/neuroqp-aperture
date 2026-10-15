@@ -42,8 +42,19 @@ class TransportTests(unittest.TestCase):
     def test_draft_refuses_public_or_existing_target(self):
         for record in [{"tag_name": "source-test", "draft": False, "assets": []},
                        {"tag_name": "source-test", "draft": True, "assets": [{"name": release.SOURCE_ASSET}]}]:
-            with patch.object(transport, "command", return_value=json.dumps(record)):
+            with patch.object(transport, "command", return_value=json.dumps([record])):
                 with self.assertRaises(ValueError):
+                    transport.draft_release("source-test")
+
+    def test_draft_lookup_selects_exact_unique_tag_from_authenticated_list(self):
+        draft = {"id": 99, "tag_name": "source-test", "draft": True, "assets": []}
+        other = {"id": 100, "tag_name": "source-test-other", "draft": True, "assets": []}
+        with patch.object(transport, "command", return_value=json.dumps([other, draft])) as command:
+            self.assertEqual(transport.draft_release("source-test"), draft)
+            command.assert_called_once_with(["gh", "api", f"repos/{transport.REPOSITORY}/releases?per_page=100"])
+        for records in [[other], [draft, draft]]:
+            with patch.object(transport, "command", return_value=json.dumps(records)):
+                with self.assertRaisesRegex(ValueError, "exactly one release"):
                     transport.draft_release("source-test")
 
     def test_failed_full_source_gate_never_uploads_and_success_verifies_github(self):

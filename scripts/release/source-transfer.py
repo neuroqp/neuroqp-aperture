@@ -40,8 +40,12 @@ def validate_manifest(path, trusted_sha256, root):
 
 
 def draft_release(tag):
-    record = json.loads(command(["gh", "api", f"repos/{REPOSITORY}/releases/tags/{tag}"]))
-    if record.get("tag_name") != tag or record.get("draft") is not True:
+    releases = json.loads(command(["gh", "api", f"repos/{REPOSITORY}/releases?per_page=100"]))
+    matches = [record for record in releases if record.get("tag_name") == tag]
+    if len(matches) != 1:
+        raise ValueError("Source destination must match exactly one release")
+    record = matches[0]
+    if record.get("draft") is not True:
         raise ValueError("Source destination must remain an existing draft")
     if any(asset["name"] == release.SOURCE_ASSET for asset in record["assets"]):
         raise ValueError("Source target asset already exists; never overwrite it")
