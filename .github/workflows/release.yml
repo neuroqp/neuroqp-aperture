@@ -75,7 +75,8 @@ jobs:
           python3 scripts/release/bounded.py deadline build/evidence/frozen-attempt.json
           # Use the reviewed orchestration helper while the checkout stays frozen.
           git show "$GITHUB_SHA:scripts/release/reservation.py" > build/evidence/reservation-helper.py
-          reservation_id=$(python3 build/evidence/reservation-helper.py --tag "$RELEASE_TAG" --source-sha "$SOURCE_SHA")
+          git show "$GITHUB_SHA:scripts/release/reservation-recovery.json" > build/evidence/reservation-recovery.json
+          reservation_id=$(python3 build/evidence/reservation-helper.py --tag "$RELEASE_TAG" --source-sha "$SOURCE_SHA" --recovery-record build/evidence/reservation-recovery.json)
           test -n "$reservation_id"
           echo "reservation_id=$reservation_id" >> "$GITHUB_OUTPUT"
           echo "source_sha=$SOURCE_SHA" >> "$GITHUB_OUTPUT"

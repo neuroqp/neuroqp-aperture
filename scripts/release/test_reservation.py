@@ -1,6 +1,7 @@
 """Only proven zero-build failures may recover an existing reservation."""
 
 import copy
+import hashlib
 import os
 import unittest
 from unittest.mock import patch
@@ -80,11 +81,13 @@ class ReservationTests(unittest.TestCase):
             if method == "PATCH":
                 writes.append(body)
                 self.assertTrue(body["body"].startswith(self.draft["body"] + "\n\n"))
+                self.assertEqual({key: body[key] for key in ["tag_name", "target_commitish", "draft", "prerelease", "make_latest"]},
+                                 {"tag_name": TAG, "target_commitish": SOURCE, "draft": True, "prerelease": True, "make_latest": "false"})
                 return {**self.draft, **body}
             if endpoint.endswith("/releases?per_page=100"):
                 return [[self.draft]]
             if endpoint.endswith("/releases/42"):
-                return self.draft
+                return {**self.draft, **writes[-1]} if writes else self.draft
             if endpoint.endswith("/actions/runs/7"):
                 return self.run
             return [{"jobs": self.jobs}]
@@ -96,6 +99,33 @@ class ReservationTests(unittest.TestCase):
             self.assertIn("Stage B run 8", result["claim"])
             with self.assertRaises(ValueError):
                 reservation.unclaimed_origin({**self.draft, **writes[0]}, TAG, SOURCE)
+
+    def test_reviewed_alias_requires_both_failed_identity_runs_and_exact_body(self):
+        body = self.draft["body"] + "\n\nPackage build claim: Stage B run 8; orchestration " + "b" * 40 + "."
+        draft = {**self.draft, "tag_name": "untagged-test", "body": body}
+        recovery = {"schema": 1, "tag": TAG, "source_sha": SOURCE, "reservation_id": 42, "alias": "untagged-test",
+                    "body_sha256": hashlib.sha256(body.encode()).hexdigest(), "origin_run_id": 7,
+                    "claim_run_id": 8, "claim_orchestration_sha": "b" * 40}
+        claim_run = {**self.run, "id": 8, "head_sha": "b" * 40}
+        responses = [self.run, [{"jobs": self.jobs}], claim_run, [{"jobs": self.jobs}]]
+        with patch.object(reservation, "api", side_effect=responses):
+            proof = reservation.unclaimed_origin(draft, TAG, SOURCE, recovery)
+            self.assertEqual(proof["claim_origin"]["run"]["id"], 8)
+        for field, value in [("tag_name", "untagged-other"), ("id", 43), ("body", body + " extra claim")]:
+            with self.subTest(field=field), self.assertRaises(ValueError):
+                reservation.unclaimed_origin({**draft, field: value}, TAG, SOURCE, recovery)
+        started = copy.deepcopy(self.jobs)
+        next(job for job in started if job["name"] == "packages")["conclusion"] = "failure"
+        with patch.object(reservation, "api", side_effect=responses[:3] + [[{"jobs": started}]]), self.assertRaises(ValueError):
+            reservation.unclaimed_origin(draft, TAG, SOURCE, recovery)
+
+    def test_reviewed_recovery_cannot_fall_through_to_new_or_different_draft(self):
+        recovery = {"tag": TAG, "source_sha": SOURCE, "reservation_id": 42}
+        for pages in [[[]], [[{**self.draft, "id": 99}]]]:
+            with patch.object(reservation.subprocess, "check_output", return_value=SOURCE), \
+                    patch.object(reservation, "api", return_value=pages) as api, self.assertRaises(ValueError):
+                reservation.reserve(TAG, SOURCE, recovery=recovery)
+            self.assertEqual(api.call_count, 1)
 
 
 if __name__ == "__main__":
