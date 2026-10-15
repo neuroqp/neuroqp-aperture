@@ -31,6 +31,7 @@ import { channelHistograms } from "./display-settings";
 import { bindColorPanel } from "./color-panel";
 import { bindColorRenderer } from "./color-renderer";
 import { createGpuColorDrawer } from "./gpu-color-drawer";
+import { fitInitialImage } from "./initial-fit";
 import {
   ImageLoader,
   orientation,
@@ -383,6 +384,7 @@ let dialogOpen = false;
 let loading = false;
 let tileError: string | null = null;
 let histogramLoad: AbortController | null = null;
+let cancelInitialFit: (() => void) | undefined;
 const downloads = new Set<OpenSeadragon.ImageJob>();
 const tileUrl = (id: string) => convertFileSrc(id, "aperture");
 
@@ -435,6 +437,8 @@ function setLoading(active: boolean, progress: number | null = null) {
 }
 
 function resetViewer() {
+  cancelInitialFit?.();
+  cancelInitialFit = undefined;
   histogramLoad?.abort();
   histogramLoad = null;
   currentId = null;
@@ -594,7 +598,7 @@ function showImage(state: ImageState) {
           );
           return;
         }
-        viewer.viewport.goHome(true);
+        cancelInitialFit = fitInitialImage(viewer);
         tools.setImageReady(true);
         colorPanel.setEnabled(Boolean(state.channels?.length));
         document
