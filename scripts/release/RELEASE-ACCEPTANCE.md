@@ -6,6 +6,8 @@ Use with [RELEASING.md](../../RELEASING.md). Stage A establishes application beh
 
 Run full automated frontend, Rust, release-helper and actual-worker regressions before final packaging. Development compilation is allowed and necessary. Use the compiled native development app on the affected operating systems, with pinned native libraries/runtime. Browser previews alone do not establish native dialogs or filesystem behavior.
 
+Run unit and backend integration suites in GitHub Actions on Linux and Windows. Reserve desktop VM time for limited native functional checks of changed behavior, using the CI development executable. Do not repeat the automated suites there or turn the behavior table below into a mandatory GUI matrix for every release.
+
 | Behavior           | Meaningful pre-freeze observations                                                                                                                 |
 | ------------------ | -------------------------------------------------------------------------------------------------------------------------------------------------- |
 | Viewing            | Supported formats and relevant TIFF/BigTIFF variants render correct dimensions/pixels; navigation, pan, zoom and display controls work             |

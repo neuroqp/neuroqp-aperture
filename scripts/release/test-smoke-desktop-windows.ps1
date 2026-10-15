@@ -5,10 +5,36 @@ $helper=Join-Path $PSScriptRoot 'smoke-desktop-windows.ps1'
 $tokens=$null;$errors=$null
 $ast=[Management.Automation.Language.Parser]::ParseFile($helper,[ref]$tokens,[ref]$errors)
 if ($errors.Count) { throw ($errors|Out-String) }
-foreach ($name in @('Verify-Inputs','Assert-Rendered','Remaining','Wait-Until','Step','Save-Progress','Supervise-Observer')) {
+foreach ($name in @('Verify-Inputs','Assert-Rendered','Remaining','Wait-Until','Step','Save-Progress','Supervise-Observer','Owned-TitlebarPoint')) {
     $definition=$ast.Find({param($node) $node -is [Management.Automation.Language.FunctionDefinitionAst] -and $node.Name -eq $name},$true)
     if (-not $definition) { throw "Missing helper $name" }
     Invoke-Expression $definition.Extent.Text
+}
+Add-Type -AssemblyName System.Windows.Forms
+Add-Type @'
+using System;
+public static class SmokeDesktop {
+ public static bool PointOwned=true;
+ public static bool OwnedPoint(IntPtr handle,int x,int y) { return handle==new IntPtr(123) && PointOwned; }
+}
+'@
+$rect=[pscustomobject]@{X=0;Y=0;Width=800;Height=600}
+$point=Owned-TitlebarPoint ([IntPtr]123) $rect
+if ($point.x -ne 220 -or $point.y -ne 18) { throw 'Owned titlebar point differs' }
+[SmokeDesktop]::PointOwned=$false
+$rejected=$false
+try { Owned-TitlebarPoint ([IntPtr]123) $rect|Out-Null } catch { $rejected=$true }
+if (-not $rejected) { throw 'Covered titlebar point was accepted' }
+[SmokeDesktop]::PointOwned=$true
+foreach ($bad in @(
+ [pscustomobject]@{X=[double]::NaN;Y=0;Width=800;Height=600},
+ [pscustomobject]@{X=0;Y=0;Width=[double]::PositiveInfinity;Height=600},
+ [pscustomobject]@{X=0;Y=0;Width=200;Height=600},
+ [pscustomobject]@{X=-1000;Y=0;Width=800;Height=600}
+)) {
+ $rejected=$false
+ try { Owned-TitlebarPoint ([IntPtr]123) $bad|Out-Null } catch { $rejected=$true }
+ if (-not $rejected) { throw 'Invalid/offscreen titlebar bounds were accepted' }
 }
 $i=[pscustomobject]@{tiny_tiff_path='prepared.tif';tiny_tiff_width=65;tiny_tiff_height=49}
 foreach ($observation in @([pscustomobject]@{},[pscustomobject]@{state=$null},[pscustomobject]@{state=[pscustomobject]@{};phase=$null;error=$false})) {

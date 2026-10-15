@@ -126,6 +126,15 @@ function Assert-Rendered($Observation) {
     if ($Observation.state.path -ne $i.tiny_tiff_path -or $Observation.state.width -ne $i.tiny_tiff_width -or $Observation.state.height -ne $i.tiny_tiff_height) { throw 'Actual image path/dimensions differ' }
     return $true
 }
+function Owned-TitlebarPoint($Handle,$Rect) {
+    $screen=[Windows.Forms.Screen]::PrimaryScreen.Bounds
+    foreach ($value in @($Rect.X,$Rect.Y,$Rect.Width,$Rect.Height)) {
+        if ([double]::IsNaN($value) -or [double]::IsInfinity($value)) { throw 'Owned titlebar bounds must be finite' }
+    }
+    $x=[int]($Rect.X+220);$y=[int]($Rect.Y+18)
+    if ($Rect.Width -le 220 -or $Rect.Height -le 18 -or -not $screen.Contains($x,$y) -or -not [SmokeDesktop]::OwnedPoint($Handle,$x,$y)) { throw 'Owned titlebar point is covered or outside the visible desktop' }
+    return @{x=$x;y=$y}
+}
 function Capture-Pixels($Rect) {
     $owned=[SmokeDesktop]::AppWindow([uint32]$script:app.Id)
     if ($owned -eq [IntPtr]::Zero -or [SmokeDesktop]::GetForegroundWindow() -ne $owned) { throw 'Owned native window must be foreground during capture' }
@@ -158,6 +167,10 @@ public static class SmokeDesktop {
  [DllImport("user32.dll")] static extern bool IsWindowVisible(IntPtr h);
  [DllImport("user32.dll")] static extern IntPtr GetWindow(IntPtr h,uint command);
  [DllImport("user32.dll",CharSet=CharSet.Unicode)] static extern int GetClassName(IntPtr h,StringBuilder text,int n);
+ [StructLayout(LayoutKind.Sequential)] struct POINT {public int x,y;}
+ [DllImport("user32.dll")] static extern IntPtr WindowFromPoint(POINT point);
+ [DllImport("user32.dll")] static extern IntPtr GetAncestor(IntPtr h,uint flags);
+ public static bool OwnedPoint(IntPtr h,int x,int y) {return h!=IntPtr.Zero && GetAncestor(WindowFromPoint(new POINT{x=x,y=y}),2)==h;}
  [DllImport("user32.dll")] public static extern bool SetForegroundWindow(IntPtr h);
  [DllImport("user32.dll")] public static extern IntPtr GetForegroundWindow();
  [DllImport("user32.dll")] public static extern bool ShowWindow(IntPtr h,int n);
@@ -237,6 +250,11 @@ public static class SmokeDesktop {
         }
         $h=[SmokeDesktop]::AppWindow([uint32]$script:app.Id)
         [SmokeDesktop]::ShowWindow($h,3)|Out-Null;[SmokeDesktop]::SetForegroundWindow($h)|Out-Null
+        if ([SmokeDesktop]::GetForegroundWindow() -ne $h) {
+            $bounds=[Windows.Automation.AutomationElement]::FromHandle($h).Current.BoundingRectangle
+            $point=Owned-TitlebarPoint $h $bounds
+            [SmokeDesktop]::Click($point.x,$point.y)
+        }
         Wait-Until { [SmokeDesktop]::GetForegroundWindow() -eq $h }|Out-Null
         $script:target=Wait-Until {
             try { $pages=@(Invoke-RestMethod -Uri ('http://127.0.0.1:'+$i.devtools_port+'/json') -TimeoutSec 1|Where-Object {$_.type -eq 'page' -and $_.url -match '^https?://tauri\.localhost/'});if ($pages.Count -eq 1) {$pages[0]} } catch {}
