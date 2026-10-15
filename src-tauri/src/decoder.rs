@@ -175,7 +175,22 @@ mod tests {
         )
         .unwrap();
         fs::set_permissions(&script, fs::Permissions::from_mode(0o700)).unwrap();
-        (Decoder::spawn(script.as_os_str(), &root).unwrap(), root)
+        // A concurrent fork can retain this script's writer until its exec closes
+        // CLOEXEC descriptors. Retry only ETXTBSY during fixture startup.
+        let text_busy = format!(
+            "Cannot start image decoder: {}",
+            std::io::Error::from_raw_os_error(26)
+        );
+        let deadline = Instant::now() + Duration::from_secs(1);
+        let decoder = loop {
+            match Decoder::spawn(script.as_os_str(), &root) {
+                Err(error) if error == text_busy && Instant::now() < deadline => {
+                    thread::sleep(Duration::from_millis(10));
+                }
+                result => break result.unwrap(),
+            }
+        };
+        (decoder, root)
     }
 
     fn request() -> Request {
