@@ -123,7 +123,7 @@ class BoundedTests(unittest.TestCase):
         expired = (bounded.parsed(expected["deadline_at"]) + dt.timedelta(seconds=1)).isoformat()
         with self.assertRaisesRegex(ValueError, "deadline exceeded"): bounded.validate_deadline(expected, expired)
         changed = {**expected, "deadline_at": (bounded.parsed(expected["deadline_at"]) + dt.timedelta(seconds=1)).isoformat()}
-        with self.assertRaisesRegex(ValueError, "exactly 30"): bounded.validate_deadline(changed)
+        with self.assertRaisesRegex(ValueError, "exactly 30 or 60"): bounded.validate_deadline(changed)
 
     def test_transient_retry_keeps_bytes_and_step_scope(self):
         expected = identity(); report = smoke(expected, "debian12")

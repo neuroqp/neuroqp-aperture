@@ -13,11 +13,11 @@ from urllib.request import urlopen
 from bounded import timestamp, parsed, write_report
 
 from release import digest, source_plan
-from bounded import identity, load_identity, read, same_identity, trusted_run, validate_acceptance, validate_deadline, deadline_remaining
+from bounded import identity, load_identity, read, same_identity, trusted_run, validate_acceptance, validate_deadline, deadline_remaining, trusted_candidate
 
 
-def gh(*args):
-    return subprocess.check_output(["gh", *args], text=True, timeout=min(60, deadline_remaining(FROZEN)))
+def gh(*args, seconds=120):
+    return subprocess.check_output(["gh", *args], text=True, timeout=min(seconds, deadline_remaining(FROZEN)))
 
 
 def main():
@@ -33,7 +33,7 @@ def main():
     expected_digest = FROZEN["checksums_sha256"]
     if os.environ.get("GITHUB_REF") != "refs/heads/main":
         raise ValueError("Run trusted main workflow after fixed native desktop smoke")
-    trusted_run(os.environ["CANDIDATE_RUN_ID"], "release.yml")
+    trusted_candidate(os.environ["CANDIDATE_RUN_ID"], FROZEN)
     trusted_run(os.environ["SMOKE_RUN_ID"], "release-evidence.yml")
     if acceptance.get("candidate_run_id") != os.environ["CANDIDATE_RUN_ID"]:
         raise ValueError("Desktop report belongs to another frozen attempt")
@@ -43,6 +43,10 @@ def main():
     candidate = json.loads(gh("api", f"repos/{repo}/releases/tags/{tag}"))
     if not candidate["prerelease"] or candidate["draft"]:
         raise ValueError("Only a published candidate prerelease can be promoted")
+    if FROZEN.get("recovery") is not None:
+        from resume_publication import asset_rows
+        if asset_rows(candidate["assets"]) != FROZEN.get("release_assets"):
+            raise ValueError("Completed candidate no longer retains the verified asset IDs")
     ref = json.loads(gh("api", f"repos/{repo}/git/ref/tags/{tag}"))["object"]
     while ref["type"] == "tag":
         ref = json.loads(gh("api", f"repos/{repo}/git/tags/{ref['sha']}"))["object"]
@@ -58,11 +62,11 @@ def main():
         raise ValueError("Stable release versions must increase")
     with tempfile.TemporaryDirectory(prefix="aperture-promotion-") as folder:
         directory = Path(folder)
-        gh("release", "download", tag, "--repo", repo, "--dir", folder)
+        gh("release", "download", tag, "--repo", repo, "--dir", folder, seconds=600)
         if digest(directory / "SHA256SUMS") != expected_digest:
             raise ValueError("Candidate checksums differ from the reviewed set")
         source_plan(directory / "Aperture-Corresponding-Source.json", FROZEN["source_review_sha256"])
-        subprocess.run(["python3", str(Path(__file__).with_name("release.py")), "verify", folder, "--version", tag[1:], "--source-sha", sha, "--cryptographic"], check=True, timeout=min(60, deadline_remaining(FROZEN)))
+        subprocess.run(["python3", str(Path(__file__).with_name("release.py")), "verify", folder, "--version", tag[1:], "--source-sha", sha, "--cryptographic"], check=True, timeout=min(300, deadline_remaining(FROZEN)))
         validate_deadline(FROZEN)
         # Leave time for state confirmation; elapsed Stage A/source prep is never reset.
         if deadline_remaining(FROZEN) < 30:
@@ -81,14 +85,14 @@ def main():
         # Download only small public identity/feed metadata after state promotion.
         # The three applications were hashed above and retain their immutable asset IDs.
         expected_feed = (directory / "latest.json").read_bytes()
-        with urlopen(f"https://github.com/{repo}/releases/download/{tag}/latest.json", timeout=min(10, deadline_remaining(FROZEN))) as public:
+        with urlopen(f"https://github.com/{repo}/releases/download/{tag}/latest.json", timeout=min(60, deadline_remaining(FROZEN))) as public:
             public_feed = public.read(2 * 1024 * 1024)
         if public_feed != expected_feed:
             raise ValueError("Public updater feed bytes differ from verified candidate")
         REPORT["public_asset_ids"] = {a["name"]: a["id"] for a in after["assets"]}
         REPORT["public_feed_sha256"] = digest(directory / "latest.json")
         validate_deadline(FROZEN)
-        print(f"Promoted {tag} within the frozen 30-minute attempt. Candidate assets retained without rebuilding.")
+        print(f"Promoted {tag} within the frozen attempt. Candidate assets retained without rebuilding.")
 
 
 if __name__ == "__main__":

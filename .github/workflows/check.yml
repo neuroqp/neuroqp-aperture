@@ -69,6 +69,7 @@ jobs:
       - run: python3 scripts/release/test_prepared_inputs.py
       - run: python3 scripts/release/test_linux_runtime.py
       - run: python3 scripts/release/test_reservation.py
+      - run: python3 scripts/release/test_resume_publication.py
       - run: python3 scripts/release/test_smoke_desktop.py
       - run: python3 scripts/release/test_lab.py
       - run: python3 scripts/release/test-source-windows.py

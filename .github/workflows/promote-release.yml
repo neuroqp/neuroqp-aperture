@@ -20,6 +20,9 @@ permissions:
   contents: read
   actions: read
 
+env:
+  APERTURE_SOURCE_ROOT: ${{ github.workspace }}
+
 concurrency:
   group: promote-release
   cancel-in-progress: false
@@ -28,7 +31,7 @@ jobs:
   promote:
     if: github.ref == 'refs/heads/main'
     runs-on: ubuntu-24.04
-    timeout-minutes: 3
+    timeout-minutes: 15
     permissions:
       contents: write
       actions: read
@@ -38,6 +41,13 @@ jobs:
           ref: ${{ inputs.source_sha }}
           fetch-depth: 0
           persist-credentials: false
+      - name: Load reviewed release policy without changing application source
+        shell: bash
+        run: |
+          mkdir -p build/tools
+          for helper in bounded.py release.py prepared-inputs.py promote.py resume_publication.py resume-publication.json; do
+            git show "$GITHUB_SHA:scripts/release/$helper" > "build/tools/$helper"
+          done
       - uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4
         with:
           name: frozen-candidate
@@ -62,10 +72,10 @@ jobs:
           GH_TOKEN: ${{ github.token }}
           CANDIDATE_RUN_ID: ${{ inputs.candidate_run_id }}
         run: |
-          python3 scripts/release/bounded.py trusted-run "$CANDIDATE_RUN_ID" release.yml
+          python3 -c 'import os,sys; sys.path.insert(0,"build/tools"); from bounded import read,trusted_candidate; trusted_candidate(os.environ["CANDIDATE_RUN_ID"],read("build/evidence/frozen-candidate.json"))'
           mkdir -p build/tools
           git show "$GITHUB_SHA:scripts/release/prepared-inputs.py" > build/tools/prepared-inputs.py
-          python3 -c 'import re,sys; sys.path.insert(0,"scripts/release"); from bounded import read,same_identity,validate_deadline; frozen=read("build/evidence/frozen-attempt.json"); candidate=read("build/evidence/frozen-candidate.json"); same_identity(frozen,candidate); assert all(frozen[k]==candidate[k] for k in ("freeze_started_at","deadline_at")), "Candidate frozen deadline differs"; validate_deadline(frozen); run=str(frozen.get("packaging_run_id","")); assert re.fullmatch(r"[1-9][0-9]*",run), "Prepared verifier run missing"; print("packaging_run_id="+run)' >> "$GITHUB_OUTPUT"
+          python3 -c 'import re,sys; sys.path.insert(0,"build/tools"); from bounded import read,same_identity,validate_deadline; frozen=read("build/evidence/frozen-attempt.json"); candidate=read("build/evidence/frozen-candidate.json"); same_identity(frozen,candidate); assert all(frozen[k]==candidate[k] for k in ("freeze_started_at","deadline_at")), "Candidate frozen deadline differs"; validate_deadline(frozen); run=str(frozen.get("packaging_run_id","")); assert re.fullmatch(r"[1-9][0-9]*",run), "Prepared verifier run missing"; print("packaging_run_id="+run)' >> "$GITHUB_OUTPUT"
       - uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4
         with:
           name: prepared-manifest-linux
@@ -91,7 +101,7 @@ jobs:
           SMOKE_RUN_ID: ${{ inputs.smoke_run_id }}
           FROZEN_IDENTITY: build/evidence/frozen-candidate.json
           DESKTOP_REPORT: build/evidence/desktop-acceptance.json
-        run: python3 scripts/release/promote.py
+        run: python3 build/tools/promote.py
       - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
         if: always()
         with:

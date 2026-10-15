@@ -8,7 +8,20 @@ A deployment request first checks existing readiness evidence. Missing tooling, 
 
 One agent owns execution. All subagents receive the root `AGENTS.md` release contract, a bounded task and explicit ownership; they must not independently launch builds or VMs. Readiness must derive from successful CI and native adapter results, not an agent-written claim that checks passed. Before dispatch, verify that the executable workflow actually supports the contract below. Documentation alone does not establish readiness.
 
-Freeze starts one 30-minute deadline covering source preparation, packaging, transfer, smoke and publication. Record actual timings. A required Stage B/C failure or timeout stops the attempt and produces a compact report tied to the source and available artifact hashes. Preserve the original clock and evidence. Do not automatically make repair PRs, rebuild, create another frozen attempt or redispatch. A new user instruction may authorize prerequisite repair and another attempt after readiness passes. The only retry within execution is the unchanged-byte transient smoke retry specified in Stage C.
+Target about 30 minutes from validated source to publication. Freeze starts one **60-minute hard deadline** covering source preparation, packaging, transfer, smoke and publication. The target is not a timeout. Record actual timings. A required Stage B/C failure or timeout stops the attempt and produces a compact report tied to the source and available artifact hashes. Preserve the original clock and evidence. Do not automatically make repair PRs, rebuild, create another frozen attempt or redispatch. A new user instruction may authorize prerequisite repair and another attempt after readiness passes. The only retry within execution is the unchanged-byte transient smoke retry specified in Stage C.
+
+Use these generous limits. They are ceilings, not expected durations. Short API and desktop observation timeouts remain appropriate; avoid one-to-three-minute wrappers around large artifact transfers. Job caps and the overall deadline still apply if several individual steps run slowly.
+
+| Operation                               | Hard limit      |
+| --------------------------------------- | --------------- |
+| Entire attempt                          | 60 minutes      |
+| Windows packaging job                   | 45 minutes      |
+| Windows Setup / portable packaging      | 15 minutes each |
+| Linux packaging job / AppImage wrapping | 30 / 10 minutes |
+| Corresponding-source job / transfer     | 15 / 10 minutes |
+| Candidate publication job / upload      | 20 / 10 minutes |
+| Promotion job / full release download   | 15 / 10 minutes |
+| Evidence submission                     | 10 minutes      |
 
 Windows x64 Setup and portable, and Linux x86_64 AppImage remain supported. The desktop matrix is Windows 11 standard user, Debian 12, Ubuntu 24, Arch/Omarchy and Fedora with native Wayland coverage. Windows 10 is unverified; publisher signing is pending. macOS, ARM, stores and distro packages remain deferred.
 
@@ -48,6 +61,14 @@ Use the reviewed orchestration checkout for this command when it differs from th
 
 Check reservation eligibility read-only before dispatch: `python3 scripts/release/reservation.py --tag vX.Y.Z --source-sha FULL_SHA --check-only`. Supply `--recovery-record PATH` only for a separately reviewed recovery record. Retain failed reservations and their audit trail. Existing assets or a candidate publication job that started block recovery. A new explicitly authorized attempt with repaired, validated inputs may reuse an empty unpublished reservation only with exact reviewed prior-run/body identities, completed stopped runs and a different prepared-input freeze. Never move a published tag, replace release assets or weaken a source gate. Recovery support does not authorize an automatic repair/retry loop.
 
+### Finish an interrupted candidate publication without rebuilding
+
+When package jobs passed and publication alone stopped, an explicitly authorized completion attempt can reuse those exact packages. The normal build workflow deliberately rejects a partially populated draft. Use the separate reviewed `resume-release.yml` workflow, with a pinned recovery record, instead of rerunning packaging or clearing the draft.
+
+Before dispatch, review the prior stopped run, successful package jobs, original frozen receipts, source manifest and every retained asset ID/hash. Prepare fresh lab readiness and upload it through **Release evidence**, stage A, retaining unchanged functional validation. Run the resume helper's read-only `check` entry point against those records. Only then dispatch the resume workflow with `readiness_run_id`. Its fresh 60-minute completion receipt links the stopped attempt and preserves the historical source proof. It verifies the existing assets, uploads only the missing corresponding-source archive, and publishes the candidate outside Latest. It never deletes or replaces an asset, recompiles an application, or assembles source material again. A mismatch stops recovery.
+
+Use the resulting successful resume run's frozen candidate for the same fixed Stage C smoke checks and promotion. The cancelled run remains cancelled, its deadline remains expired, and the original package/source identities stay unchanged. No functional matrix is repeated.
+
 Prepare and review corresponding-source material **once** for that frozen commit. Transfer those verified bytes instead of assembling the same archive again on a runner. A pinned external review manifest lets source material be prepared without editing the frozen commit. Keep required dependency coverage, notices, hashes and native identities. The source gate remains mandatory. See [source material](scripts/release/SOURCE-MATERIAL.md) for cache reuse and the remaining archive-size limitation.
 
 Create an annotated application tag on the exact validated commit, which must be contained in `main`. This may be the reviewed feature commit after merge; do not substitute a merge commit with different source identity. Never move a published tag or replace an asset. Dispatch **Stage B signed candidate** with the trusted readiness/frozen-attempt records and reviewed source-manifest digest. A tag push alone does not begin packaging.
@@ -81,6 +102,6 @@ After promotion, verify public download identity and `latest.json` version/URLs.
 
 ## Timing and maintenance
 
-The target is about 30 minutes from validated source freeze to publication, not 30 minutes of desktop tests. Measure actual source/build/smoke/transfer durations. The [recovery report](docs/release-recovery-2026-10-14.md) shows the old signed build alone took 30m 57s, and cold portable extraction took about 5m 29s on the test VM. The new end-to-end target has not yet been demonstrated.
+The target is about 30 minutes from validated source freeze to publication, with a 60-minute hard stop. Measure actual source/build/smoke/transfer durations. The last packaging attempt measured Setup 5m38s, portable 5m32s and Linux wrapping 14s. Candidate input download took 2m55s before verification and upload, so five minutes was insufficient for that whole job. The [recovery report](docs/release-recovery-2026-10-14.md) shows the older signed build alone took 30m57s, and cold portable extraction took about 5m29s on the test VM. A successful end-to-end 30-minute release has not yet been demonstrated.
 
 Maintain and recover VMs separately using the [lab procedure](scripts/release/LAB.md). Keep reusable sparse bases and small disposable overlays, current/previous relevant inputs and compact durable reports. Do not provision operating systems, create users, repair automation or modify desktop settings in Stage C.

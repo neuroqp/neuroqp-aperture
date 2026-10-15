@@ -13,10 +13,10 @@ import re
 import subprocess
 import sys
 
-ROOT = Path(__file__).resolve().parents[2]
+ROOT = Path(os.environ.get("APERTURE_SOURCE_ROOT", Path(__file__).resolve().parents[2]))
 ENVIRONMENTS = ("windows11-setup", "windows11-portable", "debian12", "ubuntu24", "arch-omarchy", "fedora-wayland")
 SMOKE_STEPS = ("launch", "render", "clean-exit")
-ATTEMPT_SECONDS = 1800
+ATTEMPT_SECONDS = 3600
 STEP_LIMITS = {"launch": 90, "render": 60, "clean-exit": 30, "fuse-fallback": 180}
 
 
@@ -135,8 +135,8 @@ def validate_readiness(report, expected, now=None):
 
 def validate_deadline(expected, now=None):
     start, deadline = parsed(expected["freeze_started_at"]), parsed(expected["deadline_at"])
-    if (deadline - start).total_seconds() != ATTEMPT_SECONDS:
-        raise ValueError("Attempt deadline must be exactly 30 minutes after source freeze")
+    if (deadline - start).total_seconds() not in (1800, ATTEMPT_SECONDS):
+        raise ValueError("Attempt deadline must be exactly 30 or 60 minutes after source freeze")
     if not start <= parsed(now or timestamp()) < deadline:
         raise ValueError("Frozen attempt deadline exceeded; blocked, not published; return to Stage A")
 
@@ -413,12 +413,23 @@ def trusted_run(run_id, workflow, source_sha=None):
     result = json.loads(subprocess.check_output(["gh", "api", f"repos/{repository}/actions/runs/{run_id}"], text=True, timeout=30))
     if result.get("repository", {}).get("full_name") != repository or result.get("conclusion") != "success" or result.get("event") != "workflow_dispatch" or result.get("path") != f".github/workflows/{workflow}":
         raise ValueError("Successful trusted release workflow evidence is required")
-    if workflow in ("release.yml", "release-evidence.yml") and result.get("head_branch") != "main":
+    if workflow in ("release.yml", "resume-release.yml", "release-evidence.yml") and result.get("head_branch") != "main":
         raise ValueError("Release and evidence workflows must run from trusted main")
-    if workflow == "release.yml" and result.get("run_attempt") != 1:
+    if workflow in ("release.yml", "resume-release.yml") and result.get("run_attempt") != 1:
         raise ValueError("Final package workflow reruns are forbidden")
     if source_sha is not None and result.get("head_sha") != source_sha:
         raise ValueError("Stage A validation run checked another source commit")
+    return result
+
+
+def trusted_candidate(run_id, candidate):
+    """Only normal successful builds or this reviewed, explicit completion lineage."""
+    recovery = candidate.get("recovery")
+    workflow = "resume-release.yml" if recovery is not None else "release.yml"
+    result = trusted_run(run_id, workflow)
+    if recovery is not None:
+        from resume_publication import validate_lineage
+        validate_lineage(candidate, result)
     return result
 
 
@@ -426,8 +437,8 @@ def submit(input_path, output):
     stage = os.environ["EVIDENCE_STAGE"]
     evidence = json.loads(os.environ["REPORT_JSON"])
     expected = identity()
-    if stage != "B":
-        trusted_run(os.environ["INPUT_RUN_ID"], "native-validation.yml" if stage == "A" else "release.yml", expected["source_sha"] if stage == "A" else None)
+    if stage == "A":
+        trusted_run(os.environ["INPUT_RUN_ID"], "native-validation.yml", expected["source_sha"])
     if stage == "A":
         evidence["automated"] = []
         for platform in ("linux", "windows"):
@@ -450,6 +461,7 @@ def submit(input_path, output):
         write_report(output / "frozen-attempt.json", evidence)
     elif stage == "C":
         frozen_identity = load_identity(input_path / "frozen-candidate.json")
+        trusted_candidate(os.environ["INPUT_RUN_ID"], frozen_identity)
         same_identity(frozen_identity, expected)
         report = {**{key: frozen_identity[key] for key in ("schema", "source_sha", "build_inputs_sha256", "checksums_sha256", "freeze_started_at", "deadline_at")}, "stage": "C", "status": "pass", "forced_kill": False, "candidate_run_id": os.environ["INPUT_RUN_ID"], "reports": evidence}
         validate_acceptance(report, frozen_identity)

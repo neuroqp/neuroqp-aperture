@@ -22,22 +22,31 @@ permissions:
   contents: read
   actions: read
 
+env:
+  APERTURE_SOURCE_ROOT: ${{ github.workspace }}
+
 jobs:
   linux:
     runs-on: ubuntu-24.04
-    timeout-minutes: 15
+    timeout-minutes: 30
     env:
       APPIMAGE_EXTRACT_AND_RUN: "1"
       PYTHONPATH: ${{ github.workspace }}/scripts/release
     steps:
       - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
-        timeout-minutes: 3
         with:
           ref: ${{ inputs.source_sha }}
           fetch-depth: 0
           persist-credentials: false
+      - name: Load reviewed release policy without changing application source
+        shell: bash
+        run: |
+          mkdir -p build/tools
+          for helper in bounded.py release.py prepared-inputs.py promote.py resume_publication.py resume-publication.json; do
+            git show "$GITHUB_SHA:scripts/release/$helper" > "build/tools/$helper"
+          done
       - name: Require frozen trusted dispatch and load reviewed packaging helpers
-        timeout-minutes: 1
+        timeout-minutes: 2
         env:
           SIGNING_KEY: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY }}
         run: |
@@ -51,33 +60,28 @@ jobs:
             git show "$GITHUB_SHA:scripts/release/$helper" > "build/tools/$helper"
           done
       - uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4
-        timeout-minutes: 3
         with:
           name: frozen-attempt
           path: build/evidence
-      - run: python3 scripts/release/bounded.py deadline build/evidence/frozen-attempt.json
-        timeout-minutes: 1
+      - run: python3 build/tools/bounded.py deadline build/evidence/frozen-attempt.json
+        timeout-minutes: 2
       - uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4
-        timeout-minutes: 3
         with:
           name: prepared-linux
           run-id: ${{ inputs.packaging_run_id }}
           github-token: ${{ github.token }}
           path: build/prepared
       - uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4
-        timeout-minutes: 1
         with:
           name: prepared-manifest-linux
           run-id: ${{ inputs.packaging_run_id }}
           github-token: ${{ github.token }}
           path: build/prepared
       - uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4
-        timeout-minutes: 3
         with:
           name: corresponding-source
           path: build/release
       - name: Restore frozen prepared inputs and verified Debian runtime
-        timeout-minutes: 3
         env:
           SOURCE_SHA: ${{ inputs.source_sha }}
           SOURCE_REVIEW_SHA256: ${{ inputs.source_review_sha256 }}
@@ -87,27 +91,27 @@ jobs:
           binary_sha=$(python3 -c 'import json; print(json.load(open("build/prepared/prepared-linux.json"))["binary_sha256"])')
           native_sha=$(python3 -c 'import json; print(json.load(open("build/prepared/prepared-linux.json"))["native_dependencies_sha256"])')
           python3 build/tools/linux-runtime.py stage build/prepared/linux-runtime.tar.gz build/linux-prepared --archive-sha256 "$runtime_sha" --source-sha "$SOURCE_SHA" --binary-sha256 "$binary_sha" --native-sha256 "$native_sha"
-          python3 scripts/release/bounded.py deadline build/evidence/frozen-attempt.json
+          python3 build/tools/bounded.py deadline build/evidence/frozen-attempt.json
       - name: Wrap exact tested runtime and sign AppImage
         env:
           LINUX_RUNTIME_DIR: ${{ github.workspace }}/build/linux-prepared
           TAURI_SIGNING_PRIVATE_KEY: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY }}
           TAURI_SIGNING_PRIVATE_KEY_PASSWORD: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY_PASSWORD }}
         run: |
-          python3 scripts/release/bounded.py run --seconds 300 build/evidence/frozen-attempt.json build/evidence/linux-build.json -- bash build/tools/package-linux.sh
+          python3 build/tools/bounded.py run --seconds 600 build/evidence/frozen-attempt.json build/evidence/linux-build.json -- bash build/tools/package-linux.sh
           mkdir -p build/linux-package-extracted
-          (cd build/linux-package-extracted && python3 "$GITHUB_WORKSPACE/scripts/release/bounded.py" run --seconds 120 "$GITHUB_WORKSPACE/build/evidence/frozen-attempt.json" "$GITHUB_WORKSPACE/build/evidence/linux-extract.json" -- "$GITHUB_WORKSPACE/build/release/Aperture-x86_64.AppImage" --appimage-extract >/dev/null)
-          python3 scripts/release/bounded.py run --seconds 60 build/evidence/frozen-attempt.json build/evidence/linux-package-verify.json -- python3 build/tools/linux-runtime.py verify-package build/linux-package-extracted/squashfs-root build/linux-prepared/manifest.json > build/evidence/linux-package-bytes.json
-          python3 scripts/release/bounded.py run --seconds 60 build/evidence/frozen-attempt.json build/evidence/linux-sign.json -- node node_modules/@tauri-apps/cli/tauri.js signer sign --app-version "$(python3 scripts/release/release.py check)" build/release/Aperture-x86_64.AppImage
-      - run: python3 scripts/release/bounded.py deadline build/evidence/frozen-attempt.json
-        timeout-minutes: 1
+          (cd build/linux-package-extracted && python3 "$GITHUB_WORKSPACE/build/tools/bounded.py" run --seconds 300 "$GITHUB_WORKSPACE/build/evidence/frozen-attempt.json" "$GITHUB_WORKSPACE/build/evidence/linux-extract.json" -- "$GITHUB_WORKSPACE/build/release/Aperture-x86_64.AppImage" --appimage-extract >/dev/null)
+          python3 build/tools/bounded.py run --seconds 300 build/evidence/frozen-attempt.json build/evidence/linux-package-verify.json -- python3 build/tools/linux-runtime.py verify-package build/linux-package-extracted/squashfs-root build/linux-prepared/manifest.json > build/evidence/linux-package-bytes.json
+          python3 build/tools/bounded.py run --seconds 180 build/evidence/frozen-attempt.json build/evidence/linux-sign.json -- node node_modules/@tauri-apps/cli/tauri.js signer sign --app-version "$(python3 build/tools/release.py check)" build/release/Aperture-x86_64.AppImage
+      - run: python3 build/tools/bounded.py deadline build/evidence/frozen-attempt.json
+        timeout-minutes: 2
       - name: Verify corresponding source before binary artifact upload
+        timeout-minutes: 5
         env:
           SOURCE_REVIEW_SHA256: ${{ inputs.source_review_sha256 }}
           SOURCE_SHA: ${{ inputs.source_sha }}
-        run: python3 scripts/release/release.py source-material build/release --platform linux --plan build/release/Aperture-Corresponding-Source.json --plan-sha256 "$SOURCE_REVIEW_SHA256" --source-sha "$SOURCE_SHA" --attempt build/evidence/frozen-attempt.json
+        run: python3 build/tools/release.py source-material build/release --platform linux --plan build/release/Aperture-Corresponding-Source.json --plan-sha256 "$SOURCE_REVIEW_SHA256" --source-sha "$SOURCE_SHA" --attempt build/evidence/frozen-attempt.json
       - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
-        timeout-minutes: 1
         if: always()
         with:
           name: stage-b-linux-timings
@@ -115,7 +119,6 @@ jobs:
           if-no-files-found: ignore
           retention-days: 30
       - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
-        timeout-minutes: 3
         with:
           name: packages-linux
           path: build/release/*
@@ -124,19 +127,25 @@ jobs:
 
   windows:
     runs-on: windows-2022
-    timeout-minutes: 25
+    timeout-minutes: 45
     env:
       CARGO_NET_OFFLINE: "true"
       CARGO_HOME: ${{ github.workspace }}/build/packaging-cargo-home
     steps:
       - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
-        timeout-minutes: 3
         with:
           ref: ${{ inputs.source_sha }}
           fetch-depth: 0
           persist-credentials: false
+      - name: Load reviewed release policy without changing application source
+        shell: bash
+        run: |
+          mkdir -p build/tools
+          for helper in bounded.py release.py prepared-inputs.py promote.py resume_publication.py resume-publication.json; do
+            git show "$GITHUB_SHA:scripts/release/$helper" > "build/tools/$helper"
+          done
       - name: Require frozen trusted dispatch and load reviewed packaging helpers
-        timeout-minutes: 1
+        timeout-minutes: 2
         env:
           SIGNING_KEY: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY }}
         run: |
@@ -147,13 +156,12 @@ jobs:
             if ($LASTEXITCODE) { exit $LASTEXITCODE }
           }
       - uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4
-        timeout-minutes: 3
         with:
           name: frozen-attempt
           path: build/evidence
       - name: Use preinstalled runner Python
         shell: pwsh
-        timeout-minutes: 1
+        timeout-minutes: 2
         run: |
           $versions = @(Get-ChildItem -LiteralPath "$env:RUNNER_TOOL_CACHE/Python" -Directory | Where-Object { $_.Name -match '^3\.12\.\d+$' } | Sort-Object { [version]$_.Name } -Descending)
           $cached = @($versions | Where-Object { (Test-Path -LiteralPath "$($_.FullName)/x64.complete") -and (Test-Path -LiteralPath "$($_.FullName)/x64/python.exe" -PathType Leaf) })
@@ -165,29 +173,25 @@ jobs:
           $pythonRoot | Add-Content -LiteralPath $env:GITHUB_PATH
           New-Item -ItemType Directory -Force build/evidence | Out-Null
           [ordered]@{ schema = 1; role = 'CI bootstrap'; source = 'preinstalled-runner-toolcache'; path = $python; version = "$version" } | ConvertTo-Json | Tee-Object -FilePath build/evidence/windows-bootstrap-python.json
-      - run: python scripts/release/bounded.py deadline build/evidence/frozen-attempt.json
-        timeout-minutes: 1
+      - run: python build/tools/bounded.py deadline build/evidence/frozen-attempt.json
+        timeout-minutes: 2
       - uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4
-        timeout-minutes: 3
         with:
           name: prepared-windows
           run-id: ${{ inputs.packaging_run_id }}
           github-token: ${{ github.token }}
           path: build/prepared
       - uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4
-        timeout-minutes: 1
         with:
           name: prepared-manifest-windows
           run-id: ${{ inputs.packaging_run_id }}
           github-token: ${{ github.token }}
           path: build/prepared
       - uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4
-        timeout-minutes: 3
         with:
           name: corresponding-source
           path: build/release
       - name: Restore frozen executable, dependencies and prepared installer tools
-        timeout-minutes: 3
         env:
           SOURCE_REVIEW_SHA256: ${{ inputs.source_review_sha256 }}
         run: |
@@ -199,14 +203,14 @@ jobs:
           if ($LASTEXITCODE) { exit $LASTEXITCODE }
           pwsh build/tools/prepare-windows-rust.ps1 -CheckOnly
           if ($LASTEXITCODE) { exit $LASTEXITCODE }
-          python scripts/release/bounded.py deadline build/evidence/frozen-attempt.json
+          python build/tools/bounded.py deadline build/evidence/frozen-attempt.json
           if ($LASTEXITCODE) { exit $LASTEXITCODE }
       - name: Bundle exact tested executable into updater-signed installer
         env:
           TAURI_SIGNING_PRIVATE_KEY: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY }}
           TAURI_SIGNING_PRIVATE_KEY_PASSWORD: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY_PASSWORD }}
         # The previous successful Setup and portable packages each took about six minutes.
-        run: python scripts/release/bounded.py run --seconds 600 build/evidence/frozen-attempt.json build/evidence/windows-build.json -- node node_modules/@tauri-apps/cli/tauri.js bundle --target x86_64-pc-windows-msvc --bundles nsis --ci --no-binary-patching
+        run: python build/tools/bounded.py run --seconds 900 build/evidence/frozen-attempt.json build/evidence/windows-build.json -- node node_modules/@tauri-apps/cli/tauri.js bundle --target x86_64-pc-windows-msvc --bundles nsis --ci --no-binary-patching
       - name: Require bundling to preserve tested application bytes
         run: |
           $manifest = Get-Content build/prepared/prepared-windows.json -Raw | ConvertFrom-Json
@@ -218,19 +222,18 @@ jobs:
           if ($installers.Count -ne 1) { throw 'Expected exactly one installer' }
           Copy-Item $installers[0].FullName build/release/Aperture-Setup-x64.exe
           if (Test-Path ($installers[0].FullName + '.sig')) { Copy-Item ($installers[0].FullName + '.sig') build/release/Aperture-Setup-x64.exe.sig }
-          python scripts/release/bounded.py run --seconds 600 build/evidence/frozen-attempt.json build/evidence/windows-portable-build.json -- pwsh scripts/release/build-portable.ps1 -Version (python scripts/release/release.py check)
+          python build/tools/bounded.py run --seconds 900 build/evidence/frozen-attempt.json build/evidence/windows-portable-build.json -- pwsh scripts/release/build-portable.ps1 -Version (python build/tools/release.py check)
           if ($LASTEXITCODE) { exit $LASTEXITCODE }
       - name: Sign portable updater asset
         env:
           TAURI_SIGNING_PRIVATE_KEY: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY }}
           TAURI_SIGNING_PRIVATE_KEY_PASSWORD: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY_PASSWORD }}
-        timeout-minutes: 1
-        run: python scripts/release/bounded.py run --seconds 60 build/evidence/frozen-attempt.json build/evidence/windows-portable-sign.json -- node node_modules/@tauri-apps/cli/tauri.js signer sign --app-version (python scripts/release/release.py check) build/release/Aperture-Portable-x64.exe
+        timeout-minutes: 5
+        run: python build/tools/bounded.py run --seconds 180 build/evidence/frozen-attempt.json build/evidence/windows-portable-sign.json -- node node_modules/@tauri-apps/cli/tauri.js signer sign --app-version (python build/tools/release.py check) build/release/Aperture-Portable-x64.exe
       - name: Verify exact bytes extracted from final Windows packages
-        run: python scripts/release/bounded.py run --seconds 840 build/evidence/frozen-attempt.json build/evidence/windows-package-bytes.json -- pwsh build/tools/smoke-windows.ps1 -Version (python scripts/release/release.py check) -Setup build/release/Aperture-Setup-x64.exe
-        timeout-minutes: 15
+        run: python build/tools/bounded.py run --seconds 840 build/evidence/frozen-attempt.json build/evidence/windows-package-bytes.json -- pwsh build/tools/smoke-windows.ps1 -Version (python build/tools/release.py check) -Setup build/release/Aperture-Setup-x64.exe
+        timeout-minutes: 25
       - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
-        timeout-minutes: 3
         if: always()
         with:
           name: windows-package-evidence
@@ -240,15 +243,15 @@ jobs:
             build/evidence/windows/*.txt
           if-no-files-found: ignore
           retention-days: 14
-      - run: python scripts/release/bounded.py deadline build/evidence/frozen-attempt.json
-        timeout-minutes: 1
+      - run: python build/tools/bounded.py deadline build/evidence/frozen-attempt.json
+        timeout-minutes: 2
       - name: Verify corresponding source before binary artifact upload
+        timeout-minutes: 5
         env:
           SOURCE_REVIEW_SHA256: ${{ inputs.source_review_sha256 }}
           SOURCE_SHA: ${{ inputs.source_sha }}
-        run: python scripts/release/release.py source-material build/release --platform windows --plan build/release/Aperture-Corresponding-Source.json --plan-sha256 $env:SOURCE_REVIEW_SHA256 --source-sha $env:SOURCE_SHA --attempt build/evidence/frozen-attempt.json
+        run: python build/tools/release.py source-material build/release --platform windows --plan build/release/Aperture-Corresponding-Source.json --plan-sha256 $env:SOURCE_REVIEW_SHA256 --source-sha $env:SOURCE_SHA --attempt build/evidence/frozen-attempt.json
       - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
-        timeout-minutes: 1
         if: always()
         with:
           name: stage-b-windows-timings
@@ -256,7 +259,6 @@ jobs:
           if-no-files-found: ignore
           retention-days: 30
       - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
-        timeout-minutes: 3
         with:
           name: packages-windows
           path: build/release/*
