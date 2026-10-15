@@ -17,7 +17,7 @@ from pathlib import Path, PurePosixPath
 
 import bounded
 
-ROOT = Path(__file__).resolve().parents[2]
+ROOT = Path(os.environ.get("APERTURE_SOURCE_ROOT", Path(__file__).resolve().parents[2]))
 ASSETS = {
     "windows-x86_64": "Aperture-Setup-x64.exe",
     "windows-x86_64-portable": "Aperture-Portable-x64.exe",

@@ -23,10 +23,16 @@
   explicit ownership. Subagents must not independently launch builds or VMs.
 - A failed readiness check blocks packaging; continue prerequisite development
   only when the user has authorized that scope. It does not cancel that work.
-- Use one original release deadline. A required Stage B/C failure stops that
+- Target 30 minutes with a 60-minute hard deadline per explicitly authorized
+  release attempt. Keep job and transfer budgets generous; follow the timeout
+  table in `RELEASING.md`. A required Stage B/C failure stops that
   attempt: preserve evidence and report the blocker. Do not automatically repair,
   rebuild, reset the freeze clock or redispatch. Only the documented bounded
   transient smoke retry is permitted; another release attempt needs a new instruction.
+- An explicitly authorized publication recovery may reuse completed packages.
+  Preserve the stopped attempt, source proof and asset bytes, verify their exact
+  identities, and record a separate completion deadline and fresh lab readiness.
+  Use the reviewed resume workflow; never silently extend an expired receipt.
 - Routine deployment must not expand into CI implementation, dependency/source
   repairs, VM provisioning or automation repair. Those require separately scoped
   development work. Finish explicitly authorized prerequisites before packaging;

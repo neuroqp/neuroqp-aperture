@@ -12,7 +12,7 @@ import sys
 import tarfile
 
 ROOT = Path.cwd()
-sys.path.insert(0, str(ROOT / "scripts/release"))
+sys.path.insert(0, str(Path(__file__).resolve().parent))
 from release import digest, lockfile_hashes, native_identity, source_plan
 from bounded import identity, passing, read, same_identity, trusted_run, write_report
 

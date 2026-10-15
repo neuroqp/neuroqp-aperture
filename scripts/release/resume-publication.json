@@ -1,0 +1,101 @@
+{
+  "schema": 1,
+  "tag": "v0.2.0",
+  "source_sha": "3c17c5cc19ce1da706c47031ad1ffb1b2a7338e3",
+  "build_inputs_sha256": "ab5e424ef3e1bd8e9cafae87e6afbb897243a0d0b137bea6d2166ad7985cd70f",
+  "prior_run_id": 38767160634,
+  "prior_orchestration_sha": "4a361e2cf01ecfbd8e1dc1a7a1929d8690c6ae42",
+  "prior_conclusion": "cancelled",
+  "prior_frozen_run_id": 38767014700,
+  "prior_frozen_sha256": "2a73dd97f6a17ae32ebeb8eb05153093b292a5fa118bc5706be966d50111988e",
+  "prior_candidate_sha256": "b290be4047288f8b4fa64c985d3a9ef1173bc37f78bd55d0db52067563525378",
+  "prior_freeze_started_at": "2026-10-15T16:12:24.896252Z",
+  "prior_deadline_at": "2026-10-15T16:42:24.896252Z",
+  "release_id": 413786308,
+  "body_sha256": "01d8d523f9954ab01f5ad9c1e903c6cca9802d49d957b99cda1171b988fa7091",
+  "checksums_sha256": "4cfe24f015364f934efc9556fe4a67fd1249aff7fb1c71baf1480c1991d2c272",
+  "source_review_sha256": "85130f3dde4c3fe2356b950a2609bdb5304b996d6c90f6c6288df394d915531f",
+  "source_archive_sha256": "2b92f721408625810e183842a200cff2c81de232bd593c1c6cfb4b9c73722ff3",
+  "source_release_tag": "source-v0.2.0-r4",
+  "packaging_run_id": "38753573133",
+  "assets": [
+    {
+      "id": 644476192,
+      "name": "Aperture-Portable-x64.exe",
+      "size": 242767805,
+      "digest": "sha256:6e0245f14a412b8d92e756d01edd9af7cf21878759bf5746c708254506ae94bb"
+    },
+    {
+      "id": 644476193,
+      "name": "Aperture-Setup-x64.exe",
+      "size": 242999348,
+      "digest": "sha256:a3ce604659e0e1c4221193c415367d629d4620b731422a0a9420601ca01219c8"
+    },
+    {
+      "id": 644476195,
+      "name": "Aperture-Corresponding-Source.json",
+      "size": 7480,
+      "digest": "sha256:85130f3dde4c3fe2356b950a2609bdb5304b996d6c90f6c6288df394d915531f"
+    },
+    {
+      "id": 644476196,
+      "name": "Aperture-Portable-x64.exe.sig",
+      "size": 432,
+      "digest": "sha256:2be2cdc0deba7d1e0bfac725a414facc4dabea08ac8e13677f7c09d87d6a0e86"
+    },
+    {
+      "id": 644476218,
+      "name": "Aperture-x86_64.AppImage",
+      "size": 107596280,
+      "digest": "sha256:d3c7bf4e63d488d5f52301d26cb81381fd14b4dea124f2396e11bfc60ea81c77"
+    },
+    {
+      "id": 644476219,
+      "name": "Aperture-Setup-x64.exe.sig",
+      "size": 436,
+      "digest": "sha256:4961e0b58077b2684a375b868ac77f21abc63e14c46d36fc87a3e07eec60494d"
+    },
+    {
+      "id": 644476244,
+      "name": "Aperture-x86_64.AppImage.sig",
+      "size": 432,
+      "digest": "sha256:1cac0132c26b8915bd581d1cdcd55f7c585348ca88fe54e858f25faf407c4c4f"
+    },
+    {
+      "id": 644476279,
+      "name": "BUILDINFO-linux.json",
+      "size": 16730,
+      "digest": "sha256:1d815dd2645000dbb6eac1c4578152303ed0078887980a39f0504cc7e1374f10"
+    },
+    {
+      "id": 644476304,
+      "name": "BUILDINFO-windows.json",
+      "size": 23750,
+      "digest": "sha256:ea70de715c90a93e57e1805c90eacd90e4632b8db6088186c745fd7242e9d622"
+    },
+    {
+      "id": 644476333,
+      "name": "SHA256SUMS",
+      "size": 1208,
+      "digest": "sha256:4cfe24f015364f934efc9556fe4a67fd1249aff7fb1c71baf1480c1991d2c272"
+    },
+    {
+      "id": 644476379,
+      "name": "THIRD-PARTY-NOTICES-linux.txt",
+      "size": 15677112,
+      "digest": "sha256:495c0d1a8f6bc17b8a3e64cabd3a17fc228def4e29adde06d93c4526b4047b5e"
+    },
+    {
+      "id": 644476444,
+      "name": "THIRD-PARTY-NOTICES-windows.txt",
+      "size": 6615586,
+      "digest": "sha256:a7076eb88c289a19537f17fef4e076a262d5773cfab5f2075ce56db6222d5709"
+    },
+    {
+      "id": 644476448,
+      "name": "latest.json",
+      "size": 2118,
+      "digest": "sha256:d02bde3a4208913a8187d87a95a19ac6e6e167c68bd047cd9c8bf4f8f37e7113"
+    }
+  ]
+}

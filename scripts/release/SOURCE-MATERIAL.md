@@ -84,7 +84,8 @@ new composition manifest, explicit dependency-closure proof and migration of the
 source gate and release asset set. That is deferred as a separate change rather
 than expanding this process repair. Existing public archives/tags remain usable
 and immutable. Until that change, one full source assembly and review can consume
-a substantial part of the 30-minute budget; an overrun blocks the attempt.
+a substantial part of the 30-minute target. The release hard deadline is 60 minutes;
+an overrun blocks the attempt.
 
 ## Historical 0.1.1 review
 
