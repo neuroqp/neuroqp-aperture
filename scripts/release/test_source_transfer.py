@@ -3,6 +3,7 @@
 import importlib.util
 import json
 from pathlib import Path
+import subprocess
 import tempfile
 import unittest
 from unittest.mock import patch
@@ -42,9 +43,31 @@ class TransportTests(unittest.TestCase):
     def test_draft_refuses_public_or_existing_target(self):
         for record in [{"tag_name": "source-test", "draft": False, "assets": []},
                        {"tag_name": "source-test", "draft": True, "assets": [{"name": release.SOURCE_ASSET}]}]:
-            with patch.object(transport, "command", return_value=json.dumps(record)):
+            with patch.object(transport, "command", return_value=json.dumps([[record]])):
                 with self.assertRaises(ValueError):
                     transport.draft_release("source-test")
+
+    def test_draft_lookup_selects_exact_unique_tag_from_authenticated_list(self):
+        draft = {"id": 99, "tag_name": "source-test", "draft": True, "assets": []}
+        other = {"id": 100, "tag_name": "source-test-other", "draft": True, "assets": []}
+        with patch.object(transport, "command", return_value=json.dumps([[other], [draft]])) as command:
+            self.assertEqual(transport.draft_release("source-test"), draft)
+            command.assert_called_once_with(["gh", "api", "--paginate", "--slurp", f"repos/{transport.REPOSITORY}/releases?per_page=100"])
+        for pages in [[[other]], [[draft], [draft]]]:
+            with patch.object(transport, "command", return_value=json.dumps(pages)):
+                with self.assertRaisesRegex(ValueError, "exactly one release"):
+                    transport.draft_release("source-test")
+
+    def test_wrong_or_missing_source_tag_fails_before_download(self):
+        manifest = self.manifest()
+        tag_command = ["git", "rev-parse", "--verify", "refs/tags/source-test^{commit}"]
+        for result in ["e" * 40, subprocess.CalledProcessError(128, tag_command)]:
+            with patch.object(transport, "command", side_effect=["", result]) as command, \
+                    patch.object(transport, "draft_release") as lookup:
+                with self.assertRaises((ValueError, subprocess.CalledProcessError)):
+                    transport.transfer(release.ROOT, manifest, Path("unused"), {})
+                lookup.assert_not_called()
+                self.assertEqual(command.call_args.args[0], tag_command)
 
     def test_failed_full_source_gate_never_uploads_and_success_verifies_github(self):
         manifest = self.manifest()
@@ -56,7 +79,9 @@ class TransportTests(unittest.TestCase):
         for failure in [True, False]:
             calls = []
             def command(arguments, **kwargs):
-                calls.append(arguments)
+                calls.append((arguments, kwargs))
+                if arguments[:3] == ["git", "rev-parse", "--verify"]:
+                    return manifest["source_sha"] + "\n"
                 return json.dumps(uploaded) if arguments[:2] == ["gh", "api"] else ""
             with tempfile.TemporaryDirectory() as directory, \
                     patch.object(transport, "command", side_effect=command), \
@@ -74,10 +99,15 @@ class TransportTests(unittest.TestCase):
                     transport.transfer(release.ROOT, manifest, output, receipt)
                     self.assertEqual(receipt["status"], "passed")
                     self.assertEqual(receipt["uploaded_asset_id"], 101)
-                uploads = [call for call in calls if call[:3] == ["gh", "release", "upload"]]
+                uploads = [(call, kwargs) for call, kwargs in calls if call[:3] == ["gh", "release", "upload"]]
                 self.assertEqual(len(uploads), 0 if failure else 1)
-                self.assertFalse(any("--clobber" in call for call in calls))
-                locks.assert_called_once_with(release.ROOT, plan)
+                self.assertFalse(any("--clobber" in call for call, kwargs in calls))
+                if not failure:
+                    self.assertEqual(uploads[0][1], {"timeout": 180})
+                curl = [(call, kwargs) for call, kwargs in calls if call[0] == "curl"]
+                self.assertEqual(curl[0][0][3:5], ["--max-time", "120"])
+                self.assertEqual(curl[0][1], {"timeout": 125})
+                locks.assert_not_called()
                 verify.assert_called_once_with(output, plan, root=release.ROOT, source_sha=manifest["source_sha"])
 
     def test_wrong_size_or_digest_is_rejected(self):

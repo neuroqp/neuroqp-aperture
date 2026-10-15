@@ -40,8 +40,12 @@ def validate_manifest(path, trusted_sha256, root):
 
 
 def draft_release(tag):
-    record = json.loads(command(["gh", "api", f"repos/{REPOSITORY}/releases/tags/{tag}"]))
-    if record.get("tag_name") != tag or record.get("draft") is not True:
+    pages = json.loads(command(["gh", "api", "--paginate", "--slurp", f"repos/{REPOSITORY}/releases?per_page=100"]))
+    matches = [record for page in pages for record in page if record.get("tag_name") == tag]
+    if len(matches) != 1:
+        raise ValueError("Source destination must match exactly one release")
+    record = matches[0]
+    if record.get("draft") is not True:
         raise ValueError("Source destination must remain an existing draft")
     if any(asset["name"] == release.SOURCE_ASSET for asset in record["assets"]):
         raise ValueError("Source target asset already exists; never overwrite it")
@@ -58,6 +62,8 @@ def checked_file(path, sha256, size=None):
 def transfer(root, manifest, directory, receipt):
     source_sha, tag = manifest["source_sha"], manifest["source_release_tag"]
     command(["git", "merge-base", "--is-ancestor", source_sha, "origin/main"])
+    if command(["git", "rev-parse", "--verify", f"refs/tags/{tag}^{{commit}}"]).strip() != source_sha:
+        raise ValueError("Source release tag differs from the frozen source commit")
     destination = draft_release(tag)
     receipt["destination_release_id"] = destination["id"]
     directory.mkdir(parents=True, exist_ok=False)
@@ -70,20 +76,21 @@ def transfer(root, manifest, directory, receipt):
     expected_url = f"https://github.com/{REPOSITORY}/releases/download/{tag}/{release.SOURCE_ASSET}"
     if review.get("application_source_sha") != source_sha or review["sha256"] != manifest["target_sha256"] or review["url"] != expected_url:
         raise ValueError("Reviewed source plan differs from the pinned transport target")
-    release.verify_application_locks(root, review)
     baseline = directory / "baseline.tar.xz"
-    command(["curl", "--fail", "--location", "--max-time", "60", "--output", str(baseline),
-             manifest["baseline_url"]], timeout=65)
+    command(["curl", "--fail", "--location", "--max-time", "120", "--output", str(baseline),
+             manifest["baseline_url"]], timeout=125)
     checked_file(baseline, manifest["baseline_sha256"])
     archive = directory / release.SOURCE_ASSET
     command(["zstd", "--decompress", "--long=31", "--patch-from=" + str(baseline),
              str(patch), "--output", str(archive)])
     checked_file(archive, manifest["target_sha256"], manifest["target_bytes"])
+    # This full gate checks archived locks against the plan and exact frozen Git
+    # tree, rather than comparing them with the newer orchestration checkout.
     release.verify_source_material(directory, review, root=root, source_sha=source_sha)
     receipt["full_source_verification"] = "passed"
     if draft_release(tag)["id"] != destination["id"]:
         raise ValueError("Source draft identity changed before upload")
-    command(["gh", "release", "upload", tag, str(archive), "--repo", REPOSITORY])
+    command(["gh", "release", "upload", tag, str(archive), "--repo", REPOSITORY], timeout=180)
     uploaded = json.loads(command(["gh", "api", f"repos/{REPOSITORY}/releases/{destination['id']}"]))
     assets = [asset for asset in uploaded["assets"] if asset["name"] == release.SOURCE_ASSET]
     if uploaded.get("draft") is not True or uploaded.get("tag_name") != tag or len(assets) != 1:
