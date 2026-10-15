@@ -12,6 +12,8 @@ Run **Stage A development validation** for the source that will be frozen. It co
 
 Complete the [Stage A functional checklist](scripts/release/RELEASE-ACCEPTANCE.md). Test changed behavior on affected operating systems, including saving, annotations, independent pixel preservation, cancellation and multi-instance coordination. Test installer/updater behavior and rejection paths here when those components change. Detailed GUI upgrades are development tests, not a mandatory matrix for every routine release. Reuse a verified prior-version fixture until its baseline or transport/configuration changes.
 
+GitHub's Linux and Windows runners own unit and backend integration testing. Do not repeat those suites in the desktop VMs. Use Windows 11 and the Linux desktop for limited changed-area checks that require the running native application; retain valid unchanged-path evidence. GitHub's Windows Server runner does not establish Windows 11 desktop behavior.
+
 Prepare the native smoke helpers, fixed small TIFF and all six desktop environments here. Exercise helpers during development and record their revisions. Existing checks may be reused only when their relevant source, dependency and packaging inputs match; name the original source and evidence. A new source revision is never silently accepted as the old one.
 
 Upload the completed functional and lab-readiness records through **Release evidence**, stage A. It combines them with the trusted automated validation run. Missing, failed, inconclusive or expired readiness blocks source freeze. See the script commands and report fields in [the acceptance reference](scripts/release/RELEASE-ACCEPTANCE.md).
