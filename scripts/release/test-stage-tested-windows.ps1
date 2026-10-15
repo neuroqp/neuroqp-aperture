@@ -76,3 +76,5 @@ try {
 } finally {
     Remove-Item -LiteralPath $temp -Recurse -Force
 }
+# Expected Python rejections set LASTEXITCODE; a successful test must clear it for Actions.
+exit 0

@@ -27,7 +27,7 @@ class PreparedInputsTests(unittest.TestCase):
                          "packaging_run_id": "456", "binary_sha256": "b" * 64,
                          "native_dependencies_sha256": "c" * 64, "archive_sha256": "d" * 64,
                          "tool_archive_sha256": "e" * 64, "development_archive_sha256": "f" * 64,
-                         "source_plan_sha256": "0" * 64}
+                         "source_plan_sha256": "0" * 64, "verifier_archive_sha256": "1" * 64}
         self.path = self.root / "prepared-linux.json"
         self.path.write_text(json.dumps(self.manifest))
         self.frozen = {"source_sha": "a" * 40, "packaging_run_id": "456",
@@ -70,7 +70,7 @@ class PreparedInputsTests(unittest.TestCase):
         info.write_text(json.dumps({"source_sha": "a" * 40, "platform": "linux", "lockfiles": {}, "native_dependencies": {"vips": "pinned"}}))
         args = SimpleNamespace(platform="linux", automated_report=report, buildinfo=info, source_sha="a" * 40,
                                executable=executable, validation_run_id="123", packaging_run_id="456",
-                               development_archive=runtime, tool_archive=runtime, source_plan=self.root / "plan.json",
+                               development_archive=runtime, tool_archive=runtime, verifier_archive=runtime, source_plan=self.root / "plan.json",
                                source_plan_sha256="c" * 64, archive=self.root / "prepared.tar.gz", manifest=self.path)
         with patch.object(prepared, "ROOT", self.root), patch.object(prepared, "identity", return_value=current), patch.object(prepared, "lockfile_hashes", return_value={}), patch.object(prepared, "check_plan"):
             prepared.create(args)
@@ -117,6 +117,30 @@ class PreparedInputsTests(unittest.TestCase):
         with self.assertRaises(ValueError):
             prepared.extract(path, restored, prepared.PATHS["linux"])
 
+    def test_signature_verifier_seals_closure_and_restores_only_frozen_archive(self):
+        tools = self.root / "system"
+        tools.mkdir()
+        binary = tools / "minisign"
+        binary.write_bytes(b"verifier")
+        libraries = [tools / name for name in ("libsodium.so.23", "libc.so.6", "ld-linux-x86-64.so.2")]
+        for path in libraries:
+            path.write_text(path.name)
+        archive = self.root / "verifier.tar.gz"
+        ldd = "\n".join(str(path) + " (0x00)" for path in libraries)
+        with patch.object(prepared.shutil, "which", return_value=str(binary)), patch.object(prepared.subprocess, "check_output", return_value=ldd), patch.object(prepared.subprocess, "run"):
+            prepared.prepare_verifier(self.root / "sealed", archive)
+        self.manifest["verifier_archive_sha256"] = prepared.digest(archive)
+        self.path.write_text(json.dumps(self.manifest))
+        self.frozen["validated_inputs"]["linux"]["manifest_sha256"] = prepared.digest(self.path)
+        with patch.object(prepared, "preparation_run") as trusted, patch.object(prepared.subprocess, "run"):
+            directory = prepared.restore_verifier(self.frozen, self.path, archive, self.root / "restored")
+            trusted.assert_called_once_with("456")
+        self.assertEqual((directory / "lib/libsodium.so.23").read_text(), "libsodium.so.23")
+        self.assertIn('--library-path "$here/lib"', (directory / "minisign").read_text())
+        archive.write_bytes(b"tampered")
+        with patch.object(prepared, "preparation_run"), self.assertRaisesRegex(ValueError, "verifier archive differs"):
+            prepared.restore_verifier(self.frozen, self.path, archive, self.root / "tampered")
+
     def test_preparation_run_requires_trusted_workflow_and_reviewed_main_ancestry(self):
         with patch.object(prepared, "trusted_run", return_value={"head_sha": "a" * 40}) as trust, patch.object(prepared.subprocess, "run") as command:
             prepared.preparation_run("456")
@@ -131,6 +155,14 @@ class PreparedInputsTests(unittest.TestCase):
         self.assertIn("prepare-windows-packaging.ps1 -CheckOnly", workflow)
         self.assertIn('CARGO_NET_OFFLINE: "true"', workflow)
         self.assertIn("build/tools/package-linux.sh", workflow)
+        self.assertIn("linux-runtime.py verify-package", workflow)
+        self.assertNotIn("smoke-linux.sh", workflow)
+        self.assertIn("Bundler changed the validated application executable", workflow)
+        root = Path(__file__).resolve().parents[2]
+        for name in ("release.yml", "promote-release.yml"):
+            verification = (root / ".github/workflows" / name).read_text()
+            self.assertNotIn("apt-get", verification)
+            self.assertIn("restore-verifier", verification)
 
 
 if __name__ == "__main__":

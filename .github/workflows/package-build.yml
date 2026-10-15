@@ -99,9 +99,10 @@ jobs:
           TAURI_SIGNING_PRIVATE_KEY_PASSWORD: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY_PASSWORD }}
         run: |
           python3 scripts/release/bounded.py run --seconds 300 build/evidence/frozen-attempt.json build/evidence/linux-build.json -- bash build/tools/package-linux.sh
+          mkdir -p build/linux-package-extracted
+          (cd build/linux-package-extracted && python3 "$GITHUB_WORKSPACE/scripts/release/bounded.py" run --seconds 120 "$GITHUB_WORKSPACE/build/evidence/frozen-attempt.json" "$GITHUB_WORKSPACE/build/evidence/linux-extract.json" -- "$GITHUB_WORKSPACE/build/release/Aperture-x86_64.AppImage" --appimage-extract >/dev/null)
+          python3 scripts/release/bounded.py run --seconds 60 build/evidence/frozen-attempt.json build/evidence/linux-package-verify.json -- python3 build/tools/linux-runtime.py verify-package build/linux-package-extracted/squashfs-root build/linux-prepared/manifest.json > build/evidence/linux-package-bytes.json
           python3 scripts/release/bounded.py run --seconds 60 build/evidence/frozen-attempt.json build/evidence/linux-sign.json -- node node_modules/@tauri-apps/cli/tauri.js signer sign --app-version "$(python3 scripts/release/release.py check)" build/release/Aperture-x86_64.AppImage
-      - run: bash scripts/release/smoke-linux.sh
-        timeout-minutes: 2
       - run: python3 scripts/release/bounded.py deadline build/evidence/frozen-attempt.json
         timeout-minutes: 1
       - name: Verify corresponding source before binary artifact upload
@@ -145,7 +146,7 @@ jobs:
         run: |
           if ($env:GITHUB_RUN_ATTEMPT -ne '1' -or $env:GITHUB_REPOSITORY -ne 'neuroqp/neuroqp-aperture' -or $env:GITHUB_EVENT_NAME -ne 'workflow_dispatch' -or $env:GITHUB_REF -ne 'refs/heads/main' -or !$env:SIGNING_KEY) { throw 'Trusted main dispatch and signing key required' }
           New-Item -ItemType Directory -Force build/tools | Out-Null
-          foreach ($helper in @('prepared-inputs.py', 'prepare-windows-packaging.ps1')) {
+          foreach ($helper in @('prepared-inputs.py', 'prepare-windows-packaging.ps1', 'smoke-windows.ps1')) {
             git show "${env:GITHUB_SHA}:scripts/release/$helper" | Set-Content "build/tools/$helper" -Encoding utf8
             if ($LASTEXITCODE) { exit $LASTEXITCODE }
           }
@@ -206,6 +207,11 @@ jobs:
           TAURI_SIGNING_PRIVATE_KEY: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY }}
           TAURI_SIGNING_PRIVATE_KEY_PASSWORD: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY_PASSWORD }}
         run: python scripts/release/bounded.py run --seconds 300 build/evidence/frozen-attempt.json build/evidence/windows-build.json -- node node_modules/@tauri-apps/cli/tauri.js bundle --target x86_64-pc-windows-msvc --bundles nsis --ci --no-binary-patching
+      - name: Require bundling to preserve tested application bytes
+        run: |
+          $manifest = Get-Content build/prepared/prepared-windows.json -Raw | ConvertFrom-Json
+          $actual = (Get-FileHash src-tauri/target/x86_64-pc-windows-msvc/release/aperture.exe -Algorithm SHA256).Hash.ToLowerInvariant()
+          if ($actual -ne $manifest.binary_sha256) { throw 'Bundler changed the validated application executable' }
       - name: Stage installer and build portable executable
         run: |
           $installers = @(Get-ChildItem src-tauri/target/x86_64-pc-windows-msvc/release/bundle/nsis/*.exe)
@@ -220,8 +226,9 @@ jobs:
           TAURI_SIGNING_PRIVATE_KEY_PASSWORD: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY_PASSWORD }}
         timeout-minutes: 1
         run: python scripts/release/bounded.py run --seconds 60 build/evidence/frozen-attempt.json build/evidence/windows-portable-sign.json -- node node_modules/@tauri-apps/cli/tauri.js signer sign --app-version (python scripts/release/release.py check) build/release/Aperture-Portable-x64.exe
-      - run: pwsh scripts/release/smoke-windows.ps1 -Version (python scripts/release/release.py check) -Setup build/release/Aperture-Setup-x64.exe
-        timeout-minutes: 3
+      - name: Verify exact bytes extracted from final Windows packages
+        run: python scripts/release/bounded.py run --seconds 840 build/evidence/frozen-attempt.json build/evidence/windows-package-bytes.json -- pwsh build/tools/smoke-windows.ps1 -Version (python scripts/release/release.py check) -Setup build/release/Aperture-Setup-x64.exe
+        timeout-minutes: 15
       - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
         timeout-minutes: 3
         if: always()

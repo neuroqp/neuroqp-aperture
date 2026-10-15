@@ -18,6 +18,29 @@ spec.loader.exec_module(runtime)
 
 
 class RuntimeTests(unittest.TestCase):
+    def test_package_comparison_rejects_changed_missing_and_extra_runtime_files(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            extracted = root / "extracted"
+            extracted.mkdir()
+            binary = extracted / "aperture"
+            binary.write_bytes(b"validated app")
+            manifest = root / "manifest.json"
+            manifest.write_text(json.dumps({"source_sha": "a" * 40, "binary_sha256": digest(binary),
+                "files": {"runtime/" + name: row for name, row in runtime.inventory(extracted).items()}}))
+            self.assertEqual(runtime.verify_package(extracted, manifest)["status"], "pass")
+            binary.write_bytes(b"changed app")
+            with self.assertRaisesRegex(ValueError, "differs from sealed"):
+                runtime.verify_package(extracted, manifest)
+            binary.write_bytes(b"validated app")
+            (extracted / "unexpected.so").write_bytes(b"extra")
+            with self.assertRaisesRegex(ValueError, "unexpected.so"):
+                runtime.verify_package(extracted, manifest)
+            (extracted / "unexpected.so").unlink()
+            binary.unlink()
+            with self.assertRaisesRegex(ValueError, "aperture"):
+                runtime.verify_package(extracted, manifest)
+
     def fixture(self, root):
         app, tools = root / "app", root / "tools"
         for name in ("AppRun", "AppRun.wrapped", "usr/bin/aperture", "usr/bin/vips", "usr/bin/vipsheader", "usr/bin/tiffinfo"):

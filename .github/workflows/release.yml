@@ -171,6 +171,7 @@ jobs:
       - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
         with:
           ref: ${{ needs.identity.outputs.source_sha }}
+          fetch-depth: 0
           persist-credentials: false
       - uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4
         with:
@@ -181,8 +182,26 @@ jobs:
           pattern: packages-*
           path: build/release
           merge-multiple: true
-      - run: sudo apt-get update && sudo apt-get install -y minisign
-        timeout-minutes: 2
+      - name: Load reviewed signature verifier restore helper
+        run: |
+          mkdir -p build/tools
+          git show "$GITHUB_SHA:scripts/release/prepared-inputs.py" > build/tools/prepared-inputs.py
+      - uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4
+        with:
+          name: prepared-manifest-linux
+          run-id: ${{ needs.identity.outputs.packaging_run_id }}
+          github-token: ${{ github.token }}
+          path: build/prepared
+      - uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4
+        with:
+          name: prepared-verifier
+          run-id: ${{ needs.identity.outputs.packaging_run_id }}
+          github-token: ${{ github.token }}
+          path: build/prepared
+      - name: Restore frozen signature verifier without downloads
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: python3 build/tools/prepared-inputs.py restore-verifier build/evidence/frozen-attempt.json build/prepared/prepared-linux.json build/prepared/verifier.tar.gz build
       - name: Assemble and verify candidate
         timeout-minutes: 3
         env:

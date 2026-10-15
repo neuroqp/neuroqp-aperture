@@ -86,13 +86,18 @@ jobs:
           node node_modules/@tauri-apps/cli/tauri.js signer sign --help
           build/linux-prepared/tools/usr/bin/appimagetool --version
           build/linux-prepared/tools/usr/bin/mksquashfs -version
+      - name: Prepare and seal signature verifier before freeze
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends minisign
+          python3 build/tools/prepared-inputs.py prepare-verifier build/verifier build/prepared/verifier.tar.gz
       - name: Seal prepared inputs
         env:
           SOURCE_SHA: ${{ inputs.source_sha }}
           VALIDATION_RUN_ID: ${{ inputs.validation_run_id }}
           SOURCE_REVIEW_SHA256: ${{ inputs.source_review_sha256 }}
         run: |
-          python3 build/tools/prepared-inputs.py create --platform linux --source-sha "$SOURCE_SHA" --validation-run-id "$VALIDATION_RUN_ID" --packaging-run-id "$GITHUB_RUN_ID" --archive build/prepared/prepared-linux.tar.gz --manifest build/prepared/prepared-linux.json --automated-report "$(cat build/prepared/report-path.txt)" --buildinfo build/linux-prepared/runtime/usr/share/aperture/BUILDINFO.json --executable build/linux-prepared/runtime/usr/bin/aperture --development-archive build/native-validation/build/evidence/development-linux.tar.gz --tool-archive build/prepared/linux-runtime.tar.gz --source-plan build/prepared/source-review.json --source-plan-sha256 "$SOURCE_REVIEW_SHA256"
+          python3 build/tools/prepared-inputs.py create --platform linux --source-sha "$SOURCE_SHA" --validation-run-id "$VALIDATION_RUN_ID" --packaging-run-id "$GITHUB_RUN_ID" --archive build/prepared/prepared-linux.tar.gz --manifest build/prepared/prepared-linux.json --automated-report "$(cat build/prepared/report-path.txt)" --buildinfo build/linux-prepared/runtime/usr/share/aperture/BUILDINFO.json --executable build/linux-prepared/runtime/usr/bin/aperture --development-archive build/native-validation/build/evidence/development-linux.tar.gz --tool-archive build/prepared/linux-runtime.tar.gz --source-plan build/prepared/source-review.json --source-plan-sha256 "$SOURCE_REVIEW_SHA256" --verifier-archive build/prepared/verifier.tar.gz
           mkdir -p build/restore-check
           python3 -c 'import importlib.util; from pathlib import Path; s=importlib.util.spec_from_file_location("prepared","build/tools/prepared-inputs.py"); m=importlib.util.module_from_spec(s); s.loader.exec_module(m); m.extract(Path("build/prepared/prepared-linux.tar.gz"),Path("build/restore-check"),m.PATHS["linux"])'
           node build/restore-check/node_modules/@tauri-apps/cli/tauri.js --version
@@ -110,6 +115,14 @@ jobs:
           path: build/prepared/prepared-linux.json
           if-no-files-found: error
           retention-days: 30
+
+      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
+        with:
+          name: prepared-verifier
+          path: build/prepared/verifier.tar.gz
+          if-no-files-found: error
+          retention-days: 30
+          compression-level: 0
 
   windows:
     runs-on: windows-2022

@@ -22,6 +22,9 @@ jobs:
       - name: Validated Windows packaging input regressions
         shell: pwsh
         run: ./scripts/release/test-stage-tested-windows.ps1
+      - name: Final Windows package byte validation regressions
+        shell: pwsh
+        run: ./scripts/release/test-smoke-windows.ps1
       - name: PowerShell 7 helper regressions
         shell: pwsh
         run: ./scripts/release/test-smoke-desktop-windows.ps1

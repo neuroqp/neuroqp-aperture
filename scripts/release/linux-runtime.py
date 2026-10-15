@@ -153,6 +153,18 @@ def digest_bytes(value):
     return hashlib.sha256(value).hexdigest()
 
 
+def verify_package(extracted, manifest_path):
+    manifest = json.loads(manifest_path.read_text())
+    expected = {name.removeprefix("runtime/"): record for name, record in manifest["files"].items()
+                if name.startswith("runtime/")}
+    actual = inventory(extracted)
+    if not expected or actual != expected:
+        changed = sorted(name for name in actual.keys() | expected.keys() if actual.get(name) != expected.get(name))
+        raise ValueError(f"Packaged runtime differs from sealed inputs: {', '.join(changed[:10])}")
+    return {"status": "pass", "source_sha": manifest["source_sha"],
+            "binary_sha256": manifest["binary_sha256"], "entries_verified": len(actual)}
+
+
 def stage(archive_path, destination, archive_sha256, expected):
     if digest(archive_path) != archive_sha256:
         raise ValueError("Runtime archive SHA256 differs")
@@ -220,10 +232,16 @@ def main():
     stage_parser.add_argument("archive", type=Path)
     stage_parser.add_argument("destination", type=Path)
     stage_parser.add_argument("--archive-sha256", required=True)
+    verify_parser = commands.add_parser("verify-package")
+    verify_parser.add_argument("extracted", type=Path)
+    verify_parser.add_argument("manifest", type=Path)
     for command in (seal_parser, stage_parser):
         for name in ("source-sha", "binary-sha256", "native-sha256"):
             command.add_argument("--" + name, required=True)
     args = parser.parse_args()
+    if args.command == "verify-package":
+        print(json.dumps(verify_package(args.extracted, args.manifest)))
+        return
     expected = identities(args.source_sha, args.binary_sha256, args.native_sha256)
     if args.command == "seal":
         result = seal(args.runtime, args.tools, args.development, args.output, expected, args.appimage_runtime,

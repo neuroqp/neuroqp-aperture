@@ -34,6 +34,18 @@ Upload the completed functional and lab-readiness records through **Release evid
 
 Freeze the exact reviewed source commit only after Stage A passes and the validated executables and dependencies are available by immutable artifact identity. `bounded.py freeze` records source/input identities, the readiness run and the original deadline. For bounded commands, use `bounded.py run --seconds N ID REPORT -- COMMAND`; place `--seconds` before the positional paths. Record the reviewed orchestration SHA and verify the candidate run's `head_sha`.
 
+Before freeze, run **Stage A development validation** in `packaging-readiness` mode using the successful automated validation run, the sealed tested Linux runtime and the reviewed source plan. Download its `prepared-manifest-linux` and `prepared-manifest-windows` artifacts into one directory. The freeze command validates the successful preparation run, its reviewed ancestry and both executable identities, then records the manifest hashes automatically:
+
+```sh
+python3 scripts/release/bounded.py freeze READINESS_JSON FROZEN_JSON \
+  --readiness-run-id READINESS_RUN_ID \
+  --prepared-directory PREPARED_MANIFEST_DIRECTORY \
+  --packaging-run-id PACKAGING_PREPARATION_RUN_ID \
+  --source-root CLEAN_VALIDATED_SOURCE_CHECKOUT
+```
+
+Use the reviewed orchestration checkout for this command when it differs from the application source checkout. Do not edit the frozen JSON afterward. A missing or mismatched prepared manifest blocks freeze.
+
 Check reservation eligibility read-only before dispatch: `python3 scripts/release/reservation.py --tag vX.Y.Z --source-sha FULL_SHA --check-only`. Supply `--recovery-record PATH` only for a separately reviewed recovery record. Retain failed reservations and their audit trail. Existing assets or a candidate publication job that started block recovery. A new explicitly authorized attempt with repaired, validated inputs may reuse an empty unpublished reservation only with exact reviewed prior-run/body identities, completed stopped runs and a different prepared-input freeze. Never move a published tag, replace release assets or weaken a source gate. Recovery support does not authorize an automatic repair/retry loop.
 
 Prepare and review corresponding-source material **once** for that frozen commit. Transfer those verified bytes instead of assembling the same archive again on a runner. A pinned external review manifest lets source material be prepared without editing the frozen commit. Keep required dependency coverage, notices, hashes and native identities. The source gate remains mandatory. See [source material](scripts/release/SOURCE-MATERIAL.md) for cache reuse and the remaining archive-size limitation.

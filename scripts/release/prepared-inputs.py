@@ -58,6 +58,8 @@ def create(args):
                 "development_archive_sha256": digest(args.development_archive),
                 "tool_archive_sha256": digest(args.tool_archive), "source_plan_sha256": args.source_plan_sha256}
     check_plan(manifest, args.source_plan, args.source_plan_sha256)
+    if args.platform == "linux":
+        manifest["verifier_archive_sha256"] = digest(args.verifier_archive)
     args.archive.parent.mkdir(parents=True, exist_ok=True)
     # Dereference pnpm's junctions/symlinks so the handoff has no external store dependency.
     with tarfile.open(args.archive, "w:gz", dereference=True) as archive:
@@ -88,7 +90,44 @@ def validate(manifest_path, frozen, platform):
             raise ValueError(f"Prepared {key} differs from frozen inputs")
     for key in ("archive_sha256", "tool_archive_sha256", "development_archive_sha256", "source_plan_sha256"):
         hex_value(manifest.get(key), 64)
+    if platform == "linux":
+        hex_value(manifest.get("verifier_archive_sha256"), 64)
     return manifest
+
+
+def prepare_verifier(directory, archive_path):
+    binary = Path(shutil.which("minisign") or "/usr/bin/minisign").resolve(strict=True)
+    directory.mkdir(parents=True, exist_ok=False)
+    (directory / "bin").mkdir()
+    (directory / "lib").mkdir()
+    shutil.copy2(binary, directory / "bin/minisign")
+    dependencies = subprocess.check_output(["ldd", str(binary)], text=True, timeout=30)
+    if "not found" in dependencies:
+        raise ValueError("Minisign shared library closure is incomplete")
+    libraries = {Path(match) for match in re.findall(r"/[^\s()]+", dependencies)}
+    if not any(path.name.startswith("libsodium.so") for path in libraries):
+        raise ValueError("Minisign libsodium closure missing")
+    if not any(path.name == "ld-linux-x86-64.so.2" for path in libraries):
+        raise ValueError("Minisign ELF loader missing")
+    for library in libraries:
+        shutil.copy2(library, directory / "lib" / library.name, follow_symlinks=True)
+    wrapper = directory / "minisign"
+    wrapper.write_text('#!/bin/sh\nset -eu\nhere=$(CDPATH= cd -- "$(dirname -- "$0")" && pwd)\nexec "$here/lib/ld-linux-x86-64.so.2" --library-path "$here/lib" "$here/bin/minisign" "$@"\n')
+    wrapper.chmod(0o755)
+    subprocess.run([str(wrapper.resolve()), "-v"], check=True, timeout=30)
+    with tarfile.open(archive_path, "w:gz", dereference=True) as archive:
+        archive.add(directory, arcname="release-verifier")
+
+
+def restore_verifier(frozen, manifest_path, archive_path, destination):
+    preparation_run(frozen.get("packaging_run_id"))
+    manifest = validate(manifest_path, frozen, "linux")
+    if digest(archive_path) != manifest["verifier_archive_sha256"]:
+        raise ValueError("Prepared signature verifier archive differs")
+    extract(archive_path, destination, ("release-verifier",))
+    executable = destination / "release-verifier/minisign"
+    subprocess.run([str(executable.resolve()), "-v"], check=True, timeout=30)
+    return executable.parent.resolve()
 
 
 def extract(archive_path, destination, allowed):
@@ -133,6 +172,15 @@ def main():
         p.add_argument("--" + name, required=True)
     for name in ("archive", "manifest", "automated-report", "buildinfo", "executable", "development-archive", "tool-archive", "source-plan"):
         p.add_argument("--" + name, required=True, type=Path)
+    p.add_argument("--verifier-archive", type=Path)
+    p = sub.add_parser("prepare-verifier")
+    p.add_argument("directory", type=Path)
+    p.add_argument("archive", type=Path)
+    p = sub.add_parser("restore-verifier")
+    p.add_argument("frozen", type=Path)
+    p.add_argument("manifest", type=Path)
+    p.add_argument("archive", type=Path)
+    p.add_argument("destination", type=Path)
     p = sub.add_parser("bind")
     p.add_argument("frozen", type=Path)
     p.add_argument("directory", type=Path)
@@ -152,6 +200,14 @@ def main():
     args = parser.parse_args()
     if args.command == "create":
         create(args)
+    elif args.command == "prepare-verifier":
+        prepare_verifier(args.directory, args.archive)
+    elif args.command == "restore-verifier":
+        directory = restore_verifier(read(args.frozen), args.manifest, args.archive, args.destination)
+        if os.environ.get("GITHUB_PATH"):
+            with Path(os.environ["GITHUB_PATH"]).open("a") as stream:
+                stream.write(str(directory) + "\n")
+        print(directory)
     elif args.command == "native-run":
         trusted_run(args.run_id, "native-validation.yml", args.source_sha)
     elif args.command == "bind":

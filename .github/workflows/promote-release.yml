@@ -36,6 +36,7 @@ jobs:
       - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
         with:
           ref: ${{ inputs.source_sha }}
+          fetch-depth: 0
           persist-credentials: false
       - uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4
         with:
@@ -49,8 +50,38 @@ jobs:
           run-id: ${{ inputs.smoke_run_id }}
           github-token: ${{ github.token }}
           path: build/evidence
-      - run: sudo apt-get update && sudo apt-get install -y minisign
-        timeout-minutes: 1
+      - uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4
+        with:
+          name: frozen-attempt
+          run-id: ${{ inputs.candidate_run_id }}
+          github-token: ${{ github.token }}
+          path: build/evidence
+      - id: prepared
+        name: Require trusted candidate and read frozen verifier preparation run
+        env:
+          GH_TOKEN: ${{ github.token }}
+          CANDIDATE_RUN_ID: ${{ inputs.candidate_run_id }}
+        run: |
+          python3 scripts/release/bounded.py trusted-run "$CANDIDATE_RUN_ID" release.yml
+          mkdir -p build/tools
+          git show "$GITHUB_SHA:scripts/release/prepared-inputs.py" > build/tools/prepared-inputs.py
+          python3 -c 'import re,sys; sys.path.insert(0,"scripts/release"); from bounded import read,same_identity,validate_deadline; frozen=read("build/evidence/frozen-attempt.json"); candidate=read("build/evidence/frozen-candidate.json"); same_identity(frozen,candidate); assert all(frozen[k]==candidate[k] for k in ("freeze_started_at","deadline_at")), "Candidate frozen deadline differs"; validate_deadline(frozen); run=str(frozen.get("packaging_run_id","")); assert re.fullmatch(r"[1-9][0-9]*",run), "Prepared verifier run missing"; print("packaging_run_id="+run)' >> "$GITHUB_OUTPUT"
+      - uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4
+        with:
+          name: prepared-manifest-linux
+          run-id: ${{ steps.prepared.outputs.packaging_run_id }}
+          github-token: ${{ github.token }}
+          path: build/prepared
+      - uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4
+        with:
+          name: prepared-verifier
+          run-id: ${{ steps.prepared.outputs.packaging_run_id }}
+          github-token: ${{ github.token }}
+          path: build/prepared
+      - name: Restore frozen signature verifier without downloads
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: python3 build/tools/prepared-inputs.py restore-verifier build/evidence/frozen-attempt.json build/prepared/prepared-linux.json build/prepared/verifier.tar.gz build
       - name: Verify fixed native smoke, frozen deadline and exact candidate bytes
         env:
           GH_TOKEN: ${{ github.token }}
