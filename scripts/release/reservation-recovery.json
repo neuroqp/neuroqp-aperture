@@ -1,0 +1,11 @@
+{
+  "schema": 1,
+  "tag": "v0.2.0",
+  "source_sha": "3c17c5cc19ce1da706c47031ad1ffb1b2a7338e3",
+  "reservation_id": 413786308,
+  "alias": "untagged-729cf4af422249aae7c1",
+  "body_sha256": "c411fbb7c5f090f34eef04b474cbb967663836c445e88d4c7c562457d884e47b",
+  "origin_run_id": 38735118987,
+  "claim_run_id": 38736596537,
+  "claim_orchestration_sha": "df1ee21ca2da7fbd3ee4b03215de9a24ff4f1839"
+}
