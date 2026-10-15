@@ -53,7 +53,9 @@ jobs:
       APPIMAGE_EXTRACT_AND_RUN: "1"
       CARGO_INCREMENTAL: "0"
     steps:
-      - run: apt-get update && apt-get install -y --no-install-recommends git ca-certificates curl
+      # Preserve the reviewed native/source baseline before WebKit resolves its
+      # indirect dependencies. The full dependency identity gate remains required.
+      - run: apt-get update && apt-get install -y --no-install-recommends git ca-certificates curl gstreamer1.0-plugins-good=1.22.0-5+deb12u3
       - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
         with:
           ref: ${{ inputs.source_sha || github.sha }}
