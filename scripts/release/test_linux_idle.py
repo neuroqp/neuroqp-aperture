@@ -16,6 +16,7 @@ RUNNER = Path(__file__).with_name("linux-smoke.py").resolve()
 
 
 class LinuxIdleTests(unittest.TestCase):
+    @unittest.skipIf(os.getuid() == 0, "Idle guard requires an ordinary desktop user")
     def test_guard_spans_preflight_and_run_then_releases_and_blocks_stale_readiness(self):
         with tempfile.TemporaryDirectory() as directory:
             root = Path(directory)
