@@ -148,6 +148,9 @@ def validate_linux_preflight(lab, completed_at):
     for key in ("driver_plan_sha256", "smoke_report_sha256"):
         if not re.fullmatch(r"[0-9a-f]{64}", probe.get(key, "")):
             raise ValueError("Linux preflight must retain input/report hashes")
+    for key, size in (("source_sha", 40), ("asset_sha256", 64)):
+        if not re.fullmatch(r"[0-9a-f]{" + str(size) + "}", probe.get(key, "")):
+            raise ValueError("Linux preflight must pin its rehearsal " + key)
     transfer = probe.get("transport", {})
     passing(transfer)
     expected_transport = "local" if lab["environment"] == "arch-omarchy" else "ssh-stdin"
@@ -158,6 +161,9 @@ def validate_linux_preflight(lab, completed_at):
     passing(smoke)
     if smoke.get("stage") != "C" or smoke.get("uid") in (None, 0):
         raise ValueError("Linux rehearsal must observe a native user desktop")
+    for key in ("source_sha", "asset_sha256"):
+        if smoke.get(key) != probe[key]:
+            raise ValueError("Linux rehearsal differs from its pinned " + key)
     for key in ("environment", "helper_sha256", "tiny_tiff_sha256"):
         if smoke.get(key) != lab[key]:
             raise ValueError("Linux rehearsal differs from prepared " + key)

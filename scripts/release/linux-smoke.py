@@ -126,7 +126,7 @@ def copy_check(args):
     args.report.write_text(json.dumps(result, indent=2) + "\n")
 
 
-def compact_smoke(smoke):
+def compact_smoke(smoke, prior=False):
     def select(value, keys):
         return {key: value[key] for key in keys.split() if key in value}
     def detail(name, value):
@@ -142,9 +142,13 @@ def compact_smoke(smoke):
         if name == "fuse-fallback":
             return {key: detail(key, value.get(key, {})) for key in ("launch", "render", "clean-exit")}
         return select(value, "pid exit_code app_pid app_exited exit_code_source")
-    result = select(smoke, "schema stage status environment uid source_sha build_inputs_sha256 checksums_sha256 asset_sha256 helper_sha256 tiny_tiff_sha256 observer_tools freeze_started_at deadline_at started_at finished_at forced_kill attempts timed_out deadline_exceeded helper_forced_termination error os os_release privilege")
+    result = select(smoke, "schema stage status environment uid source_sha build_inputs_sha256 checksums_sha256 asset_sha256 helper_sha256 tiny_tiff_sha256 observer_tools freeze_started_at deadline_at started_at finished_at forced_kill attempts retry_reason transient_diagnosis timed_out deadline_exceeded helper_forced_termination error os os_release privilege")
     result["steps"] = [{**select(row, "name status forced_kill started_at finished_at timeout_seconds timed_out deadline_exceeded helper_forced_termination"),
                         **({"detail": detail(row["name"], row["detail"])} if "detail" in row else {})} for row in smoke.get("steps", [])]
+    if "prior_attempt" in smoke:
+        if prior:
+            raise ValueError("Only one retained prior smoke attempt is supported")
+        result["prior_attempt"] = compact_smoke(smoke["prior_attempt"], prior=True)
     return result
 
 
@@ -170,7 +174,7 @@ def preflight(args):
               and all(any(step.get("name") == name and step.get("status") == "pass" and step.get("forced_kill") is False
                           for step in steps) for name in ("launch", "render", "clean-exit")))
     result = dict(schema=1, status="pass" if passed else "fail", forced_kill=smoke.get("forced_kill"),
-                  environment=identity["readiness"]["environment"], source_sha=identity["source_sha"],
+                  environment=identity["readiness"]["environment"], source_sha=identity["source_sha"], asset_sha256=identity["asset_sha256"],
                   helper_sha256=identity["readiness"]["helper_sha256"], tiny_tiff_sha256=identity["tiny_tiff_sha256"],
                   tools=identity["readiness"]["tools"], runner_sha256=sha(__file__),
                   driver_plan_sha256=sha(args.driver_plan), transport=transport,

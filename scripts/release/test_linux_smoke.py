@@ -1,6 +1,7 @@
 """Exercise real transport/invocation entrypoints; these are not GUI evidence."""
 
 import hashlib
+import copy
 import importlib.util
 from datetime import datetime, timedelta, timezone
 import json
@@ -15,6 +16,34 @@ HELPER = Path(__file__).with_name("linux-smoke.py")
 
 
 class LinuxSmokeInvocationTests(unittest.TestCase):
+    def test_compact_retry_preserves_prior_identity_and_deadline_rejections(self):
+        import bounded
+        import test_bounded
+        spec = importlib.util.spec_from_file_location("linux_smoke", HELPER)
+        runner = importlib.util.module_from_spec(spec)
+        spec.loader.exec_module(runner)
+        expected = test_bounded.identity()
+        raw = test_bounded.smoke(expected, "debian12")
+        prior = copy.deepcopy(raw)
+        prior.update(status="fail", error="Prepared driver briefly busy")
+        raw.update(attempts=2, retry_reason="transient-lab", transient_diagnosis="Prepared driver briefly busy; bytes unchanged", prior_attempt=prior)
+        compact = runner.compact_smoke(raw)
+        bounded.validate_smoke_report(compact, expected)
+        self.assertEqual(compact["transient_diagnosis"], raw["transient_diagnosis"])
+        for field, value in (("asset_sha256", "9" * 64), ("deadline_at", expected["freeze_started_at"])):
+            invalid = copy.deepcopy(raw)
+            invalid["prior_attempt"][field] = value
+            with self.assertRaisesRegex(ValueError, "changed source"):
+                bounded.validate_smoke_report(runner.compact_smoke(invalid), expected)
+        invalid = copy.deepcopy(raw)
+        invalid["deadline_at"] = expected["freeze_started_at"]
+        with self.assertRaisesRegex(ValueError, "frozen deadline_at"):
+            bounded.validate_smoke_report(runner.compact_smoke(invalid), expected)
+        invalid = copy.deepcopy(raw)
+        invalid["prior_attempt"]["prior_attempt"] = prior
+        with self.assertRaisesRegex(ValueError, "Only one retained"):
+            runner.compact_smoke(invalid)
+
     def test_compact_report_passes_full_linux_gate_including_fallback_without_weakening_failures(self):
         import bounded
         import test_bounded
@@ -158,7 +187,7 @@ class LinuxSmokeInvocationTests(unittest.TestCase):
                 ("observer.py", "identity.json", "plan.json", "report.json", "tiny.tif")]
             helper.write_text("import json,os,pathlib,sys\nsteps=[dict(name=n,status='pass',forced_kill=False) for n in ('launch','render','clean-exit')]\nif os.environ.get('FAIL_CLOSE'): steps[-1]['status']='fail'\npathlib.Path(sys.argv[-1]).write_text(json.dumps(dict(status='pass',forced_kill=False,steps=steps)))\n")
             image.write_bytes(b"fixed tiny fixture")
-            data = dict(source_sha="a" * 40, deadline_at=(datetime.now(timezone.utc) + timedelta(seconds=30)).isoformat(),
+            data = dict(source_sha="a" * 40, asset_sha256="f" * 64, deadline_at=(datetime.now(timezone.utc) + timedelta(seconds=30)).isoformat(),
                         tiny_tiff_path=str(image), tiny_tiff_sha256=hashlib.sha256(image.read_bytes()).hexdigest(),
                         readiness=dict(environment="arch-omarchy", helper_path=str(helper), tools=[],
                                        helper_sha256=hashlib.sha256(helper.read_bytes()).hexdigest()))
@@ -168,6 +197,7 @@ class LinuxSmokeInvocationTests(unittest.TestCase):
             self.assertEqual(result.returncode, 0, result.stderr)
             receipt = json.loads(report.with_suffix(".readiness.json").read_text())
             self.assertEqual(receipt["status"], "pass")
+            self.assertEqual((receipt["source_sha"], receipt["asset_sha256"]), (data["source_sha"], data["asset_sha256"]))
             self.assertEqual(receipt["transport"]["transport"], "local")
             self.assertEqual(receipt["smoke_report"], json.loads(report.read_text()))
             report = root / "failed-close.json"

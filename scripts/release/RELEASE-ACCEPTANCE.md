@@ -41,6 +41,9 @@ For the local Arch desktop omit `--transport-report`; no SSH server is needed.
 Use a verified existing 0.2.0 validation fixture or development executable in its
 prepared AppImage runtime. This rehearsal is lab development, never final
 candidate acceptance. Retain its original fixture source and asset identity.
+The preflight receipt's `source_sha` and `asset_sha256` explicitly pin that
+rehearsal executable; its embedded smoke report must match both, even when the
+approved fixture source predates the current application source.
 It must actually launch, render the fixed TIFF and close with exit zero, using
 the reviewed helpers. Embed the resulting `preflight.readiness.json` receipt as
 `preflight` in each Linux lab

@@ -148,12 +148,18 @@ class BoundedTests(unittest.TestCase):
             rehearsal["observer_tools"] = lab["tools"]
             lab["preflight"] = {"schema": 1, "status": "pass", "forced_kill": False,
                 **{key: lab[key] for key in ("environment", "helper_sha256", "tiny_tiff_sha256")},
+                "source_sha": rehearsal["source_sha"], "asset_sha256": rehearsal["asset_sha256"],
                 "runner_sha256": "3" * 64, "driver_plan_sha256": "4" * 64, "smoke_report_sha256": "5" * 64,
                 "transport": {"status": "pass", "forced_kill": False, "transport": "local" if lab["environment"] == "arch-omarchy" else "ssh-stdin", **{key: lab["tiny_tiff_sha256"] for key in ("sha256", "fixture_sha256", "returned_sha256")}},
                 "smoke_report": rehearsal}
         now = bounded.timestamp()
         report = {**expected, "stage": "A", "status": "pass", "forced_kill": False, "completed_at": now, "automated": automated, "native_functional": native, "labs": labs}
         bounded.validate_readiness(report, expected)
+        older_fixture = copy.deepcopy(report)
+        probe = older_fixture["labs"][2]["preflight"]
+        probe["source_sha"] = probe["smoke_report"]["source_sha"] = "8" * 40
+        probe["smoke_report"]["steps"][0]["detail"]["process_identity"]["buildinfo"]["source_sha"] = "8" * 40
+        bounded.validate_readiness(older_fixture, expected)
         fallback_report = copy.deepcopy(report)
         steps = fallback_report["labs"][2]["preflight"]["smoke_report"]["steps"]
         fallback = {step["name"]: copy.deepcopy(step["detail"]) for step in steps}
@@ -164,6 +170,13 @@ class BoundedTests(unittest.TestCase):
             lambda lab: lab.pop("preflight"),
             lambda lab: lab["preflight"]["transport"].update(returned_sha256="9" * 64),
             lambda lab: lab["preflight"].update(helper_sha256="9" * 64),
+            lambda lab: lab["preflight"].pop("asset_sha256"),
+            lambda lab: lab["preflight"].update(asset_sha256="not-a-sha256"),
+            lambda lab: lab["preflight"].pop("source_sha"),
+            lambda lab: lab["preflight"].update(source_sha="not-a-source-sha"),
+            lambda lab: lab["preflight"]["smoke_report"].pop("asset_sha256"),
+            lambda lab: lab["preflight"]["smoke_report"].update(asset_sha256="9" * 64),
+            lambda lab: lab["preflight"]["smoke_report"].update(source_sha="9" * 40),
             lambda lab: lab["preflight"]["smoke_report"]["steps"][2]["detail"].update(exit_code=1),
             lambda lab: lab["preflight"]["smoke_report"]["steps"][1]["detail"]["pixel_observation"].update(spread=0),
             lambda lab: lab["preflight"]["smoke_report"].update(observer_tools=[]),
