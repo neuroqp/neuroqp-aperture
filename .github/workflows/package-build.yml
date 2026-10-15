@@ -124,7 +124,7 @@ jobs:
 
   windows:
     runs-on: windows-2022
-    timeout-minutes: 20
+    timeout-minutes: 25
     env:
       CARGO_NET_OFFLINE: "true"
       CARGO_HOME: ${{ github.workspace }}/build/packaging-cargo-home
@@ -205,7 +205,8 @@ jobs:
         env:
           TAURI_SIGNING_PRIVATE_KEY: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY }}
           TAURI_SIGNING_PRIVATE_KEY_PASSWORD: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY_PASSWORD }}
-        run: python scripts/release/bounded.py run --seconds 300 build/evidence/frozen-attempt.json build/evidence/windows-build.json -- node node_modules/@tauri-apps/cli/tauri.js bundle --target x86_64-pc-windows-msvc --bundles nsis --ci --no-binary-patching
+        # The previous successful Setup and portable packages each took about six minutes.
+        run: python scripts/release/bounded.py run --seconds 600 build/evidence/frozen-attempt.json build/evidence/windows-build.json -- node node_modules/@tauri-apps/cli/tauri.js bundle --target x86_64-pc-windows-msvc --bundles nsis --ci --no-binary-patching
       - name: Require bundling to preserve tested application bytes
         run: |
           $manifest = Get-Content build/prepared/prepared-windows.json -Raw | ConvertFrom-Json
@@ -217,7 +218,7 @@ jobs:
           if ($installers.Count -ne 1) { throw 'Expected exactly one installer' }
           Copy-Item $installers[0].FullName build/release/Aperture-Setup-x64.exe
           if (Test-Path ($installers[0].FullName + '.sig')) { Copy-Item ($installers[0].FullName + '.sig') build/release/Aperture-Setup-x64.exe.sig }
-          python scripts/release/bounded.py run --seconds 480 build/evidence/frozen-attempt.json build/evidence/windows-portable-build.json -- pwsh scripts/release/build-portable.ps1 -Version (python scripts/release/release.py check)
+          python scripts/release/bounded.py run --seconds 600 build/evidence/frozen-attempt.json build/evidence/windows-portable-build.json -- pwsh scripts/release/build-portable.ps1 -Version (python scripts/release/release.py check)
           if ($LASTEXITCODE) { exit $LASTEXITCODE }
       - name: Sign portable updater asset
         env:
