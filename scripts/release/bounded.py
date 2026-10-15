@@ -4,6 +4,7 @@
 import argparse
 import datetime as dt
 import hashlib
+import importlib.util
 import json
 import math
 import os
@@ -280,11 +281,32 @@ def validate_acceptance(report, expected):
         validate_smoke_report(row, expected)
 
 
-def frozen(readiness, readiness_run_id):
-    current = identity()
+def frozen(readiness, readiness_run_id, prepared_directory, packaging_run_id, source_root=ROOT):
+    current = identity(source_root)
     validate_readiness(readiness, current)
+    if not re.fullmatch(r"[1-9][0-9]*", str(packaging_run_id)):
+        raise ValueError("Successful packaging preparation run required")
+    spec = importlib.util.spec_from_file_location("prepared_inputs", Path(__file__).with_name("prepared-inputs.py"))
+    prepared = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(prepared)
+    result = {**current, "stage": "B", "readiness": readiness,
+              "readiness_run_id": str(readiness_run_id), "packaging_run_id": str(packaging_run_id),
+              "validated_inputs": {}}
+    manifests = []
+    for platform in ("linux", "windows"):
+        path = Path(prepared_directory) / f"prepared-{platform}.json"
+        manifest = read(path)
+        result["validated_inputs"][platform] = {"manifest_sha256": hashlib.sha256(path.read_bytes()).hexdigest(),
+            **{key: manifest.get(key) for key in prepared.FIELDS}}
+        manifests.append(prepared.validate(path, result, platform))
+    if manifests[0]["validation_run_id"] != manifests[1]["validation_run_id"]:
+        raise ValueError("Prepared platforms reference different automated validation runs")
+    if manifests[0]["source_material"] != manifests[1]["source_material"]:
+        raise ValueError("Prepared platforms reference different source material")
+    prepared.preparation_run(str(packaging_run_id))
+    trusted_run(manifests[0]["validation_run_id"], "native-validation.yml", current["source_sha"])
     start = timestamp()
-    return {**current, "stage": "B", "freeze_started_at": start, "deadline_at": (parsed(start) + dt.timedelta(seconds=ATTEMPT_SECONDS)).isoformat().replace("+00:00", "Z"), "readiness": readiness, "readiness_run_id": str(readiness_run_id)}
+    return {**result, "freeze_started_at": start, "deadline_at": (parsed(start) + dt.timedelta(seconds=ATTEMPT_SECONDS)).isoformat().replace("+00:00", "Z")}
 
 
 def validate_source_receipt(plan, expected, attempt_sha256):
@@ -445,6 +467,7 @@ def main():
     p = sub.add_parser("automated"); p.add_argument("platform"); p.add_argument("binary", type=Path); p.add_argument("output", type=Path)
     p = sub.add_parser("readiness"); p.add_argument("evidence", type=Path); p.add_argument("output", type=Path)
     p = sub.add_parser("freeze"); p.add_argument("readiness", type=Path); p.add_argument("output", type=Path); p.add_argument("--readiness-run-id", required=True)
+    p.add_argument("--prepared-directory", type=Path, required=True); p.add_argument("--packaging-run-id", required=True); p.add_argument("--source-root", type=Path, default=ROOT)
     p = sub.add_parser("source-receipt"); p.add_argument("identity", type=Path); p.add_argument("plan", type=Path); p.add_argument("--plan-sha256", required=True)
     p = sub.add_parser("candidate"); p.add_argument("identity", type=Path); p.add_argument("directory", type=Path); p.add_argument("output", type=Path)
     p = sub.add_parser("acceptance"); p.add_argument("identity", type=Path); p.add_argument("reports", type=Path); p.add_argument("output", type=Path)
@@ -462,7 +485,7 @@ def main():
         result = read(args.evidence / "native-functional-evidence.json")
         result["automated"] = [read(args.evidence / f"stage-a-{platform}.json") for platform in ("linux", "windows")]
         validate_readiness(result, identity()); write_report(args.output, result)
-    elif args.command == "freeze": write_report(args.output, frozen(read(args.readiness), args.readiness_run_id))
+    elif args.command == "freeze": write_report(args.output, frozen(read(args.readiness), args.readiness_run_id, args.prepared_directory, args.packaging_run_id, args.source_root))
     elif args.command == "source-receipt":
         from release import source_plan
         body = args.identity.read_bytes()

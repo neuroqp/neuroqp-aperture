@@ -2,6 +2,8 @@
 
 import copy
 import datetime as dt
+import hashlib
+import json
 import os
 from pathlib import Path
 import subprocess
@@ -43,6 +45,43 @@ def smoke(expected, environment):
 
 
 class BoundedTests(unittest.TestCase):
+    def test_freeze_records_validated_manifests_and_rejects_wrong_prepared_binary(self):
+        current = identity()
+        readiness = {"automated": [{"platform": platform, "source_sha": current["source_sha"],
+                                  "binary_sha256": "b" * 64} for platform in ("linux", "windows")]}
+        with tempfile.TemporaryDirectory() as directory:
+            directory = Path(directory)
+            for platform in ("linux", "windows"):
+                bounded.write_report(directory / f"prepared-{platform}.json", {
+                    "schema": 1, "stage": "A-packaging", "status": "pass", "forced_kill": False,
+                    "platform": platform, "source_sha": current["source_sha"],
+                    "validation_run_id": "123", "packaging_run_id": "456",
+                    "source_material": {"asset": "source.tar.xz", "url": "https://example.invalid/source.tar.xz",
+                        "sha256": "b" * 64, "application_source_inventory_sha256": "c" * 64,
+                        "application_source_sha": current["source_sha"], "application_lockfiles_sha256": {},
+                        "native_dependencies_sha256": {"linux": "b" * 64, "windows": "b" * 64}},
+                    **{key: "b" * 64 for key in ("binary_sha256", "native_dependencies_sha256",
+                        "archive_sha256", "tool_archive_sha256", "development_archive_sha256",
+                        "source_plan_sha256", "verifier_archive_sha256", "node_sha256")}})
+            with patch.object(bounded, "identity", return_value=current), patch.object(bounded, "validate_readiness"), \
+                    patch.object(bounded, "trusted_run", return_value={"head_sha": "a" * 40}), patch.object(bounded.subprocess, "run"):
+                result = bounded.frozen(readiness, "789", directory, "456")
+                self.assertEqual(result["packaging_run_id"], "456")
+                for platform in ("linux", "windows"):
+                    path = directory / f"prepared-{platform}.json"
+                    self.assertEqual(result["validated_inputs"][platform]["manifest_sha256"], hashlib.sha256(path.read_bytes()).hexdigest())
+                path = directory / "prepared-windows.json"
+                manifest = json.loads(path.read_text())
+                manifest["source_material"]["url"] = "https://example.invalid/changed.tar.xz"
+                bounded.write_report(path, manifest)
+                with self.assertRaisesRegex(ValueError, "different source material"):
+                    bounded.frozen(readiness, "789", directory, "456")
+                manifest["source_material"]["url"] = "https://example.invalid/source.tar.xz"
+                manifest["binary_sha256"] = "9" * 64
+                bounded.write_report(path, manifest)
+                with self.assertRaisesRegex(ValueError, "executable differs"):
+                    bounded.frozen(readiness, "789", directory, "456")
+
     def test_workflow_build_changes_invalidate_reusable_native_inputs(self):
         files = {"src/main.ts": "1", "src-tauri/src/lib.rs": "2", **{f".github/workflows/{name}.yml": "3" for name in ("native-validation", "package-build", "release")}}
         def inputs():

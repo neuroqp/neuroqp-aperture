@@ -42,6 +42,7 @@ jobs:
       reservation_id: ${{ steps.identity.outputs.reservation_id }}
       source_sha: ${{ steps.identity.outputs.source_sha }}
       version: ${{ steps.identity.outputs.version }}
+      packaging_run_id: ${{ steps.prepared.outputs.packaging_run_id }}
     steps:
       - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
         with:
@@ -54,6 +55,21 @@ jobs:
           run-id: ${{ inputs.frozen_run_id }}
           github-token: ${{ github.token }}
           path: build/evidence
+      - id: prepared
+        name: Read frozen preparation run identity
+        env:
+          FROZEN_SHA256: ${{ inputs.frozen_sha256 }}
+        run: |
+          mkdir -p build/tools
+          git show "$GITHUB_SHA:scripts/release/prepared-inputs.py" > build/tools/prepared-inputs.py
+          python3 -c 'import os,re,sys; from pathlib import Path; sys.path.insert(0,"scripts/release"); from release import digest; from bounded import read; p=Path("build/evidence/frozen-attempt.json"); assert digest(p)==os.environ["FROZEN_SHA256"], "Frozen attempt bytes differ"; r=str(read(p).get("packaging_run_id","")); assert re.fullmatch(r"[1-9][0-9]*",r), "Prepared packaging run required"; print("packaging_run_id="+r)' >> "$GITHUB_OUTPUT"
+      - uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4
+        with:
+          pattern: prepared-manifest-*
+          run-id: ${{ steps.prepared.outputs.packaging_run_id }}
+          github-token: ${{ github.token }}
+          path: build/prepared
+          merge-multiple: true
       - id: identity
         env:
           GH_TOKEN: ${{ github.token }}
@@ -73,6 +89,7 @@ jobs:
           python3 scripts/release/bounded.py trusted-run "$FROZEN_RUN_ID" release-evidence.yml
           FROZEN_SHA256="$FROZEN_SHA256" python3 -c 'import os,sys; sys.path.insert(0,"scripts/release"); from bounded import read,identity,same_identity,validate_readiness,validate_deadline; from release import digest; from pathlib import Path; p=Path("build/evidence/frozen-attempt.json"); assert digest(p)==os.environ["FROZEN_SHA256"], "Frozen attempt bytes differ"; r=read(p); current=identity(); same_identity(r,current); validate_readiness(r["readiness"],current); validate_deadline(r)'
           python3 scripts/release/bounded.py deadline build/evidence/frozen-attempt.json
+          python3 build/tools/prepared-inputs.py bind build/evidence/frozen-attempt.json build/prepared
           # Use the reviewed orchestration helper while the checkout stays frozen.
           git show "$GITHUB_SHA:scripts/release/reservation.py" > build/evidence/reservation-helper.py
           git show "$GITHUB_SHA:scripts/release/reservation-recovery.json" > build/evidence/reservation-recovery.json
@@ -139,6 +156,7 @@ jobs:
     with:
       source_sha: ${{ needs.identity.outputs.source_sha }}
       source_review_sha256: ${{ inputs.source_review_sha256 }}
+      packaging_run_id: ${{ needs.identity.outputs.packaging_run_id }}
     secrets:
       TAURI_SIGNING_PRIVATE_KEY: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY }}
       TAURI_SIGNING_PRIVATE_KEY_PASSWORD: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY_PASSWORD }}
@@ -153,6 +171,7 @@ jobs:
       - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
         with:
           ref: ${{ needs.identity.outputs.source_sha }}
+          fetch-depth: 0
           persist-credentials: false
       - uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4
         with:
@@ -163,8 +182,26 @@ jobs:
           pattern: packages-*
           path: build/release
           merge-multiple: true
-      - run: sudo apt-get update && sudo apt-get install -y minisign
-        timeout-minutes: 2
+      - name: Load reviewed signature verifier restore helper
+        run: |
+          mkdir -p build/tools
+          git show "$GITHUB_SHA:scripts/release/prepared-inputs.py" > build/tools/prepared-inputs.py
+      - uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4
+        with:
+          name: prepared-manifest-linux
+          run-id: ${{ needs.identity.outputs.packaging_run_id }}
+          github-token: ${{ github.token }}
+          path: build/prepared
+      - uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4
+        with:
+          name: prepared-verifier
+          run-id: ${{ needs.identity.outputs.packaging_run_id }}
+          github-token: ${{ github.token }}
+          path: build/prepared
+      - name: Restore frozen signature verifier without downloads
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: python3 build/tools/prepared-inputs.py restore-verifier build/evidence/frozen-attempt.json build/prepared/prepared-linux.json build/prepared/verifier.tar.gz build
       - name: Assemble and verify candidate
         timeout-minutes: 3
         env:

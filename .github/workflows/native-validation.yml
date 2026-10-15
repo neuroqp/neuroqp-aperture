@@ -2,6 +2,25 @@ name: Stage A development validation
 
 on:
   workflow_dispatch:
+    inputs:
+      mode:
+        description: Native validation or packaging preparation using an already-passed native run
+        type: choice
+        options: [validation, packaging-readiness]
+        default: validation
+      source_sha:
+        description: Exact application source commit, defaults to dispatched ref
+        required: false
+      validation_run_id:
+        description: Successful exact-source native-validation run to reuse for packaging readiness
+      linux_runtime_url:
+        description: Sealed tested Debian runtime and static packaging tools archive URL
+      linux_runtime_sha256:
+        description: SHA256 of sealed Linux runtime archive
+      source_review_url:
+        description: Existing reviewed corresponding-source plan URL
+      source_review_sha256:
+        description: SHA256 of reviewed source plan
   workflow_call:
     inputs:
       source_sha:
@@ -10,9 +29,22 @@ on:
 
 permissions:
   contents: read
+  actions: read
 
 jobs:
+  packaging-readiness:
+    if: inputs.mode == 'packaging-readiness'
+    uses: ./.github/workflows/package-readiness.yml
+    with:
+      source_sha: ${{ inputs.source_sha }}
+      validation_run_id: ${{ inputs.validation_run_id }}
+      linux_runtime_url: ${{ inputs.linux_runtime_url }}
+      linux_runtime_sha256: ${{ inputs.linux_runtime_sha256 }}
+      source_review_url: ${{ inputs.source_review_url }}
+      source_review_sha256: ${{ inputs.source_review_sha256 }}
+
   linux:
+    if: inputs.mode != 'packaging-readiness'
     runs-on: ubuntu-24.04
     timeout-minutes: 45
     container:
@@ -84,6 +116,7 @@ jobs:
           retention-days: 30
 
   windows:
+    if: inputs.mode != 'packaging-readiness'
     runs-on: windows-2022
     timeout-minutes: 45
     env:

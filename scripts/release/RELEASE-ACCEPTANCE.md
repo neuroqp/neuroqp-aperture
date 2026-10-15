@@ -34,7 +34,7 @@ Submit JSON through **Release evidence**, stage A, with the trusted validation r
 
 ## Stage B identity and source preparation
 
-`bounded.py freeze READINESS.json frozen-attempt.json --readiness-run-id RUN_ID` starts the single 30-minute clock. Submit the original receipt through **Release evidence**, stage B. Source preparation/review takes place after this freeze; it does not alter the frozen commit or start a second clock.
+`bounded.py freeze READINESS.json frozen-attempt.json --readiness-run-id RUN_ID --prepared-directory PREPARED_MANIFEST_DIRECTORY --packaging-run-id PACKAGING_PREPARATION_RUN_ID --source-root CLEAN_VALIDATED_SOURCE_CHECKOUT` validates the prepared manifests and starts the single 30-minute clock. Run it from the reviewed orchestration checkout. Submit the original receipt through **Release evidence**, stage B. Source preparation/review takes place after this freeze; it does not alter the frozen commit or start a second clock. See [the release guide](../../RELEASING.md) for the preparation workflow and manifest downloads.
 
 Provide the reviewed corresponding-source JSON and its exact SHA-256 to **Stage B signed candidate**, together with the frozen-attempt record identity. Prepare its archive once and transfer it. The source gate compares required coverage, lock/native identities and archived application files with the frozen Git tree. Final package jobs sign updater assets and record BUILDINFO and hashes. They do not rerun this functional checklist.
 
