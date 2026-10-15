@@ -3,6 +3,7 @@
 import importlib.util
 import json
 from pathlib import Path
+import shutil
 import subprocess
 import tempfile
 import unittest
@@ -16,6 +17,22 @@ spec.loader.exec_module(transport)
 
 
 class TransportTests(unittest.TestCase):
+    @unittest.skipUnless(shutil.which("zstd"), "zstd CLI is not installed")
+    def test_real_zstd_patch_reconstructs_exact_bytes(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            baseline, target, delta, reconstructed = [root / name for name in
+                ("baseline.bin", "target.bin", "delta.zst", "reconstructed.bin")]
+            before = bytes(range(256)) * 256
+            after = before[:32768] + b"changed!" * 128 + before[33792:]
+            baseline.write_bytes(before)
+            target.write_bytes(after)
+            subprocess.run(["zstd", "-1", "--single-thread", "--long=31",
+                            "--patch-from=" + str(baseline), str(target), "-o", str(delta)],
+                           check=True, capture_output=True, timeout=15)
+            transport.reconstruct(baseline, delta, reconstructed)
+            self.assertEqual(reconstructed.read_bytes(), after)
+
     def manifest(self):
         baseline = release.source_plan(release.ROOT / release.SOURCE_PUBLICATION)
         return {"schema": 1, "source_sha": "a" * 40, "source_release_tag": "source-test",

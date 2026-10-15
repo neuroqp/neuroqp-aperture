@@ -59,6 +59,11 @@ def checked_file(path, sha256, size=None):
         raise ValueError(f"Source transport SHA256 differs: {path.name}")
 
 
+def reconstruct(baseline, patch, archive):
+    command(["zstd", "--decompress", "--long=31", "--patch-from=" + str(baseline),
+             str(patch), "-o", str(archive)])
+
+
 def transfer(root, manifest, directory, receipt):
     source_sha, tag = manifest["source_sha"], manifest["source_release_tag"]
     command(["git", "merge-base", "--is-ancestor", source_sha, "origin/main"])
@@ -81,8 +86,7 @@ def transfer(root, manifest, directory, receipt):
              manifest["baseline_url"]], timeout=125)
     checked_file(baseline, manifest["baseline_sha256"])
     archive = directory / release.SOURCE_ASSET
-    command(["zstd", "--decompress", "--long=31", "--patch-from=" + str(baseline),
-             str(patch), "--output", str(archive)])
+    reconstruct(baseline, patch, archive)
     checked_file(archive, manifest["target_sha256"], manifest["target_bytes"])
     # This full gate checks archived locks against the plan and exact frozen Git
     # tree, rather than comparing them with the newer orchestration checkout.
