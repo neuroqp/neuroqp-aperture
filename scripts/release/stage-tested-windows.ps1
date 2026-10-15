@@ -25,6 +25,8 @@ try {
         $path = Join-Path $staging $file
         if (!(Test-Path -LiteralPath $path -PathType Leaf) -or (Get-Item -LiteralPath $path).Length -eq 0) { throw "Stage A Windows runtime is missing $file" }
     }
+    & python (Join-Path $PSScriptRoot 'prepared-inputs.py') coverage --platform windows --development-archive $Archive --automated-report $AutomatedReport --buildinfo (Join-Path $staging 'BUILDINFO-windows.json') --source-sha $SourceSha --source-plan $SourcePlan --source-plan-sha256 $SourcePlanSha256 --root $Root
+    if ($LASTEXITCODE -ne 0) { throw 'Stage A Windows input validation failed.' }
     # Reuse the release helper's canonical JSON identity instead of defining another.
     $validate = @'
 import json, sys
@@ -40,13 +42,11 @@ if (report.get('schema'), report.get('stage'), report.get('platform'), report.ge
     raise ValueError('Successful Stage A Windows automated report required')
 if report.get('source_sha') != source_sha or info.get('source_sha') != source_sha:
     raise ValueError('Stage A Windows source SHA differs')
-if plan.get('application_source_sha', source_sha) != source_sha:
-    raise ValueError('Reviewed source plan SHA differs')
 if digest(stage / 'aperture.exe') != report.get('binary_sha256'):
     raise ValueError('Stage A Windows executable bytes differ')
 if info.get('platform') != 'windows' or info.get('version') != current_version(root):
     raise ValueError('Stage A Windows BUILDINFO platform/version differs')
-if info.get('lockfiles') != plan['application_lockfiles_sha256'] or info['lockfiles'] != lockfile_hashes(root):
+if info.get('lockfiles') != lockfile_hashes(root):
     raise ValueError('Stage A Windows application dependencies differ')
 if native_identity(info.get('native_dependencies')) != plan['native_dependencies_sha256']['windows']:
     raise ValueError('Stage A Windows native dependency identity differs')

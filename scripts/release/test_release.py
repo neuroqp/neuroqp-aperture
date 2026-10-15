@@ -144,6 +144,10 @@ class SourceRefreshTests(unittest.TestCase):
                 self.assertEqual(release.digest(archive), original_hash)
                 review["sha256"] = result["sha256"]
                 release.verify_source_material(output.parent, review)
+                self.assertEqual(review["dependency_source"], {"url": plan["url"], "sha256": plan["sha256"], "review_sha256": release.digest(review_path)})
+                wrong_baseline = {**review, "dependency_source": {**review["dependency_source"], "sha256": "0" * 64}}
+                with self.assertRaisesRegex(ValueError, "dependency source baseline"):
+                    release.verify_source_material(output.parent, wrong_baseline)
                 with tarfile.open(output, "r:xz") as source:
                     self.assertEqual(source.next().name, "SOURCE-MANIFEST.json")
                     self.assertEqual(source.extractfile("linux/native-source.tar").read(), members["linux/native-source.tar"])

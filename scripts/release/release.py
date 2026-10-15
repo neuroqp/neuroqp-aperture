@@ -144,6 +144,8 @@ def verify_source_material(directory, plan, builds=False, platform=None, fixture
             raise ValueError("Source archive identity differs from its reviewed dependency identities")
         if record.get("inventory_sha256", {}).get(SOURCE_INVENTORY) != plan["application_source_inventory_sha256"]:
             raise ValueError("Source archive application inventory differs from its reviewed identity")
+        if "dependency_source" in plan and record.get("refresh", {}).get("prior_archive_sha256") != plan["dependency_source"].get("sha256"):
+            raise ValueError("Refreshed archive differs from its reviewed dependency source baseline")
         seen.add(first.name)
         for member in iter(source.next, None):
             name = member.name

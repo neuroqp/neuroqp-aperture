@@ -26,7 +26,6 @@ try {
     foreach ($file in @('aperture.exe', 'vips.exe', 'vipsheader.exe', 'libvips-42.dll', 'libtiff-6.dll', 'webview2/msedgewebview2.exe', 'LICENSE.txt', 'THIRD-PARTY-NOTICES-windows.txt')) {
         [IO.File]::WriteAllText("$temp/payload/$file", "original $file bytes")
     }
-    Write-Json "$temp/payload/DEVELOPMENT-SOURCE.json" @{ stage = 'A'; status = 'ready' }
     $source = 'b' * 40
     $locks = @{}
     foreach ($file in @('pnpm-lock.yaml', 'src-tauri/Cargo.lock')) { $locks[$file] = (Get-FileHash -LiteralPath "$root/$file").Hash.ToLowerInvariant() }
@@ -38,8 +37,18 @@ try {
     $plan = @{ schema = 1; status = 'ready'; asset = 'Aperture-Corresponding-Source.tar.xz'; sha256 = 'c' * 64; url = 'https://github.com/neuroqp/neuroqp-aperture/releases/download/test/Aperture-Corresponding-Source.tar.xz'; application_source_sha = $source; native_dependencies_sha256 = @{ linux = 'd' * 64; windows = "$nativeHash" }; application_lockfiles_sha256 = $locks; application_source_inventory_sha256 = 'e' * 64 }
     Write-Json "$temp/plan.json" $plan
     $binaryHash = (Get-FileHash -LiteralPath "$temp/payload/aperture.exe").Hash.ToLowerInvariant()
-    $report = @{ schema = 1; stage = 'A'; platform = 'windows'; status = 'pass'; forced_kill = $false; source_sha = $source; binary_sha256 = $binaryHash }
+    $report = @{ schema = 1; stage = 'A'; platform = 'windows'; status = 'pass'; forced_kill = $false; source_sha = $source; binary_sha256 = $binaryHash; build_inputs_sha256 = 'f' * 64 }
     Write-Json "$temp/report.json" $report
+    Write-Json "$temp/payload/DEVELOPMENT-SOURCE.json" @{
+        schema = 1; stage = 'A'; status = 'ready'; platform = 'windows'; source_sha = $source
+        application_source_url = "https://github.com/neuroqp/neuroqp-aperture/tree/$source"
+        build_inputs_sha256 = $report.build_inputs_sha256
+        baseline = @{ url = $plan.url; sha256 = $plan.sha256; review_sha256 = (Get-FileHash "$temp/plan.json").Hash.ToLowerInvariant(); application_lockfiles_sha256 = $locks }
+        application_lockfiles_sha256 = $locks; native_dependencies_sha256 = "$nativeHash"
+        cargo_root_version = @{ baseline = $version; current = $version; change = 'unchanged' }
+        buildinfo = @{ file = 'BUILDINFO-windows.json'; sha256 = (Get-FileHash "$temp/payload/BUILDINFO-windows.json").Hash.ToLowerInvariant() }
+        notices = @{ file = 'THIRD-PARTY-NOTICES-windows.txt'; sha256 = (Get-FileHash "$temp/payload/THIRD-PARTY-NOTICES-windows.txt").Hash.ToLowerInvariant() }
+    }
     Compress-Archive -Path "$temp/payload/*" -DestinationPath "$temp/development.zip"
     $arguments = @{ Archive = "$temp/development.zip"; AutomatedReport = "$temp/report.json"; SourceSha = $source; SourcePlan = "$temp/plan.json"; SourcePlanSha256 = (Get-FileHash -LiteralPath "$temp/plan.json").Hash.ToLowerInvariant(); ArchiveSha256 = (Get-FileHash -LiteralPath "$temp/development.zip").Hash.ToLowerInvariant(); Root = $root }
     & $stageHelper @arguments

@@ -45,6 +45,31 @@ def smoke(expected, environment):
 
 
 class BoundedTests(unittest.TestCase):
+    def test_schema2_freeze_compares_common_coverage_without_platform_record_hashes(self):
+        current = identity()
+        readiness = {"automated": [{"platform": platform, "source_sha": current["source_sha"], "binary_sha256": "b"*64} for platform in ("linux", "windows")]}
+        with tempfile.TemporaryDirectory() as directory:
+            directory = Path(directory)
+            coverage = {"baseline": {"url": "https://github.com/neuroqp/neuroqp-aperture/releases/download/base/Aperture-Corresponding-Source.tar.xz", "sha256": "1"*64, "review_sha256": "2"*64,
+                                    "application_lockfiles_sha256": {"pnpm-lock.yaml": "3"*64, "src-tauri/Cargo.lock": "4"*64}},
+                        "native_dependencies_sha256": {"linux": "5"*64, "windows": "6"*64},
+                        "application_source_sha": current["source_sha"], "application_lockfiles_sha256": {"pnpm-lock.yaml": "3"*64, "src-tauri/Cargo.lock": "7"*64},
+                        "cargo_root_version": {"baseline": "0.2.0", "current": "0.2.1", "change": "aperture-root-version-only"}}
+            for platform in ("linux", "windows"):
+                bounded.write_report(directory/f"prepared-{platform}.json", {"schema":2,"stage":"A-packaging","status":"pass","forced_kill":False,"platform":platform,
+                    "source_sha":current["source_sha"],"validation_run_id":"123","packaging_run_id":"456","binary_sha256":"b"*64,
+                    "native_dependencies_sha256":coverage["native_dependencies_sha256"][platform],"archive_sha256":"8"*64,"tool_archive_sha256":"9"*64,"development_archive_sha256":"a"*64,
+                    "source_plan_sha256":"2"*64,"verifier_archive_sha256":"c"*64,"node_sha256":"d"*64,
+                    "dependency_coverage":{**copy.deepcopy(coverage),"development_source_sha256":("e" if platform=="linux" else "f")*64}})
+            with patch.object(bounded,"identity",return_value=current), patch.object(bounded,"validate_readiness"), patch.object(bounded,"trusted_run",return_value={"head_sha":"a"*40}), patch.object(bounded.subprocess,"run"):
+                result=bounded.frozen(readiness,"789",directory,"456")
+                self.assertEqual(set(result["validated_inputs"]),{"linux","windows"})
+                path=directory/'prepared-windows.json';manifest=bounded.read(path)
+                for change in (lambda c:c['baseline'].update(sha256='0'*64),lambda c:c['native_dependencies_sha256'].update(linux='0'*64),lambda c:c['application_lockfiles_sha256'].update(**{'pnpm-lock.yaml':'0'*64})):
+                    changed=copy.deepcopy(manifest);change(changed['dependency_coverage']);bounded.write_report(path,changed)
+                    with self.assertRaises(ValueError):bounded.frozen(readiness,'789',directory,'456')
+                bounded.write_report(path,manifest)
+
     def test_freeze_records_validated_manifests_and_rejects_wrong_prepared_binary(self):
         current = identity()
         readiness = {"automated": [{"platform": platform, "source_sha": current["source_sha"],

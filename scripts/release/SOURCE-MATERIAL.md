@@ -64,6 +64,8 @@ Cargo root-package version change is allowed against the baseline lockfile; chan
 dependencies or native inputs require separate source review. This coverage record
 does not replace Stage B's exact frozen-source archive gate.
 
+Packaging preparation schema 2 validates this coverage record inside the actual trusted CI development archive, including its executable, BUILDINFO and notices hashes. It freezes the reviewed dependency baseline and current source/lock/native identities without requiring the future archive hash. `refresh-source.py` records that baseline as `dependency_source` in the final external review; Stage B checks the same baseline and the exact frozen application source and locks, then verifies the complete final archive and Git inventory. Its refresh receipt also records the executed helper hash, which may belong to newer reviewed orchestration than the frozen application's archived recipe. Schema 1 recovery keeps its original exact source-material identity.
+
 Publish the once-assembled, reviewed bytes under a new source-only tag outside
 Latest. Transfer those same bytes to Stage B. Do not rebuild on a runner to upload
 them. The candidate source job downloads/validates the published archive once and

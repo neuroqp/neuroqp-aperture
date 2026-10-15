@@ -49,6 +49,8 @@ Freeze the exact reviewed source commit only after Stage A passes and the valida
 
 Before freeze, run **Stage A development validation** in `packaging-readiness` mode using the successful automated validation run, the sealed tested Linux runtime and the reviewed source plan. Download its `prepared-manifest-linux` and `prepared-manifest-windows` artifacts into one directory. The freeze command validates the successful preparation run, its reviewed ancestry and both executable identities, then records the manifest hashes automatically:
 
+For new schema 2 preparations, `source_review_url` identifies the reviewed dependency baseline named in the CI development archive's `DEVELOPMENT-SOURCE.json`. Preparation verifies that embedded coverage, executable, metadata, current application locks and native identities. It pins baseline coverage separately from the final application archive. After freeze, assemble the new application archive once; its final review must name the exact frozen source and locks and retain the prepared `dependency_source` baseline. The final archive hash, source receipt and full Git-inventory verification remain mandatory. Historical schema 1 manifests retain their original exact archive binding.
+
 ```sh
 python3 scripts/release/bounded.py freeze READINESS_JSON FROZEN_JSON \
   --readiness-run-id READINESS_RUN_ID \
