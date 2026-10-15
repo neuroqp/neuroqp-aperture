@@ -39,7 +39,9 @@ def failed_identity_run(run_id):
     return {"run": run, "jobs": jobs}
 
 
-def unclaimed_origin(record, tag, source_sha, recovery=None):
+def unclaimed_origin(record, tag, source_sha, recovery=None, check_only=False):
+    if recovery and recovery.get("schema") == 2:
+        return reviewed_unpublished_resume(record, tag, source_sha, recovery, check_only)
     body = record.get("body") or ""
     claimed = CLAIM.lower() in body.lower()
     if claimed:
@@ -61,6 +63,49 @@ def unclaimed_origin(record, tag, source_sha, recovery=None):
         if origin["claim_origin"]["run"].get("head_sha") != recovery["claim_orchestration_sha"]:
             raise ValueError("Claim orchestration differs from its actual run")
     return {**origin, "original_body": body}
+
+
+def reviewed_unpublished_resume(record, tag, source_sha, recovery, check_only=False):
+    """A separately reviewed repair may replace invalidated, never-published inputs."""
+    destination(record, tag, source_sha)
+    body = record.get("body") or ""
+    if (recovery.get("tag"), recovery.get("source_sha"), recovery.get("reservation_id"), recovery.get("body_sha256")) != (tag, source_sha, record.get("id"), hashlib.sha256(body.encode()).hexdigest()):
+        raise ValueError("Reviewed unpublished recovery differs from its exact reservation")
+    if not check_only:
+        frozen_bytes = Path("build/evidence/frozen-attempt.json").read_bytes()
+        frozen = json.loads(frozen_bytes)
+        if hashlib.sha256(frozen_bytes).hexdigest() != os.environ.get("FROZEN_SHA256") or frozen.get("source_sha") != source_sha or not str(frozen.get("packaging_run_id", "")).isdecimal():
+            raise ValueError("Unpublished recovery requires the exact new prepared-input freeze")
+        approved = frozen.get("validated_inputs", {})
+        if set(approved) != {"linux", "windows"} or any(not re.fullmatch(r"[0-9a-f]{64}", approved[platform].get(key, "")) for platform in approved for key in ("manifest_sha256", "binary_sha256", "native_dependencies_sha256")):
+            raise ValueError("Both prepared input identities must be frozen before recovery")
+    invalidated = recovery.get("invalidated_frozen_sha256", "")
+    if not re.fullmatch(r"[0-9a-f]{64}", invalidated) or (not check_only and invalidated == os.environ.get("FROZEN_SHA256")) or invalidated not in body:
+        raise ValueError("The prior attempt must remain explicitly invalidated")
+    origins = re.findall(r"Stage B run: ([1-9][0-9]*)\.", body)
+    if origins != [str(recovery.get("origin_run_id"))]:
+        raise ValueError("Original reservation audit differs")
+    original = failed_identity_run(recovery["origin_run_id"])
+    claims = re.findall(r"Package build claim: Stage B run ([1-9][0-9]*); orchestration ([0-9a-f]{40})\.", body)
+    expected = recovery.get("claim_runs", [])
+    if not expected or body.lower().count(CLAIM.lower()) != len(expected) or claims != [(str(item["run_id"]), item["orchestration_sha"]) for item in expected]:
+        raise ValueError("Every retained claim requires exact reviewed audit data")
+    runs = []
+    for item in expected:
+        run_id = item["run_id"]
+        run = api(f"repos/{REPOSITORY}/actions/runs/{run_id}")
+        if run.get("id") != run_id or run.get("repository", {}).get("full_name") != REPOSITORY or run.get("path") != ".github/workflows/release.yml" or run.get("event") != "workflow_dispatch" or run.get("head_branch") != "main" or run.get("head_sha") != item["orchestration_sha"] or run.get("run_attempt") != 1 or run.get("status") != "completed" or run.get("conclusion") != item["conclusion"] or run.get("conclusion") not in ("failure", "cancelled"):
+            raise ValueError("A retained claim is not the reviewed stopped release run")
+        pages = api(f"repos/{REPOSITORY}/actions/runs/{run_id}/attempts/1/jobs?per_page=100", pages=True)
+        jobs = [job for page in pages for job in page["jobs"]]
+        if len(jobs) != len(item["jobs"]) or {job["name"]: job.get("conclusion") for job in jobs} != item["jobs"] or any(job.get("status") != "completed" for job in jobs):
+            raise ValueError("Stopped release job evidence differs from reviewed recovery")
+        candidates = [job for job in jobs if job["name"] == "candidate"]
+        if len(candidates) != 1 or candidates[0].get("conclusion") not in ("skipped", "cancelled") or candidates[0].get("steps"):
+            raise ValueError("Candidate publication must never have started")
+        runs.append({"run": run, "jobs": jobs})
+    return {"original": original, "stopped_claims": runs, "original_body": body,
+            "invalidated_frozen_sha256": invalidated}
 
 
 def write_reservation(tag, source_sha, body, existing_id=None):
@@ -94,7 +139,7 @@ def reserve(tag, source_sha, check_only=False, recovery=None):
     if existing:
         # Re-read the exact ID before evaluating and mutating its retained body.
         existing = api(f"repos/{REPOSITORY}/releases/{existing['id']}")
-        audit.update(reservation_id=existing["id"], origin=unclaimed_origin(existing, tag, source_sha, recovery))
+        audit.update(reservation_id=existing["id"], origin=unclaimed_origin(existing, tag, source_sha, recovery, check_only))
     if check_only:
         return {**audit, "status": "eligible", "mutated": False}
     if os.environ.get("GITHUB_REPOSITORY") != REPOSITORY or os.environ.get("GITHUB_REF") != "refs/heads/main" or os.environ.get("GITHUB_RUN_ATTEMPT") != "1":

@@ -19,6 +19,9 @@ jobs:
       - name: Windows PowerShell helper regressions
         shell: powershell
         run: ./scripts/release/test-smoke-desktop-windows.ps1
+      - name: Validated Windows packaging input regressions
+        shell: pwsh
+        run: ./scripts/release/test-stage-tested-windows.ps1
       - name: PowerShell 7 helper regressions
         shell: pwsh
         run: ./scripts/release/test-smoke-desktop-windows.ps1
@@ -46,6 +49,8 @@ jobs:
       - run: python3 scripts/release/test_release.py
       - run: python3 scripts/release/test_bounded.py
       - run: python3 scripts/release/test_source_transfer.py
+      - run: python3 scripts/release/test_prepared_inputs.py
+      - run: python3 scripts/release/test_linux_runtime.py
       - run: python3 scripts/release/test_reservation.py
       - run: python3 scripts/release/test_smoke_desktop.py
       - run: python3 scripts/release/test_lab.py

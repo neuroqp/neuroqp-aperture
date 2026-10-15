@@ -3,6 +3,7 @@
 import copy
 import hashlib
 import os
+from pathlib import Path
 import unittest
 from unittest.mock import patch
 
@@ -27,6 +28,31 @@ class ReservationTests(unittest.TestCase):
     def origin(self, draft=None, run=None, jobs=None):
         with patch.object(reservation, "api", side_effect=[run or self.run, [{"jobs": jobs or self.jobs}]]):
             return reservation.unclaimed_origin(draft or self.draft, TAG, SOURCE)
+
+    def unpublished(self, publish_steps=None, check_only=True, frozen=None):
+        body = self.draft['body'] + ' Package build claim: Stage B run 8; orchestration ' + 'b' * 40 + '. Frozen attempt: 9/' + 'c' * 64 + '.'
+        draft = {**self.draft, 'body': body}
+        jobs = [{'name': name, 'status': 'completed', 'conclusion': conclusion, 'steps': publish_steps or [] if name == 'candidate' else []}
+                for name, conclusion in {'identity': 'success', 'source': 'success', 'packages / linux': 'failure', 'packages / windows': 'cancelled', 'candidate': 'cancelled'}.items()]
+        claim = {**self.run, 'id': 8, 'head_sha': 'b' * 40, 'conclusion': 'cancelled'}
+        recovery = {'schema': 2, 'tag': TAG, 'source_sha': SOURCE, 'reservation_id': 42,
+                    'body_sha256': hashlib.sha256(body.encode()).hexdigest(), 'origin_run_id': 7,
+                    'invalidated_frozen_sha256': 'c' * 64,
+                    'claim_runs': [{'run_id': 8, 'orchestration_sha': 'b' * 40, 'conclusion': 'cancelled', 'jobs': {j['name']: j['conclusion'] for j in jobs}}]}
+        responses = [self.run, [{'jobs': self.jobs}], claim, [{'jobs': jobs}]]
+        with patch.object(reservation, 'api', side_effect=responses), patch.object(Path, 'read_bytes', return_value=frozen or b'{}'):
+            return reservation.reviewed_unpublished_resume(draft, TAG, SOURCE, recovery, check_only)
+
+    def test_reviewed_unpublished_preflight_retains_failed_inputs_without_mutation(self):
+        result = self.unpublished()
+        self.assertEqual(result['invalidated_frozen_sha256'], 'c' * 64)
+        self.assertEqual(result['stopped_claims'][0]['run']['id'], 8)
+
+    def test_unpublished_resume_blocks_started_publication_and_unprepared_freeze(self):
+        with self.assertRaisesRegex(ValueError, 'publication'):
+            self.unpublished(publish_steps=[{'name': 'upload assets', 'conclusion': 'cancelled'}])
+        with patch.dict(os.environ, {'FROZEN_SHA256': hashlib.sha256(b'{}').hexdigest()}), self.assertRaisesRegex(ValueError, 'prepared-input freeze'):
+            self.unpublished(check_only=False)
 
     def test_identity_only_origin_and_check_only_do_not_mutate(self):
         self.assertEqual(self.origin()["original_body"], self.draft["body"])

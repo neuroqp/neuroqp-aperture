@@ -1,11 +1,34 @@
 {
-  "schema": 1,
+  "schema": 2,
   "tag": "v0.2.0",
   "source_sha": "3c17c5cc19ce1da706c47031ad1ffb1b2a7338e3",
   "reservation_id": 413786308,
-  "alias": "untagged-729cf4af422249aae7c1",
-  "body_sha256": "c411fbb7c5f090f34eef04b474cbb967663836c445e88d4c7c562457d884e47b",
+  "body_sha256": "fce6ec46215f7ff23e85ec5094d9034dc71ed75ad815dc60efd79051f09ecb86",
   "origin_run_id": 38735118987,
-  "claim_run_id": 38736596537,
-  "claim_orchestration_sha": "df1ee21ca2da7fbd3ee4b03215de9a24ff4f1839"
+  "invalidated_frozen_sha256": "d264c9d4c3d70e3adc70140c7e259e7aa0800eef78f0a10802d7c8622ab3fffe",
+  "claim_runs": [
+    {
+      "run_id": 38736596537,
+      "orchestration_sha": "df1ee21ca2da7fbd3ee4b03215de9a24ff4f1839",
+      "conclusion": "failure",
+      "jobs": {
+        "identity": "failure",
+        "source": "skipped",
+        "packages": "skipped",
+        "candidate": "skipped"
+      }
+    },
+    {
+      "run_id": 38737624063,
+      "orchestration_sha": "47306de82b44f48030ef433266da26be90a1f8cb",
+      "conclusion": "cancelled",
+      "jobs": {
+        "identity": "success",
+        "source": "success",
+        "packages / linux": "failure",
+        "packages / windows": "cancelled",
+        "candidate": "cancelled"
+      }
+    }
+  ]
 }
