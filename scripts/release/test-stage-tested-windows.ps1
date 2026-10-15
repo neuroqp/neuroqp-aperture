@@ -84,7 +84,14 @@ try {
     $sealed = "$temp/rust/toolchain"; $toolchain = '1.98.0-x86_64-pc-windows-msvc'
     New-Item -ItemType Directory -Force "$sealed/bin", "$sealed/lib" | Out-Null
     foreach ($file in @('bin/cargo.exe', 'bin/rustc.exe', 'lib/driver.dll')) { [IO.File]::WriteAllText("$sealed/$file", "prepared $file") }
-    $rustManifest = [pscustomobject]@{ schema = 1; toolchain = $toolchain; layout = 'cargo-rustc-runtime-dlls'; files = @(Get-RustFileManifest) }
+    $rustFiles = @(Get-RustFileManifest)
+    $rustManifest = [pscustomobject]@{ schema = 1; toolchain = $toolchain; layout = 'cargo-rustc-runtime-dlls'; bytes = ($rustFiles | Measure-Object -Property bytes -Sum).Sum; files = $rustFiles }
+    # These three ASCII fixture files contain 22 + 22 + 23 bytes.
+    if ($rustManifest.bytes -ne 67 -or $rustManifest.files.Count -ne 3) { throw 'Rust manifest successful byte-count path differs' }
+    Write-Json "$temp/rust/windows-packaging-rust.json" $rustManifest
+    $restoredRustManifest = Get-Content -LiteralPath "$temp/rust/windows-packaging-rust.json" -Raw | ConvertFrom-Json
+    if ($restoredRustManifest.bytes -ne 67) { throw 'Rust manifest byte count did not survive serialization' }
+    Assert-RustFiles $restoredRustManifest
     Assert-RustFiles $rustManifest
     [IO.File]::WriteAllText("$sealed/lib/driver.dll", 'changed Rust runtime')
     Assert-Rejected { Assert-RustFiles $rustManifest } 'file bytes differ'

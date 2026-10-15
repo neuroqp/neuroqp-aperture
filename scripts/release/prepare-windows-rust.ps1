@@ -15,7 +15,7 @@ $manifestPath = Join-Path $ToolchainDirectory 'windows-packaging-rust.json'
 
 function Get-RustFileManifest {
     @(Get-ChildItem -LiteralPath $sealed -Recurse -File -Force | Sort-Object FullName | ForEach-Object {
-        [ordered]@{ path = [IO.Path]::GetRelativePath($sealed, $_.FullName).Replace('\', '/'); sha256 = (Get-FileHash -LiteralPath $_.FullName -Algorithm SHA256).Hash.ToLowerInvariant(); bytes = $_.Length }
+        [pscustomobject][ordered]@{ path = [IO.Path]::GetRelativePath($sealed, $_.FullName).Replace('\', '/'); sha256 = (Get-FileHash -LiteralPath $_.FullName -Algorithm SHA256).Hash.ToLowerInvariant(); bytes = $_.Length }
     })
 }
 
