@@ -53,7 +53,7 @@ jobs:
         timeout-minutes: 1
       - name: Prepare pinned Linux build tools
         timeout-minutes: 8
-        run: python3 scripts/release/bounded.py run build/evidence/frozen-attempt.json build/evidence/linux-prepare.json --seconds 480 -- bash scripts/release/prepare-linux.sh
+        run: python3 scripts/release/bounded.py run --seconds 480 build/evidence/frozen-attempt.json build/evidence/linux-prepare.json -- bash scripts/release/prepare-linux.sh
       - uses: pnpm/action-setup@f40ffcd9367d9f12939873eb1018b921a783ffaa # v4
         timeout-minutes: 3
         with:
@@ -80,7 +80,7 @@ jobs:
         env:
           TAURI_SIGNING_PRIVATE_KEY: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY }}
           TAURI_SIGNING_PRIVATE_KEY_PASSWORD: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY_PASSWORD }}
-        run: python3 scripts/release/bounded.py run build/evidence/frozen-attempt.json build/evidence/linux-build.json --seconds 1500 -- bash scripts/release/package-linux.sh
+        run: python3 scripts/release/bounded.py run --seconds 1500 build/evidence/frozen-attempt.json build/evidence/linux-build.json -- bash scripts/release/package-linux.sh
       - run: bash scripts/release/smoke-linux.sh
         timeout-minutes: 2
       - run: python3 scripts/release/bounded.py deadline build/evidence/frozen-attempt.json
@@ -166,7 +166,7 @@ jobs:
         timeout-minutes: 3
       - name: Prepare pinned Windows dependencies
         timeout-minutes: 6
-        run: python scripts/release/bounded.py run build/evidence/frozen-attempt.json build/evidence/windows-prepare.json --seconds 360 -- pwsh scripts/release/prepare-windows.ps1
+        run: python scripts/release/bounded.py run --seconds 360 build/evidence/frozen-attempt.json build/evidence/windows-prepare.json -- pwsh scripts/release/prepare-windows.ps1
       - name: Configure native tools
         run: |
           "APERTURE_NATIVE_DIR=$env:GITHUB_WORKSPACE\build\windows\native" >> $env:GITHUB_ENV
@@ -190,21 +190,21 @@ jobs:
         env:
           TAURI_SIGNING_PRIVATE_KEY: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY }}
           TAURI_SIGNING_PRIVATE_KEY_PASSWORD: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY_PASSWORD }}
-        run: python scripts/release/bounded.py run build/evidence/frozen-attempt.json build/evidence/windows-build.json --seconds 1500 -- cmd /d /c pnpm exec tauri build --target x86_64-pc-windows-msvc --bundles nsis -- --locked
+        run: python scripts/release/bounded.py run --seconds 1500 build/evidence/frozen-attempt.json build/evidence/windows-build.json -- cmd /d /c pnpm exec tauri build --target x86_64-pc-windows-msvc --bundles nsis -- --locked
       - name: Stage installer and build portable executable
         run: |
           $installers = @(Get-ChildItem src-tauri/target/x86_64-pc-windows-msvc/release/bundle/nsis/*.exe)
           if ($installers.Count -ne 1) { throw 'Expected exactly one installer' }
           Copy-Item $installers[0].FullName build/release/Aperture-Setup-x64.exe
           if (Test-Path ($installers[0].FullName + '.sig')) { Copy-Item ($installers[0].FullName + '.sig') build/release/Aperture-Setup-x64.exe.sig }
-          python scripts/release/bounded.py run build/evidence/frozen-attempt.json build/evidence/windows-portable-build.json --seconds 480 -- pwsh scripts/release/build-portable.ps1 -Version (python scripts/release/release.py check)
+          python scripts/release/bounded.py run --seconds 480 build/evidence/frozen-attempt.json build/evidence/windows-portable-build.json -- pwsh scripts/release/build-portable.ps1 -Version (python scripts/release/release.py check)
           if ($LASTEXITCODE) { exit $LASTEXITCODE }
       - name: Sign portable updater asset
         env:
           TAURI_SIGNING_PRIVATE_KEY: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY }}
           TAURI_SIGNING_PRIVATE_KEY_PASSWORD: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY_PASSWORD }}
         timeout-minutes: 1
-        run: python scripts/release/bounded.py run build/evidence/frozen-attempt.json build/evidence/windows-portable-sign.json --seconds 60 -- cmd /d /c pnpm exec tauri signer sign --app-version (python scripts/release/release.py check) build/release/Aperture-Portable-x64.exe
+        run: python scripts/release/bounded.py run --seconds 60 build/evidence/frozen-attempt.json build/evidence/windows-portable-sign.json -- cmd /d /c pnpm exec tauri signer sign --app-version (python scripts/release/release.py check) build/release/Aperture-Portable-x64.exe
       - run: pwsh scripts/release/smoke-windows.ps1 -Version (python scripts/release/release.py check) -Setup build/release/Aperture-Setup-x64.exe
         timeout-minutes: 3
       - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4

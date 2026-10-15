@@ -116,7 +116,7 @@ jobs:
         env:
           SOURCE_SHA: ${{ needs.identity.outputs.source_sha }}
           SOURCE_REVIEW_SHA256: ${{ inputs.source_review_sha256 }}
-        run: python3 scripts/release/bounded.py run build/evidence/frozen-attempt.json build/evidence/source-material.json --seconds 240 -- python3 scripts/release/release.py source-material build/corresponding-source --fetch --plan build/evidence/source-review.json --plan-sha256 "$SOURCE_REVIEW_SHA256" --source-sha "$SOURCE_SHA" --attempt build/evidence/frozen-attempt.json
+        run: python3 scripts/release/bounded.py run --seconds 240 build/evidence/frozen-attempt.json build/evidence/source-material.json -- python3 scripts/release/release.py source-material build/corresponding-source --fetch --plan build/evidence/source-review.json --plan-sha256 "$SOURCE_REVIEW_SHA256" --source-sha "$SOURCE_SHA" --attempt build/evidence/frozen-attempt.json
       - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
         if: always()
         with:
@@ -192,5 +192,5 @@ jobs:
           python3 scripts/release/bounded.py deadline build/evidence/frozen-attempt.json
           gh api "repos/$GITHUB_REPOSITORY/releases/$RESERVATION_ID" > build/evidence/reservation.json
           python3 -c 'import json,os; r=json.load(open("build/evidence/reservation.json")); assert r["draft"] and r["prerelease"] and not r["assets"] and r["tag_name"] == "v"+os.environ["VERSION"], "Reservation differs or already contains assets"'
-          python3 scripts/release/bounded.py run build/evidence/frozen-attempt.json build/evidence/candidate-publication.json --seconds 120 -- gh release upload "v$VERSION" build/release/*
-          python3 scripts/release/bounded.py run build/evidence/frozen-attempt.json build/evidence/candidate-state.json --seconds 30 -- gh release edit "v$VERSION" --draft=false --title "Aperture $VERSION candidate" --notes-file build/release-notes.md --prerelease --latest=false
+          python3 scripts/release/bounded.py run --seconds 120 build/evidence/frozen-attempt.json build/evidence/candidate-publication.json -- gh release upload "v$VERSION" build/release/*
+          python3 scripts/release/bounded.py run --seconds 30 build/evidence/frozen-attempt.json build/evidence/candidate-state.json -- gh release edit "v$VERSION" --draft=false --title "Aperture $VERSION candidate" --notes-file build/release-notes.md --prerelease --latest=false
