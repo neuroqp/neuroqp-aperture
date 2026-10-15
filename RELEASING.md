@@ -54,6 +54,8 @@ Create an annotated application tag on the exact validated commit, which must be
 
 The Windows and Linux jobs create the final updater-signed packages in parallel from the exact validated executable and runtime artifacts. Each package is built once. They must not compile application code, resolve fresh dependencies or run the functional suites. Short CI payload checks compare bundled executable/runtime hashes with Stage A, verify package structure and record build identity, signatures and asset hashes. These are not desktop acceptance. If the current workflow recompiles or reconstructs dependencies instead, deployment is blocked pending separately scoped workflow development.
 
+CI orchestration uses the standard hosted runner's preinstalled Python, Git and PowerShell. Bootstrap tools must be available without downloading an installer during Stage B. The Windows job checks its cached Python version and records the selected path and version. Node, Cargo, NSIS, AppImage tools and the signature verifier come from the sealed packaging inputs; sealing the entire CI operating system is outside this procedure.
+
 The candidate remains a prerelease outside Latest. A source or dependency change invalidates the frozen attempt and affected evidence. A package/build defect stops the deployment request; report the defect for separately scoped Stage A repair instead of starting another attempt automatically. Preserve existing public tags and assets, and use a higher application version after a published candidate defect.
 
 ## Stage C: small package smoke and publication

@@ -16,6 +16,20 @@ jobs:
     timeout-minutes: 3
     steps:
       - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+      - name: Use preinstalled runner Python
+        shell: pwsh
+        timeout-minutes: 1
+        run: |
+          $versions = @(Get-ChildItem -LiteralPath "$env:RUNNER_TOOL_CACHE/Python" -Directory | Where-Object { $_.Name -match '^3\.12\.\d+$' } | Sort-Object { [version]$_.Name } -Descending)
+          $cached = @($versions | Where-Object { (Test-Path -LiteralPath "$($_.FullName)/x64.complete") -and (Test-Path -LiteralPath "$($_.FullName)/x64/python.exe" -PathType Leaf) })
+          if (!$cached.Count) { throw 'Preinstalled Python 3.12 x64 missing from runner tool cache; no download is permitted.' }
+          $pythonRoot = Join-Path $cached[0].FullName 'x64'
+          $python = Join-Path $pythonRoot 'python.exe'
+          $version = & $python -c 'import sys; assert sys.version_info[:2] == (3, 12); print(sys.version.split()[0])'
+          if ($LASTEXITCODE) { throw 'Preinstalled Python version probe failed.' }
+          $pythonRoot | Add-Content -LiteralPath $env:GITHUB_PATH
+          New-Item -ItemType Directory -Force build/evidence | Out-Null
+          [ordered]@{ schema = 1; role = 'CI bootstrap'; source = 'preinstalled-runner-toolcache'; path = $python; version = "$version" } | ConvertTo-Json | Tee-Object -FilePath build/evidence/windows-bootstrap-python.json
       - name: Windows PowerShell helper regressions
         shell: powershell
         run: ./scripts/release/test-smoke-desktop-windows.ps1
