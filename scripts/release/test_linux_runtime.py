@@ -23,12 +23,20 @@ class RuntimeTests(unittest.TestCase):
             root = Path(directory)
             extracted = root / "extracted"
             extracted.mkdir()
+            (extracted / "usr").mkdir(mode=0o755)
             binary = extracted / "aperture"
             binary.write_bytes(b"validated app")
             manifest = root / "manifest.json"
             manifest.write_text(json.dumps({"source_sha": "a" * 40, "binary_sha256": digest(binary),
                 "files": {"runtime/" + name: row for name, row in runtime.inventory(extracted).items()}}))
             self.assertEqual(runtime.verify_package(extracted, manifest)["status"], "pass")
+            (extracted / "usr").chmod(0o700)
+            self.assertEqual(runtime.verify_package(extracted, manifest)["extractor_private_directories"], 1)
+            original_mode = binary.stat().st_mode
+            binary.chmod(0o700)
+            with self.assertRaisesRegex(ValueError, "aperture"):
+                runtime.verify_package(extracted, manifest)
+            binary.chmod(original_mode)
             binary.write_bytes(b"changed app")
             with self.assertRaisesRegex(ValueError, "differs from sealed"):
                 runtime.verify_package(extracted, manifest)

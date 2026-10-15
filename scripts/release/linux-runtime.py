@@ -158,11 +158,19 @@ def verify_package(extracted, manifest_path):
     expected = {name.removeprefix("runtime/"): record for name, record in manifest["files"].items()
                 if name.startswith("runtime/")}
     actual = inventory(extracted)
+    normalized_directories = 0
+    # The pinned type2 runtime's extractor creates private directories, independent
+    # of the stored SquashFS modes. Never normalize regular files or symlinks.
+    for name, record in actual.items():
+        if record == {"type": "directory", "mode": 0o700} and expected.get(name) == {"type": "directory", "mode": 0o755}:
+            actual[name] = {"type": "directory", "mode": 0o755}
+            normalized_directories += 1
     if not expected or actual != expected:
         changed = sorted(name for name in actual.keys() | expected.keys() if actual.get(name) != expected.get(name))
         raise ValueError(f"Packaged runtime differs from sealed inputs: {', '.join(changed[:10])}")
     return {"status": "pass", "source_sha": manifest["source_sha"],
-            "binary_sha256": manifest["binary_sha256"], "entries_verified": len(actual)}
+            "binary_sha256": manifest["binary_sha256"], "entries_verified": len(actual),
+            "extractor_private_directories": normalized_directories}
 
 
 def stage(archive_path, destination, archive_sha256, expected):
