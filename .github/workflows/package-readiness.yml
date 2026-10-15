@@ -42,7 +42,7 @@ jobs:
         run: |
           mkdir -p build/tools build/prepared
           echo "PREPARED_RESTORE_DIR=$RUNNER_TEMP/aperture-packaging-restore" >> "$GITHUB_ENV"
-          for helper in prepared-inputs.py linux-runtime.py; do
+          for helper in prepared-inputs.py linux-runtime.py release.py bounded.py; do
             git show "$GITHUB_SHA:scripts/release/$helper" > "build/tools/$helper"
           done
       - name: Require successful exact-source native validation
@@ -143,7 +143,7 @@ jobs:
         run: |
           New-Item -ItemType Directory -Force build/tools, build/prepared | Out-Null
           "PREPARED_RESTORE_DIR=$env:RUNNER_TEMP/aperture-packaging-restore" >> $env:GITHUB_ENV
-          foreach ($helper in @('prepared-inputs.py', 'stage-tested-windows.ps1', 'prepare-windows-packaging.ps1', 'prepare-windows-rust.ps1')) {
+          foreach ($helper in @('prepared-inputs.py', 'stage-tested-windows.ps1', 'prepare-windows-packaging.ps1', 'prepare-windows-rust.ps1', 'release.py', 'bounded.py')) {
             git show "${env:GITHUB_SHA}:scripts/release/$helper" | Set-Content "build/tools/$helper" -Encoding utf8
             if ($LASTEXITCODE) { exit $LASTEXITCODE }
           }

@@ -113,6 +113,7 @@ def prepare(archive, prior_review, root, source_sha):
         raise ValueError("Source manifest exceeds the source gate's 64 KiB limit")
     generated.update({"application/source/" + name: body for name, (body, _) in files.items()})
     review = {**plan, "status": "assembled-awaiting-review", "sha256": None,
+              "dependency_source": {"url": plan["url"], "sha256": plan["sha256"], "review_sha256": release.digest(prior_review)},
               "url": f"https://github.com/neuroqp/neuroqp-aperture/releases/download/source-v{json.loads(files['package.json'][0])['version']}/{release.SOURCE_ASSET}",
               "application_source_sha": source_sha,
               "application_lockfiles_sha256": locks,
@@ -218,6 +219,7 @@ def assemble(args, expected=None, attempt_sha256=None):
     try:
         generated, files, removed, review = prepare(args.prior_archive, args.prior_review, args.root, args.source_sha)
         receipt.update(prior_archive_sha256=release.digest(args.prior_archive), native_payloads_unchanged=True,
+                       executed_helper_sha256=release.digest(Path(__file__)),
                        removed_cargo_directories=sorted(removed),
                        changed_application_files=json.loads(generated["SOURCE-MANIFEST.json"])["refresh"]["changed_application_files"],
                        application_source_files=len(files), preparation_finished_at=bounded.timestamp())

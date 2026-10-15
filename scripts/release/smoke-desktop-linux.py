@@ -251,15 +251,15 @@ def application_process(launcher_pid, identity, deadline):
 
 
 def publish_receipt(receipt, result):
-    with tempfile.NamedTemporaryFile(mode="w", encoding="utf-8", dir=receipt.parent,
-                                     prefix=f".{receipt.name}.", delete=False) as stream:
-        temporary = Path(stream.name)
-        try:
+    stream = tempfile.NamedTemporaryFile(mode="w", encoding="utf-8", dir=receipt.parent,
+                                         prefix=f".{receipt.name}.", delete=False)
+    temporary = Path(stream.name)
+    try:
+        with stream:
             json.dump(result, stream)
-            stream.close()
-            temporary.replace(receipt)
-        finally:
-            temporary.unlink(missing_ok=True)
+        temporary.replace(receipt)
+    finally:
+        temporary.unlink(missing_ok=True)
 
 
 def launcher(identity, receipt, extra):

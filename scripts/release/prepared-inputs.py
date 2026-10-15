@@ -2,18 +2,21 @@
 """Bind prepared packaging bytes to trusted Stage A evidence, then restore offline."""
 
 import argparse
+import hashlib
 import json
 import os
 from pathlib import Path, PurePosixPath
 import re
 import shutil
+import stat
 import subprocess
 import sys
 import tarfile
+import zipfile
 
 ROOT = Path.cwd()
 sys.path.insert(0, str(Path(__file__).resolve().parent))
-from release import digest, lockfile_hashes, native_identity, source_plan
+from release import current_version, digest, lockfile_hashes, native_identity, source_plan
 from bounded import identity, passing, read, same_identity, trusted_run, write_report
 
 REPOSITORY = "neuroqp/neuroqp-aperture"
@@ -58,13 +61,146 @@ def source_material(plan, source_sha):
             for key in SOURCE_MATERIAL_FIELDS}
 
 
+def baseline_identity(plan, review_sha256):
+    return {"url": plan["url"], "sha256": plan["sha256"], "review_sha256": review_sha256}
+
+
+def development_members(archive, platform):
+    """Read coverage from the actual trusted CI archive, never a detached JSON."""
+    prefix = "linux/" if platform == "linux" else ""
+    names = ["DEVELOPMENT-SOURCE.json", f"BUILDINFO-{platform}.json",
+             f"THIRD-PARTY-NOTICES-{platform}.txt", "bin/aperture" if platform == "linux" else "aperture.exe"]
+    result = {}
+    with (tarfile.open(archive, "r:gz") if platform == "linux" else zipfile.ZipFile(archive)) as source:
+        entries = source.getmembers() if platform == "linux" else source.infolist()
+        for entry in entries:
+            name = entry.name if platform == "linux" else entry.filename
+            if name.startswith("/") or "\\" in name or ":" in name or ".." in PurePosixPath(name).parts or str(PurePosixPath(name)) != name.rstrip("/"):
+                raise ValueError("Unsafe development archive member")
+        for name in names:
+            selected = [entry for entry in entries if (entry.name if platform == "linux" else entry.filename) == prefix + name]
+            if len(selected) != 1:
+                raise ValueError("Development archive requires exactly one " + name)
+            member = selected[0]
+            if platform == "linux" and not member.isfile():
+                raise ValueError("Development coverage members must be regular files")
+            if platform == "windows" and stat.S_ISLNK(member.external_attr >> 16):
+                raise ValueError("Development coverage members must not be links")
+            size = member.size if platform == "linux" else member.file_size
+            limit = 1024 ** 2 if name.endswith(".json") else 128 * 1024 ** 2 if name.endswith(("aperture", ".exe")) else 64 * 1024 ** 2
+            if size <= 0 or size > limit:
+                raise ValueError("Development coverage member exceeds its bound")
+            with (source.extractfile(member) if platform == "linux" else source.open(member)) as stream:
+                body = stream.read()
+            result[name] = body
+    return result
+
+
+def development_coverage(archive, platform, report, info_path, source_sha, plan_path, plan_sha256, root):
+    hex_value(source_sha, 40)
+    passing(report)
+    plan = source_plan(plan_path, plan_sha256)
+    members = development_members(archive, platform)
+    record_body = members["DEVELOPMENT-SOURCE.json"]
+    record = json.loads(record_body)
+    info = read(info_path)
+    locks = lockfile_hashes(root)
+    native = native_identity(info.get("native_dependencies"))
+    binary = "bin/aperture" if platform == "linux" else "aperture.exe"
+    hashed = lambda body: hashlib.sha256(body).hexdigest()
+    if type(report.get("schema")) is not int or report["schema"] != 1 or (report.get("stage"), report.get("status"), report.get("forced_kill"), report.get("platform"), report.get("source_sha")) != ("A", "pass", False, platform, source_sha):
+        raise ValueError("Exact-source passing CI development report required")
+    if type(record.get("schema")) is not int or (record.get("schema"), record.get("stage"), record.get("status"), record.get("platform"), record.get("source_sha")) != (1, "A", "ready", platform, source_sha):
+        raise ValueError("Development source coverage differs from the exact CI source/platform")
+    if (record.get("build_inputs_sha256") != report.get("build_inputs_sha256")
+            or not re.fullmatch(r"[0-9a-f]{64}", record.get("build_inputs_sha256", ""))
+            or record.get("application_source_url") != f"https://github.com/{REPOSITORY}/tree/{source_sha}"
+            or hashed(members[binary]) != report.get("binary_sha256")):
+        raise ValueError("Development archive differs from trusted automated inputs/binary")
+    expected_baseline = {**baseline_identity(plan, plan_sha256), "application_lockfiles_sha256": plan["application_lockfiles_sha256"]}
+    if record.get("baseline") != expected_baseline:
+        raise ValueError("Development dependency coverage differs from reviewed baseline")
+    if (info.get("source_sha") != source_sha or info.get("platform") != platform
+            or info.get("version") != current_version(root) or info.get("lockfiles") != locks
+            or record.get("application_lockfiles_sha256") != locks
+            or record.get("native_dependencies_sha256") != native
+            or native != plan["native_dependencies_sha256"][platform]
+            or locks["pnpm-lock.yaml"] != plan["application_lockfiles_sha256"]["pnpm-lock.yaml"]):
+        raise ValueError("Development application locks/version/native coverage differs")
+    for key, name in (("buildinfo", f"BUILDINFO-{platform}.json"), ("notices", f"THIRD-PARTY-NOTICES-{platform}.txt")):
+        if record.get(key) != {"file": name, "sha256": hashed(members[name])}:
+            raise ValueError("Development coverage metadata bytes differ: " + key)
+    if hashed(members[f"BUILDINFO-{platform}.json"]) != digest(info_path):
+        raise ValueError("Prepared BUILDINFO differs from trusted development archive")
+    delta = record.get("cargo_root_version", {})
+    changed = locks["src-tauri/Cargo.lock"] != plan["application_lockfiles_sha256"]["src-tauri/Cargo.lock"]
+    if (delta.get("current") != info["version"] or not re.fullmatch(r"\d+\.\d+\.\d+", delta.get("baseline", ""))
+            or delta.get("change") != ("aperture-root-version-only" if changed else "unchanged")
+            or (delta["baseline"] != delta["current"]) != changed):
+        raise ValueError("Development Cargo coverage lacks its CI-proven root-version delta")
+    return {"baseline": expected_baseline, "native_dependencies_sha256": plan["native_dependencies_sha256"],
+            "application_source_sha": source_sha, "application_lockfiles_sha256": locks,
+            "development_source_sha256": hashed(record_body), "cargo_root_version": delta}
+
+
+def common_source_coverage(manifest):
+    if manifest["schema"] == 1:
+        return {"schema": 1, "source_material": manifest["source_material"]}
+    coverage = manifest["dependency_coverage"]
+    return {"schema": 2, **{key: coverage[key] for key in ("baseline", "native_dependencies_sha256", "application_source_sha", "application_lockfiles_sha256", "cargo_root_version")}}
+
+
+def validate_coverage(manifest):
+    coverage = manifest.get("dependency_coverage")
+    required = {"baseline", "native_dependencies_sha256", "application_source_sha", "application_lockfiles_sha256", "development_source_sha256", "cargo_root_version"}
+    if (not isinstance(coverage, dict) or set(coverage) != required
+            or coverage["application_source_sha"] != manifest["source_sha"]):
+        raise ValueError("Prepared dependency source coverage is missing or inconsistent")
+    baseline = coverage["baseline"]
+    if (not isinstance(baseline, dict) or set(baseline) != {"url", "sha256", "review_sha256", "application_lockfiles_sha256"}
+            or baseline["review_sha256"] != manifest["source_plan_sha256"]
+            or not re.fullmatch(r"https://github.com/neuroqp/neuroqp-aperture/releases/download/[A-Za-z0-9._-]+/Aperture-Corresponding-Source\.tar\.xz", baseline.get("url", ""))):
+        raise ValueError("Prepared reviewed dependency baseline differs")
+    for name in ("sha256", "review_sha256"):
+        hex_value(baseline[name], 64)
+    for locks in (baseline["application_lockfiles_sha256"], coverage["application_lockfiles_sha256"]):
+        if not isinstance(locks, dict) or set(locks) != {"pnpm-lock.yaml", "src-tauri/Cargo.lock"}:
+            raise ValueError("Prepared dependency coverage requires both application locks")
+        for value in locks.values():
+            hex_value(value, 64)
+    native = coverage["native_dependencies_sha256"]
+    if not isinstance(native, dict) or set(native) != set(PATHS) or native[manifest["platform"]] != manifest["native_dependencies_sha256"]:
+        raise ValueError("Prepared native dependency coverage differs")
+    for value in native.values():
+        hex_value(value, 64)
+    hex_value(coverage["development_source_sha256"], 64)
+    delta = coverage["cargo_root_version"]
+    changed = baseline["application_lockfiles_sha256"]["src-tauri/Cargo.lock"] != coverage["application_lockfiles_sha256"]["src-tauri/Cargo.lock"]
+    if (not isinstance(delta, dict) or set(delta) != {"baseline", "current", "change"}
+            or any(not re.fullmatch(r"\d+\.\d+\.\d+", delta.get(key, "")) for key in ("baseline", "current"))
+            or delta["change"] != ("aperture-root-version-only" if changed else "unchanged")
+            or (delta["baseline"] != delta["current"]) != changed
+            or baseline["application_lockfiles_sha256"]["pnpm-lock.yaml"] != coverage["application_lockfiles_sha256"]["pnpm-lock.yaml"]):
+        raise ValueError("Prepared Cargo/npm coverage lacks its proven root-version delta")
+    return coverage
+
+
 def check_plan(manifest, path, sha256):
+    if type(manifest.get("schema")) is not int or manifest["schema"] not in (1, 2):
+        raise ValueError("Unsupported prepared source coverage schema")
     plan = source_plan(path, sha256)
     if (plan.get("application_source_sha", manifest["source_sha"]) != manifest["source_sha"]
             or plan["application_lockfiles_sha256"] != lockfile_hashes(ROOT)
             or plan["native_dependencies_sha256"][manifest["platform"]] != manifest["native_dependencies_sha256"]):
         raise ValueError("Prepared source, lockfiles or native dependencies differ from reviewed source")
-    if manifest.get("source_material") != source_material(plan, manifest["source_sha"]):
+    if manifest.get("schema") == 2:
+        coverage = validate_coverage(manifest)
+        if (plan.get("application_source_sha") != manifest["source_sha"]
+                or plan["application_lockfiles_sha256"] != coverage["application_lockfiles_sha256"]
+                or plan["native_dependencies_sha256"] != coverage["native_dependencies_sha256"]
+                or plan.get("dependency_source") != {key: coverage["baseline"][key] for key in ("url", "sha256", "review_sha256")}):
+            raise ValueError("Final frozen application or dependency source coverage differs")
+    elif manifest.get("source_material") != source_material(plan, manifest["source_sha"]):
         raise ValueError("Reviewed source material differs from prepared archive coverage")
 
 
@@ -78,7 +214,7 @@ def create(args):
         raise ValueError("Prepared BUILDINFO differs from validated source")
     if digest(args.executable) != report.get("binary_sha256"):
         raise ValueError("Prepared executable differs from automated Stage A binary")
-    manifest = {"schema": 1, "stage": "A-packaging", "status": "pass", "forced_kill": False,
+    manifest = {"schema": 2, "stage": "A-packaging", "status": "pass", "forced_kill": False,
                 "platform": args.platform, "source_sha": hex_value(args.source_sha, 40),
                 "validation_run_id": args.validation_run_id, "packaging_run_id": args.packaging_run_id,
                 "binary_sha256": report["binary_sha256"],
@@ -86,8 +222,9 @@ def create(args):
                 "development_archive_sha256": digest(args.development_archive),
                 "tool_archive_sha256": digest(args.tool_archive), "source_plan_sha256": args.source_plan_sha256,
                 "node_sha256": digest(node_path(args.platform, ROOT))}
-    manifest["source_material"] = source_material(source_plan(args.source_plan, args.source_plan_sha256), args.source_sha)
-    check_plan(manifest, args.source_plan, args.source_plan_sha256)
+    manifest["dependency_coverage"] = development_coverage(args.development_archive, args.platform, report, args.buildinfo,
+        args.source_sha, args.source_plan, args.source_plan_sha256, ROOT)
+    validate_coverage(manifest)
     if args.platform == "linux":
         manifest["verifier_archive_sha256"] = digest(args.verifier_archive)
     args.archive.parent.mkdir(parents=True, exist_ok=True)
@@ -107,7 +244,7 @@ def validate(manifest_path, frozen, platform):
     expected = frozen.get("validated_inputs", {}).get(platform, {})
     if digest(manifest_path) != expected.get("manifest_sha256"):
         raise ValueError("Prepared manifest differs from frozen reviewed bytes")
-    if (manifest.get("schema"), manifest.get("stage"), manifest.get("status"), manifest.get("forced_kill"), manifest.get("platform")) != (1, "A-packaging", "pass", False, platform):
+    if type(manifest.get("schema")) is not int or manifest["schema"] not in (1, 2) or (manifest.get("stage"), manifest.get("status"), manifest.get("forced_kill"), manifest.get("platform")) != ("A-packaging", "pass", False, platform):
         raise ValueError("Successful packaging preparation manifest required")
     if manifest.get("source_sha") != frozen.get("source_sha") or manifest.get("packaging_run_id") != frozen.get("packaging_run_id"):
         raise ValueError("Prepared source or packaging workflow differs from frozen inputs")
@@ -122,6 +259,9 @@ def validate(manifest_path, frozen, platform):
         hex_value(manifest.get(key), 64)
     if platform == "linux":
         hex_value(manifest.get("verifier_archive_sha256"), 64)
+    if manifest["schema"] == 2:
+        validate_coverage(manifest)
+        return manifest
     material = manifest.get("source_material")
     if (not isinstance(material, dict) or set(material) != set(SOURCE_MATERIAL_FIELDS)
             or material["application_source_sha"] != manifest["source_sha"]
@@ -234,8 +374,18 @@ def main():
     p = sub.add_parser("native-run")
     p.add_argument("run_id")
     p.add_argument("source_sha")
+    p = sub.add_parser("coverage", help="Validate dependency coverage inside an exact-source CI development archive")
+    p.add_argument("--platform", choices=PATHS, required=True)
+    for name in ("development-archive", "automated-report", "buildinfo", "source-plan"):
+        p.add_argument("--" + name, type=Path, required=True)
+    p.add_argument("--source-sha", required=True)
+    p.add_argument("--source-plan-sha256", required=True)
+    p.add_argument("--root", type=Path, default=ROOT)
     args = parser.parse_args()
-    if args.command == "create":
+    if args.command == "coverage":
+        print(json.dumps(development_coverage(args.development_archive, args.platform, read(args.automated_report), args.buildinfo,
+            args.source_sha, args.source_plan, args.source_plan_sha256, args.root), sort_keys=True))
+    elif args.command == "create":
         create(args)
     elif args.command == "prepare-node":
         prepare_node(args.platform)

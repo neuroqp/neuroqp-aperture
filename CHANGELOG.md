@@ -2,6 +2,10 @@
 
 ## [Unreleased]
 
+## [0.2.1] - 2026-10-15
+
+- Fit newly opened images after the viewer's initial layout and resize complete.
+
 ## [0.2.0] - 2026-10-14
 
 - Open images in separate Aperture windows, including from your file manager.
