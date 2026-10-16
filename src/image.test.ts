@@ -685,3 +685,143 @@ test("detail tile retention scales down with channel count without reducing reso
     assert.ok(imageTileCacheCount(channels) * bytes <= 32 * 1024 ** 2);
   }
 });
+
+test("projection changes coalesce with navigation and retain pending mode until confirmation", async () => {
+  const first = deferred<boolean>();
+  const calls: unknown[] = [];
+  const navigation = new PlaneNavigation(
+    async (...args) => {
+      calls.push(args);
+      return calls.length === 1 ? first.promise : true;
+    },
+    () => {},
+  );
+  navigation.setPlane({ position: 0, z: 2, time: 3 });
+  navigation.setProjection("z");
+  assert.deepEqual(navigation.selection, { position: 0, z: 0, time: 3 });
+  navigation.select("time", 4);
+  navigation.setProjection("zTime");
+  navigation.select("position", 1);
+  navigation.select("z", 2);
+  navigation.select("time", 2);
+  assert.deepEqual(navigation.selection, { position: 1, z: 0, time: 0 });
+  navigation.setPlane({ position: 0, z: 0, time: 3 }, true, "z");
+  assert.equal(navigation.projection, "zTime");
+  first.resolve(true);
+  await delay(0);
+  assert.deepEqual(calls, [
+    [0, 0, 3, undefined, "z"],
+    [1, 0, 0, { axis: "position", direction: 1 }, "zTime"],
+  ]);
+  assert.equal(navigation.projection, "zTime");
+  navigation.setProjection("none");
+  await delay(0);
+  assert.deepEqual(calls.at(-1), [
+    1,
+    0,
+    0,
+    { axis: "position", direction: 1 },
+    "none",
+  ]);
+});
+
+test("projection selection persists across frames and restores confirmed mode after rejection", async () => {
+  const calls: unknown[] = [];
+  const navigation = new PlaneNavigation(
+    async (...args) => {
+      calls.push(args);
+      return false;
+    },
+    () => {},
+  );
+  navigation.setPlane({ position: 0, z: 0, time: 2 }, false, "z");
+  navigation.select("time", 3);
+  await delay(0);
+  assert.deepEqual(calls, [[0, 0, 3, { axis: "time", direction: 1 }, "z"]]);
+  assert.equal(navigation.projection, "z");
+  assert.deepEqual(navigation.selection, { position: 0, z: 0, time: 2 });
+  navigation.setProjection("none");
+  await delay(0);
+  assert.equal(navigation.projection, "z");
+  navigation.setPlane({ position: 0, z: 0, time: 0 });
+  assert.equal(navigation.projection, "none");
+});
+
+test("projected axes show maximum extents while position, channel and the other axis remain navigable", async () => {
+  const { dimensionAxis } = await import("./image.ts");
+  const image: ImageState = {
+    ...state("projected"),
+    projection: "z",
+    dimensions: {
+      positions: ["A", "B"],
+      z: 5,
+      time: 4,
+      position: 1,
+      zIndex: 0,
+      timeIndex: 2,
+    },
+    channels: [{ name: "DAPI", color: "blue" }],
+  };
+  assert.deepEqual(dimensionAxis(image, "z", -1), {
+    index: 0,
+    count: 5,
+    name: "Maximum intensity across 5 Z planes",
+    projected: true,
+  });
+  assert.deepEqual(dimensionAxis(image, "time", -1), {
+    index: 2,
+    count: 4,
+    name: "Time point",
+  });
+  assert.equal(dimensionAxis(image, "position", -1).index, 1);
+  assert.equal(dimensionAxis(image, "channel", 0).name, "DAPI");
+  assert.equal(
+    dimensionAxis({ ...image, projection: "zTime" }, "time", -1).projected,
+    true,
+  );
+  assert.equal(
+    dimensionAxis({ ...image, projection: "none" }, "z", -1).projected,
+    undefined,
+  );
+});
+
+test("image loader forwards explicit projection changes and preserves omission for ordinary navigation", async () => {
+  const calls: unknown[] = [];
+  const image: ImageState = {
+    ...state("nd2"),
+    projection: "z",
+    dimensions: {
+      positions: ["A", "B"],
+      z: 3,
+      time: 4,
+      position: 0,
+      zIndex: 0,
+      timeIndex: 2,
+    },
+  };
+  const loader = new ImageLoader(
+    {
+      open: async () => image,
+      state: async () => image,
+      cancel: async () => {},
+      selectPlane: async (...args) => {
+        calls.push(args);
+        return {
+          ...image,
+          id: String(calls.length),
+          projection: args[5] ?? image.projection,
+        };
+      },
+    },
+    () => {},
+    assert.fail,
+  );
+  await loader.open("nd2");
+  await loader.selectPlane(1, 0, 2);
+  await loader.selectPlane(1, 0, 2, undefined, "none");
+  assert.deepEqual(calls, [
+    ["nd2", 1, 0, 2],
+    ["1", 1, 0, 2, undefined, "none"],
+  ]);
+  loader.dispose();
+});

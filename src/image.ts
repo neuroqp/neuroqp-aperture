@@ -15,6 +15,7 @@ export type ImageState = {
   channels?: { name: string; color: string }[];
   channelMode?: boolean;
   readOnly?: boolean;
+  projection?: ProjectionMode;
   displayRanges?: [number, number][];
   calibration?: {
     pixelWidthUm: number | null;
@@ -32,6 +33,12 @@ export type ImageState = {
   };
 };
 
+export type ProjectionMode = "none" | "z" | "time" | "zTime";
+
+export function projectsAxis(mode: ProjectionMode, axis: "z" | "time") {
+  return mode === axis || mode === "zTime";
+}
+
 export type DimensionAxis = "position" | "z" | "time" | "channel";
 
 export function dimensionAxis(
@@ -40,6 +47,18 @@ export function dimensionAxis(
   channel: number,
 ) {
   const dimensions = image?.dimensions;
+  if (
+    (axis === "z" || axis === "time") &&
+    projectsAxis(image?.projection ?? "none", axis)
+  ) {
+    const count = (axis === "z" ? dimensions?.z : dimensions?.time) ?? 1;
+    return {
+      index: 0,
+      count,
+      name: `Maximum intensity across ${count} ${axis === "z" ? "Z planes" : "time points"}`,
+      projected: true,
+    };
+  }
   switch (axis) {
     case "position":
       return {
@@ -78,6 +97,8 @@ export type NavigationHint = {
 /** Serialize native plane changes, keeping only the latest requested coordinates. */
 export class PlaneNavigation {
   selection: PlaneSelection | null = null;
+  projection: ProjectionMode = "none";
+  private confirmedProjection: ProjectionMode = "none";
   private confirmed: PlaneSelection | null = null;
   private pending = false;
   private generation = 0;
@@ -88,6 +109,7 @@ export class PlaneNavigation {
     z: number,
     time: number,
     hint?: NavigationHint,
+    projection?: ProjectionMode,
   ) => Promise<boolean>;
   private changed: () => void;
 
@@ -96,19 +118,43 @@ export class PlaneNavigation {
     this.changed = changed;
   }
 
-  setPlane(plane: PlaneSelection | null, preserve = false) {
+  setPlane(
+    plane: PlaneSelection | null,
+    preserve = false,
+    projection: ProjectionMode = "none",
+  ) {
     this.confirmed = plane;
+    this.confirmedProjection = projection;
     if (!preserve) {
       this.generation++;
       this.pending = false;
     }
-    if (!this.pending) this.selection = plane;
+    if (!this.pending) {
+      this.selection = plane;
+      this.projection = projection;
+    }
   }
 
   select(axis: keyof PlaneSelection, value: number) {
-    if (!this.selection) return;
+    if (
+      !this.selection ||
+      ((axis === "z" || axis === "time") && projectsAxis(this.projection, axis))
+    )
+      return;
     this.hint = { axis, direction: value < this.selection[axis] ? -1 : 1 };
     this.selection = { ...this.selection, [axis]: value };
+    this.changed();
+    void this.flush();
+  }
+
+  setProjection(projection: ProjectionMode) {
+    if (!this.selection || projection === this.projection) return;
+    this.projection = projection;
+    this.selection = {
+      ...this.selection,
+      z: projectsAxis(projection, "z") ? 0 : this.selection.z,
+      time: projectsAxis(projection, "time") ? 0 : this.selection.time,
+    };
     this.changed();
     void this.flush();
   }
@@ -121,21 +167,29 @@ export class PlaneNavigation {
       this.selection &&
       (this.selection.position !== this.confirmed?.position ||
         this.selection.z !== this.confirmed?.z ||
-        this.selection.time !== this.confirmed?.time)
+        this.selection.time !== this.confirmed?.time ||
+        this.projection !== this.confirmedProjection)
     ) {
       const selected = this.selection;
-      const applied = await this.apply(
+      const projection = this.projection;
+      const args = [
         selected.position,
         selected.z,
         selected.time,
         this.hint,
-      );
+      ] as const;
+      const applied = await (projection !== "none" ||
+      projection !== this.confirmedProjection
+        ? this.apply(...args, projection)
+        : this.apply(...args));
       if (generation !== this.generation) return;
       if (!applied) {
         this.selection = this.confirmed;
+        this.projection = this.confirmedProjection;
         break;
       }
       this.confirmed = selected;
+      this.confirmedProjection = projection;
     }
     this.pending = false;
     this.changed();
@@ -219,6 +273,7 @@ export class ImageLoader {
       z: number,
       time: number,
       hint?: NavigationHint,
+      projection?: ProjectionMode,
     ) => Promise<ImageState>;
     state: () => Promise<ImageState | null>;
     cancel: () => Promise<void>;
@@ -277,14 +332,24 @@ export class ImageLoader {
     z: number,
     time: number,
     hint?: NavigationHint,
+    projection?: ProjectionMode,
   ) {
     const previous = this.state;
     if (!previous?.dimensions || !this.commands.selectPlane) return false;
     return this.request(
       () =>
-        hint
-          ? this.commands.selectPlane!(previous.id, position, z, time, hint)
-          : this.commands.selectPlane!(previous.id, position, z, time),
+        projection !== undefined
+          ? this.commands.selectPlane!(
+              previous.id,
+              position,
+              z,
+              time,
+              hint,
+              projection,
+            )
+          : hint
+            ? this.commands.selectPlane!(previous.id, position, z, time, hint)
+            : this.commands.selectPlane!(previous.id, position, z, time),
       previous,
     );
   }

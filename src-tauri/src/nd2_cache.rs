@@ -1,7 +1,7 @@
 //! Original ND2 frames retained under the shared process memory budget.
 
 use crate::memory::{Budget, Reservation};
-use crate::nd2::{self, ExtractedNd2, RawFrame, Selection};
+use crate::nd2::{self, ExtractedNd2, Projection, RawFrame, Selection};
 use crate::nd2_metadata;
 use openreadout_core::source::{ByteSource, Input, LocalFile};
 use openreadout_core::{ChannelInfo, FormatReader, ImageInfo};
@@ -9,7 +9,7 @@ use std::collections::VecDeque;
 use std::fs::File;
 use std::io::{BufReader, Read, Seek, SeekFrom};
 use std::path::{Path, PathBuf};
-use std::sync::Arc;
+use std::sync::{atomic::AtomicBool, Arc};
 
 const MIB: u64 = 1024 * 1024;
 const FRAME_OVERHEAD: u64 = 64 * 1024;
@@ -247,6 +247,17 @@ impl Cache {
         selection: Selection,
         background: bool,
     ) -> Result<ExtractedNd2, String> {
+        self.extract_display_cancellable(output, selection, background, None)
+    }
+
+    fn extract_display_cancellable(
+        &mut self,
+        output: &Path,
+        selection: Selection,
+        background: bool,
+        cancel: Option<&AtomicBool>,
+    ) -> Result<ExtractedNd2, String> {
+        nd2::check_cancel(cancel)?;
         self.trim()?;
         let frame = if let Some(index) = self.frames.iter().position(|(key, _)| *key == selection) {
             self.frames.remove(index).unwrap().1
@@ -260,10 +271,10 @@ impl Cache {
             0
         };
         let result = match self.reserve(display_bytes + FRAME_OVERHEAD + metadata_bytes(&frame.raw.metadata), background)? {
-            Some(_display) => nd2::write_frame(&frame.raw, output, true),
+            Some(_display) => nd2::write_frame_cancellable(&frame.raw, output, true, cancel),
             None => Err("ND2 display conversion does not fit the application memory budget. Increase the limit in Settings.".into()),
         };
-        if let Err(error) = self.check_source() {
+        if let Err(error) = self.check_source().and_then(|_| nd2::check_cancel(cancel)) {
             if result.is_ok() {
                 let _ = std::fs::remove_file(output);
             }
@@ -272,6 +283,156 @@ impl Cache {
         self.frames.push_back((selection, frame));
         result
     }
+
+    pub fn extract_projection(
+        &mut self,
+        output: &Path,
+        selection: Selection,
+        projection: Projection,
+        cancel: &AtomicBool,
+        mut progress: impl FnMut(f64),
+    ) -> Result<ExtractedNd2, String> {
+        nd2::check_cancel(Some(cancel))?;
+        progress(0.0);
+        if projection == Projection::None {
+            let result =
+                self.extract_display_cancellable(output, selection, false, Some(cancel))?;
+            progress(0.6);
+            if let Err(error) = self
+                .check_source()
+                .and_then(|_| nd2::check_cancel(Some(cancel)))
+            {
+                let _ = std::fs::remove_file(output);
+                return Err(error);
+            }
+            return Ok(result);
+        }
+        self.trim()?;
+        self.describe(selection)?;
+        let selection = projection.canonical(selection);
+        let metadata = self.describe(selection)?;
+        let image = &self.images[selection.position as usize];
+        let width = image.size_x;
+        let height = image.size_y;
+        let bands = metadata.channels.len() as u32;
+        let bytes = image.pixel_type.bytes_per_sample();
+        let rgb = image.samples_per_pixel == 3;
+        let z_count = if projection.projects_z() {
+            image.size_z
+        } else {
+            1
+        };
+        let time_count = if projection.projects_time() {
+            image.size_t
+        } else {
+            1
+        };
+        let total = u64::from(z_count) * u64::from(time_count);
+        let frame_bytes = u64::from(width) * u64::from(height) * u64::from(bands) * bytes as u64;
+        let _accumulator = self.reserve(frame_bytes + FRAME_OVERHEAD + metadata_bytes(&metadata), false)?
+            .ok_or("ND2 projection accumulator does not fit the application memory budget. Increase the limit in Settings.")?;
+        nd2::check_cancel(Some(cancel))?;
+        let mut accumulator = RawFrame {
+            width,
+            height,
+            bands,
+            bytes,
+            rgb,
+            pixels: vec![0; frame_bytes as usize],
+            metadata,
+        };
+        let mut completed = 0u64;
+        for time in 0..time_count {
+            for z in 0..z_count {
+                nd2::check_cancel(Some(cancel))?;
+                self.trim()?;
+                let selected = Selection {
+                    z: if projection.projects_z() {
+                        z
+                    } else {
+                        selection.z
+                    },
+                    time: if projection.projects_time() {
+                        time
+                    } else {
+                        selection.time
+                    },
+                    ..selection
+                };
+                let index = self.frames.iter().position(|(key, _)| *key == selected);
+                let frame = if let Some(index) = index {
+                    self.frames.remove(index).unwrap().1
+                } else {
+                    self.load(selected, false, true)?.ok_or("ND2 projection frame decoding does not fit the application memory budget. Increase the limit in Settings.")?
+                };
+                // Read cached pixels in place. Newly decoded frames are temporary:
+                // retaining a whole projection's inputs would churn the useful LRU.
+                let reduced =
+                    max_samples(&mut accumulator.pixels, &frame.raw.pixels, bytes, cancel);
+                if index.is_some() {
+                    self.frames.push_back((selected, frame));
+                } else {
+                    drop(frame);
+                }
+                reduced?;
+                self.check_source()?;
+                nd2::check_cancel(Some(cancel))?;
+                completed += 1;
+                progress(0.6 * completed as f64 / total as f64);
+            }
+        }
+        self.check_source()?;
+        nd2::check_cancel(Some(cancel))?;
+        let display_bytes = if bytes == 2 { frame_bytes / 2 } else { 0 };
+        let _display = self.reserve(display_bytes + FRAME_OVERHEAD + metadata_bytes(&accumulator.metadata), false)?
+            .ok_or("ND2 projection display conversion does not fit the application memory budget. Increase the limit in Settings.")?;
+        let result = nd2::write_frame_cancellable(&accumulator, output, true, Some(cancel));
+        if let Err(error) = self
+            .check_source()
+            .and_then(|_| nd2::check_cancel(Some(cancel)))
+        {
+            if result.is_ok() {
+                let _ = std::fs::remove_file(output);
+            }
+            return Err(error);
+        }
+        result
+    }
+}
+
+fn max_samples(
+    output: &mut [u8],
+    input: &[u8],
+    bytes: usize,
+    cancel: &AtomicBool,
+) -> Result<(), String> {
+    if output.len() != input.len() || !matches!(bytes, 1 | 2) || !input.len().is_multiple_of(bytes)
+    {
+        return Err("ND2 projection frames have incompatible sample layouts.".into());
+    }
+    for (output, input) in output
+        .chunks_mut(65536 * bytes)
+        .zip(input.chunks(65536 * bytes))
+    {
+        nd2::check_cancel(Some(cancel))?;
+        if bytes == 1 {
+            for (destination, source) in output.iter_mut().zip(input) {
+                *destination = (*destination).max(*source);
+            }
+        } else {
+            for (destination, source) in output
+                .as_chunks_mut::<2>()
+                .0
+                .iter_mut()
+                .zip(input.as_chunks::<2>().0)
+            {
+                *destination = u16::from_le_bytes(*destination)
+                    .max(u16::from_le_bytes(*source))
+                    .to_le_bytes();
+            }
+        }
+    }
+    nd2::check_cancel(Some(cancel))
 }
 
 fn metadata_bytes(metadata: &ExtractedNd2) -> u64 {
@@ -720,9 +881,10 @@ impl Bounds {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::nd2::tests::{strip, synthetic, temporary};
+    use crate::nd2::tests::{strip, synthetic, synthetic_samples, temporary};
     use flate2::{write::ZlibEncoder, Compression};
     use std::io::Write;
+    use std::sync::atomic::Ordering;
 
     #[test]
     fn raw_frames_survive_display_conversion_and_foreground_evicts_for_admission() {
@@ -775,6 +937,307 @@ mod tests {
         assert_eq!(std::fs::read(&source).unwrap(), bytes);
         drop(other);
         cache.clear();
+        assert_eq!(cache.cached_count(), 0);
+        drop(cache);
+        assert_eq!(budget.status().unwrap().used_bytes, 0);
+        drop(budget);
+        std::fs::remove_dir_all(temp).unwrap();
+    }
+
+    fn projection_source() -> Vec<u8> {
+        synthetic_samples(
+            16,
+            false,
+            &[
+                &[256, 10, 50000, 20],
+                &[60000, 30, 300, 15],
+                &[1, 1, 2, 2],
+                &[3, 3, 4, 4],
+                &[1000, 100, 65000, 200],
+                &[62000, 150, 64000, 180],
+                &[500, 50, 600, 60],
+                &[700, 70, 800, 80],
+            ],
+        )
+    }
+
+    #[test]
+    fn projections_max_original_unsigned_samples_before_normalizing_and_keep_cached_frames() {
+        let temp = temporary();
+        let source = temp.join("projections.nd2");
+        let bytes = projection_source();
+        std::fs::write(&source, &bytes).unwrap();
+        let budget = Budget::new(temp.join("budget")).unwrap();
+        let mut cache = Cache::new(source.clone(), Arc::clone(&budget)).unwrap();
+        cache
+            .extract_display(&temp.join("first.tif"), Selection::default())
+            .unwrap();
+        let raw_pointer = cache.frames[0].1.raw.pixels.as_ptr();
+        let cancel = AtomicBool::new(false);
+        for (index, (projection, selection, ranges, pixels, count)) in [
+            (
+                Projection::Z,
+                Selection {
+                    z: 1,
+                    ..Selection::default()
+                },
+                [[50000, 60000], [20, 30]],
+                [255, 255, 0, 0],
+                2,
+            ),
+            (
+                Projection::Time,
+                Selection::default(),
+                [[1000, 65000], [100, 200]],
+                [0, 0, 255, 255],
+                2,
+            ),
+            (
+                Projection::ZTime,
+                Selection {
+                    z: 1,
+                    time: 1,
+                    ..Selection::default()
+                },
+                [[62000, 65000], [150, 200]],
+                [0, 0, 255, 255],
+                4,
+            ),
+            (
+                Projection::ZTime,
+                Selection {
+                    position: 1,
+                    ..Selection::default()
+                },
+                [[700, 800], [70, 80]],
+                [0, 0, 255, 255],
+                4,
+            ),
+        ]
+        .into_iter()
+        .enumerate()
+        {
+            let output = temp.join(format!("projection-{index}.tif"));
+            let mut progress = Vec::new();
+            let result = cache
+                .extract_projection(&output, selection, projection, &cancel, |value| {
+                    progress.push(value)
+                })
+                .unwrap();
+            assert_eq!(result.display_ranges, ranges);
+            assert_eq!(strip(&output), pixels);
+            assert_eq!(result.channels.len(), 2);
+            assert_eq!((result.dimensions.z, result.dimensions.time), (2, 2));
+            let canonical = projection.canonical(selection);
+            assert_eq!(
+                (
+                    result.dimensions.position,
+                    result.dimensions.z_index,
+                    result.dimensions.time_index
+                ),
+                (canonical.position, canonical.z, canonical.time)
+            );
+            assert_eq!(progress.len(), count + 1);
+            assert_eq!(progress.first(), Some(&0.0));
+            assert_eq!(progress.last(), Some(&0.6));
+            assert!(progress.windows(2).all(|v| v[0] <= v[1]));
+            assert_eq!(cache.cached_count(), 1);
+            assert_eq!(cache.frames[0].1.raw.pixels.as_ptr(), raw_pointer);
+        }
+        // Per-frame normalization produces [0,0,255,255] and [255,255,0,0].
+        // Their maximum would be white everywhere; original-intensity Z max is not.
+        assert_eq!(std::fs::read(&source).unwrap(), bytes);
+        drop(cache);
+        assert_eq!(budget.status().unwrap().used_bytes, 0);
+        drop(budget);
+        std::fs::remove_dir_all(temp).unwrap();
+    }
+
+    #[test]
+    fn projection_preserves_rgb_sample_order_and_shared_display_range() {
+        let temp = temporary();
+        let cancel = AtomicBool::new(false);
+        for bits in [8, 16] {
+            let source = temp.join(format!("rgb-{bits}.nd2"));
+            let first: &[u16] = &[10, 100, 20, 30, 40, 50];
+            let next: &[u16] = &[60, 20, 40, 20, 70, 10];
+            std::fs::write(
+                &source,
+                synthetic_samples(
+                    bits,
+                    true,
+                    &[first, next, first, next, first, next, first, next],
+                ),
+            )
+            .unwrap();
+            let budget = Budget::new(temp.join(format!("budget-{bits}"))).unwrap();
+            let mut cache = Cache::new(source, Arc::clone(&budget)).unwrap();
+            let output = temp.join(format!("rgb-{bits}.tif"));
+            let result = cache
+                .extract_projection(
+                    &output,
+                    Selection::default(),
+                    Projection::Z,
+                    &cancel,
+                    |_| {},
+                )
+                .unwrap();
+            if bits == 8 {
+                assert_eq!(strip(&output), [40, 100, 60, 50, 70, 30]);
+                assert!(result.display_ranges.is_empty());
+            } else {
+                assert_eq!(strip(&output), [36, 255, 109, 73, 146, 0]);
+                assert_eq!(result.display_ranges, [[30, 100]; 3]);
+            }
+            assert_eq!(
+                result
+                    .channels
+                    .iter()
+                    .map(|c| c.name.as_str())
+                    .collect::<Vec<_>>(),
+                ["Red", "Green", "Blue"]
+            );
+        }
+        std::fs::remove_dir_all(temp).unwrap();
+    }
+
+    #[test]
+    fn projection_admission_evicts_optional_frames_without_retaining_streamed_inputs() {
+        let temp = temporary();
+        let source = temp.join("bounded.nd2");
+        std::fs::write(&source, projection_source()).unwrap();
+        let budget = Budget::new(temp.join("budget")).unwrap();
+        budget.set_limit(crate::memory::MIN_LIMIT_BYTES).unwrap();
+        let mut cache = Cache::new(source, Arc::clone(&budget)).unwrap();
+        cache
+            .extract_display(&temp.join("first.tif"), Selection::default())
+            .unwrap();
+        let peak = cache
+            .geometry(Selection::default())
+            .unwrap()
+            .decode_peak_bytes;
+        let accumulator = 8 + FRAME_OVERHEAD;
+        let available = budget.status().unwrap().available_bytes;
+        let other = budget
+            .try_reserve(available - peak - accumulator + 1, false)
+            .unwrap()
+            .unwrap();
+        let output = temp.join("bounded.tif");
+        let result = cache
+            .extract_projection(
+                &output,
+                Selection::default(),
+                Projection::ZTime,
+                &AtomicBool::new(false),
+                |_| {},
+            )
+            .unwrap();
+        assert_eq!(result.display_ranges, [[62000, 65000], [150, 200]]);
+        assert_eq!(strip(&output), [0, 0, 255, 255]);
+        assert_eq!(cache.cached_count(), 0);
+        let status = budget.status().unwrap();
+        assert!(status.used_bytes <= status.limit_bytes);
+        drop(other);
+        drop(cache);
+        assert_eq!(budget.status().unwrap().used_bytes, 0);
+        drop(budget);
+        std::fs::remove_dir_all(temp).unwrap();
+    }
+
+    #[test]
+    fn cancelling_projection_releases_accumulator_and_preserves_usable_raw_cache() {
+        let temp = temporary();
+        let source = temp.join("cancel.nd2");
+        std::fs::write(&source, projection_source()).unwrap();
+        let budget = Budget::new(temp.join("budget")).unwrap();
+        let mut cache = Cache::new(source, Arc::clone(&budget)).unwrap();
+        cache
+            .extract_display(&temp.join("first.tif"), Selection::default())
+            .unwrap();
+        let before = budget.status().unwrap().used_bytes;
+        let cancel = AtomicBool::new(false);
+        let output = temp.join("cancelled.tif");
+        let error = cache
+            .extract_projection(
+                &output,
+                Selection::default(),
+                Projection::ZTime,
+                &cancel,
+                |value| {
+                    if value > 0.0 {
+                        cancel.store(true, Ordering::Relaxed);
+                    }
+                },
+            )
+            .unwrap_err();
+        assert!(error.contains("cancelled"));
+        assert!(!output.exists());
+        assert_eq!(budget.status().unwrap().used_bytes, before);
+        assert!(cache.contains(Selection::default()));
+        cancel.store(false, Ordering::Relaxed);
+        cache
+            .extract_projection(
+                &output,
+                Selection::default(),
+                Projection::Z,
+                &cancel,
+                |_| {},
+            )
+            .unwrap();
+        assert_eq!(strip(&output), [255, 255, 0, 0]);
+        let ordinary = temp.join("ordinary-cancelled.tif");
+        assert!(cache
+            .extract_projection(
+                &ordinary,
+                Selection::default(),
+                Projection::None,
+                &cancel,
+                |value| {
+                    if value == 0.6 {
+                        cancel.store(true, Ordering::Relaxed);
+                    }
+                }
+            )
+            .is_err());
+        assert!(!ordinary.exists());
+        let mut samples = vec![0; 65537 * 2];
+        assert!(max_samples(&mut samples, &vec![255; 65537 * 2], 2, &cancel).is_err());
+        assert!(samples.iter().all(|v| *v == 0));
+        drop(cache);
+        assert_eq!(budget.status().unwrap().used_bytes, 0);
+        drop(budget);
+        std::fs::remove_dir_all(temp).unwrap();
+    }
+
+    #[cfg(not(windows))]
+    #[test]
+    fn changing_source_during_projection_clears_raw_cache_and_aborts_output() {
+        let temp = temporary();
+        let source = temp.join("changing.nd2");
+        std::fs::write(&source, projection_source()).unwrap();
+        let budget = Budget::new(temp.join("budget")).unwrap();
+        let mut cache = Cache::new(source.clone(), Arc::clone(&budget)).unwrap();
+        cache
+            .extract_display(&temp.join("first.tif"), Selection::default())
+            .unwrap();
+        let replacement = temp.join("replacement.nd2");
+        std::fs::write(&replacement, synthetic(8, false)).unwrap();
+        let output = temp.join("changed.tif");
+        let mut replaced = false;
+        let result = cache.extract_projection(
+            &output,
+            Selection::default(),
+            Projection::ZTime,
+            &AtomicBool::new(false),
+            |value| {
+                if value > 0.0 && !replaced {
+                    std::fs::rename(&replacement, &source).unwrap();
+                    replaced = true;
+                }
+            },
+        );
+        assert!(result.unwrap_err().contains("source changed"));
+        assert!(!output.exists());
         assert_eq!(cache.cached_count(), 0);
         drop(cache);
         assert_eq!(budget.status().unwrap().used_bytes, 0);

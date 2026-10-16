@@ -129,7 +129,7 @@ const windowHandle = native ? getCurrentWindow() : null;
 let colorRenderer: ReturnType<typeof bindColorRenderer> | undefined;
 const colorPanel = bindColorPanel(() => colorRenderer?.refresh());
 const dimensionNavigation = bindDimensionNavigation(
-  async (position, z, time, hint) => {
+  async (position, z, time, hint, projection) => {
     if (
       !native ||
       saving ||
@@ -138,7 +138,7 @@ const dimensionNavigation = bindDimensionNavigation(
     )
       return false;
     setLoading(true);
-    return loader.selectPlane(position, z, time, hint);
+    return loader.selectPlane(position, z, time, hint, projection);
   },
   () => colorRenderer?.refresh(),
 );
@@ -739,7 +739,7 @@ function addPyramid(state: ImageState) {
 const loader = new ImageLoader(
   {
     open: (path) => invoke<ImageState>("open_image", { path }),
-    selectPlane: (id, position, z, time, hint) =>
+    selectPlane: (id, position, z, time, hint, projection) =>
       invoke<ImageState>("select_plane", {
         id,
         position,
@@ -747,6 +747,7 @@ const loader = new ImageLoader(
         time,
         navigationAxis: hint?.axis,
         navigationDirection: hint?.direction,
+        projection,
       }),
     state: () => invoke<ImageState | null>("image_state"),
     cancel: () => invoke("cancel_load"),

@@ -81,7 +81,15 @@ pub struct ImageState {
     pub dimensions: Option<crate::nd2::Dimensions>,
     pub calibration: Option<crate::nd2::Calibration>,
     pub display_ranges: Vec<[u16; 2]>,
+    pub projection: crate::nd2::Projection,
 }
+
+type FrameSelection = (
+    crate::nd2::Selection,
+    crate::nd2::Dimensions,
+    Vec<Channel>,
+    crate::nd2::Projection,
+);
 
 type Notifier = Arc<dyn Fn(&ImageState) + Send + Sync>;
 
@@ -93,6 +101,7 @@ pub struct Job {
     pub input: PathBuf,
     pub source: PathBuf,
     nd2: Option<crate::nd2::Selection>,
+    pub(crate) projection: crate::nd2::Projection,
     pub(crate) acquisition: Option<Arc<crate::preload::Acquisition>>,
     pub(crate) preview_only: bool,
     pub(crate) background: bool,
@@ -244,10 +253,20 @@ impl Backend {
     }
 
     /// Select a frame without changing the pinned source or the folder selection.
+    #[cfg(test)]
     pub fn select_plane(
         &self,
         id: &str,
         selection: crate::nd2::Selection,
+    ) -> Result<ImageState, String> {
+        self.select_view(id, selection, None)
+    }
+
+    pub fn select_view(
+        &self,
+        id: &str,
+        selection: crate::nd2::Selection,
+        projection: Option<crate::nd2::Projection>,
     ) -> Result<ImageState, String> {
         let _opening = self.open_lock.lock().unwrap();
         let job = self
@@ -270,6 +289,8 @@ impl Backend {
         {
             return Err("The selected ND2 position, Z or time is out of range.".into());
         }
+        let projection = projection.unwrap_or(job.projection);
+        let selection = projection.canonical(selection);
         // Seed navigation immediately; the worker independently validates the file metadata.
         let mut dimensions = dimensions.clone();
         dimensions.position = selection.position;
@@ -278,7 +299,7 @@ impl Backend {
         self.open_source(
             Path::new(&state.path),
             job.source.clone(),
-            Some((selection, dimensions, state.channels)),
+            Some((selection, dimensions, state.channels, projection)),
         )
     }
 
@@ -286,7 +307,7 @@ impl Backend {
         &self,
         path: &Path,
         source: PathBuf,
-        frame: Option<(crate::nd2::Selection, crate::nd2::Dimensions, Vec<Channel>)>,
+        frame: Option<FrameSelection>,
     ) -> Result<ImageState, String> {
         if self.closing.load(Ordering::Relaxed) {
             return Err("Viewer shutting down.".into());
@@ -465,7 +486,7 @@ impl LoadContext {
         self.create_job(
             path,
             source,
-            Some(frame),
+            Some((frame.0, frame.1, frame.2, crate::nd2::Projection::None)),
             Some(acquisition),
             if preview_only {
                 LoadMode::Preview
@@ -480,7 +501,7 @@ impl LoadContext {
         &self,
         path: &Path,
         source: PathBuf,
-        frame: Option<(crate::nd2::Selection, crate::nd2::Dimensions, Vec<Channel>)>,
+        frame: Option<FrameSelection>,
         acquisition: Option<Arc<crate::preload::Acquisition>>,
         mode: LoadMode,
         notifier: Option<Notifier>,
@@ -504,6 +525,7 @@ impl LoadContext {
                 "Supported formats: JPEG, PNG, BMP, WebP, TIFF, BigTIFF and Nikon ND2.".into(),
             );
         }
+        let projection = frame.as_ref().map(|frame| frame.3).unwrap_or_default();
         let nd2 =
             (extension == "nd2").then(|| frame.as_ref().map(|frame| frame.0).unwrap_or_default());
         // BMP opens eagerly in the worker, including for vipsheader. Read only
@@ -559,6 +581,10 @@ impl LoadContext {
         if let Some(selection) = &nd2 {
             "nd2-openreadout-0.3.0-v2-normalized".hash(&mut hasher);
             (selection.position, selection.z, selection.time).hash(&mut hasher);
+            if projection != crate::nd2::Projection::None {
+                "max-original-v1".hash(&mut hasher);
+                projection.hash(&mut hasher);
+            }
         }
         let cache_key = format!("{:016x}", hasher.finish());
         let dir = self.root.join(format!("work-{id}"));
@@ -573,7 +599,7 @@ impl LoadContext {
             alias
         };
         let (dimensions, initial_channels) = frame
-            .map(|(_, dimensions, channels)| (Some(dimensions), channels))
+            .map(|(_, dimensions, channels, _)| (Some(dimensions), channels))
             .unwrap_or_default();
         let initial = ImageState {
             id,
@@ -603,6 +629,7 @@ impl LoadContext {
             dimensions,
             calibration: None,
             display_ranges: Vec::new(),
+            projection,
         };
         let job = Arc::new(Job {
             state: Mutex::new(initial.clone()),
@@ -612,6 +639,7 @@ impl LoadContext {
             input,
             source,
             nd2,
+            projection,
             acquisition,
             preview_only: matches!(mode, LoadMode::Preview),
             background: !matches!(mode, LoadMode::Foreground),
@@ -816,6 +844,8 @@ struct CacheManifest {
     calibration: Option<crate::nd2::Calibration>,
     #[serde(default)]
     display_ranges: Vec<[u16; 2]>,
+    #[serde(default)]
+    projection: crate::nd2::Projection,
 }
 
 // AppImage readers live under a different mount path after each launch. The
@@ -937,6 +967,7 @@ fn write_manifest(job: &Job, dir: &Path) -> Result<(), String> {
         dimensions: state.dimensions,
         calibration: state.calibration,
         display_ranges: state.display_ranges,
+        projection: state.projection,
     };
     let bytes = serde_json::to_vec(&manifest).map_err(|error| error.to_string())?;
     fs::write(dir.join("manifest.json"), bytes).map_err(|error| error.to_string())
@@ -955,6 +986,7 @@ fn cached_manifest(job: &Job, dir: &Path) -> Option<CacheManifest> {
     if manifest.version != 1
         || manifest.source_key != job.cache_key
         || manifest.tools != tool_identity()
+        || manifest.projection != job.projection
         || !(1..=i32::MAX as u32).contains(&manifest.width)
         || !(1..=i32::MAX as u32).contains(&manifest.height)
         || !(1..=8).contains(&manifest.orientation)
@@ -1105,6 +1137,7 @@ pub(crate) fn load(job: &Arc<Job>) -> Result<(), String> {
             state.dimensions = manifest.dimensions;
             state.calibration = manifest.calibration;
             state.display_ranges = manifest.display_ranges;
+            state.projection = manifest.projection;
             state.preview_ready = true;
             state.tiles_ready = fully_ready;
             state.phase = if fully_ready || job.preview_only {
@@ -1123,8 +1156,17 @@ pub(crate) fn load(job: &Arc<Job>) -> Result<(), String> {
     }
     let nd2_channels = if let Some(selection) = job.nd2 {
         let acquisition = job.acquisition.as_ref().ok_or("Missing ND2 acquisition")?;
-        let extracted =
-            acquisition.extract_display(&job.input, selection, job.background, &job.cancel)?;
+        let extracted = if job.projection == crate::nd2::Projection::None {
+            acquisition.extract_display(&job.input, selection, job.background, &job.cancel)?
+        } else {
+            acquisition.extract_projection(
+                &job.input,
+                selection,
+                job.projection,
+                &job.cancel,
+                |fraction| job.report_progress(fraction),
+            )?
+        };
         let geometry = acquisition.geometry(selection)?;
         job.update(|state| {
             state.width = geometry.width;
@@ -1491,6 +1533,11 @@ fn extract_plane(
 }
 
 fn load_channels(job: &Arc<Job>, width: u32, height: u32, ushort: bool) -> Result<(), String> {
+    let (preview_start, preview_end) = if job.projection == crate::nd2::Projection::None {
+        (0.0, 0.2)
+    } else {
+        (0.6, 0.7)
+    };
     let planes = job.planes.lock().unwrap().clone();
     let native = !job.native.lock().unwrap().is_empty();
     let complete = job.root.join(&job.cache_key);
@@ -1543,7 +1590,7 @@ fn load_channels(job: &Arc<Job>, width: u32, height: u32, ushort: bool) -> Resul
                         .ok_or("Image decoder path is not UTF-8")?
                         .into(),
                 },
-                Some((0.0, 0.2)),
+                Some((preview_start, preview_end)),
             )?;
         } else {
             for (index, plane) in planes.iter().enumerate() {
@@ -1586,7 +1633,7 @@ fn load_channels(job: &Arc<Job>, width: u32, height: u32, ushort: bool) -> Resul
     job.update(|state| {
         state.preview_ready = true;
         state.tiles_ready = false;
-        state.progress = Some(0.2);
+        state.progress = Some(preview_end);
         state.detail = format!(
             "{} channel previews available. {} Sharper tiles are loading…",
             planes.len(),
@@ -1600,8 +1647,8 @@ fn load_channels(job: &Arc<Job>, width: u32, height: u32, ushort: bool) -> Resul
     housekeeping(job)?;
     if !native && !job.preview_only {
         for (index, plane) in planes.iter().enumerate() {
-            let start = 0.2 + 0.79 * index as f64 / planes.len() as f64;
-            let end = 0.2 + 0.79 * (index + 1) as f64 / planes.len() as f64;
+            let start = preview_end + (0.99 - preview_end) * index as f64 / planes.len() as f64;
+            let end = preview_end + (0.99 - preview_end) * (index + 1) as f64 / planes.len() as f64;
             let source = input(job, &format!("[page={},n=1,access=sequential]", plane.page));
             let destination = dir.join("channels").join(index.to_string()).join("tiles");
             if uses_worker(job) {
@@ -2574,6 +2621,92 @@ mod tests {
         assert_eq!(backend.memory.status().unwrap().used_bytes, 0);
         backend.shutdown();
         drop((job, backend));
+        fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn nd2_projection_caches_are_canonical_and_separate_from_source_planes() {
+        use crate::nd2::{Projection, Selection};
+        let root = std::env::temp_dir().join(format!(
+            "aperture-projection-{}-{}",
+            std::process::id(),
+            NEXT_ID.fetch_add(1, Ordering::Relaxed)
+        ));
+        fs::create_dir_all(&root).unwrap();
+        let source = root.join("stack.nd2");
+        let bytes = crate::nd2::tests::synthetic(8, false);
+        fs::write(&source, &bytes).unwrap();
+        let backend = Backend::new(root.join("cache")).unwrap();
+        backend.open(&source).unwrap();
+        wait_ready(&backend);
+        let samples = |backend: &Backend| {
+            let job = backend.current.lock().unwrap().clone().unwrap();
+            read_asset(&job, Asset::ChannelPreview { channel: 0 }).unwrap()
+        };
+        let initial = samples(&backend);
+        for (mode, z, time) in [
+            (Projection::Z, 1, 0),
+            (Projection::Time, 0, 1),
+            (Projection::ZTime, 1, 1),
+        ] {
+            let id = backend.snapshot().unwrap().id;
+            backend
+                .select_view(
+                    &id,
+                    Selection {
+                        position: 0,
+                        z,
+                        time,
+                    },
+                    Some(Projection::None),
+                )
+                .unwrap();
+            wait_ready(&backend);
+            let expected = samples(&backend);
+            let id = backend.snapshot().unwrap().id;
+            backend
+                .select_view(&id, Selection::default(), Some(mode))
+                .unwrap();
+            let projected = wait_ready(&backend);
+            assert_eq!(projected.projection, mode);
+            assert_eq!(samples(&backend), expected);
+            let key = backend
+                .current
+                .lock()
+                .unwrap()
+                .as_ref()
+                .unwrap()
+                .cache_key
+                .clone();
+            backend
+                .select_view(
+                    &projected.id,
+                    Selection {
+                        position: 0,
+                        z,
+                        time,
+                    },
+                    None,
+                )
+                .unwrap();
+            let repeated = wait_ready(&backend);
+            assert_eq!(
+                backend.current.lock().unwrap().as_ref().unwrap().cache_key,
+                key
+            );
+            assert_eq!(repeated.dimensions.as_ref().unwrap().z_index, 0);
+            assert_eq!(repeated.dimensions.as_ref().unwrap().time_index, 0);
+            assert_eq!(samples(&backend), expected);
+        }
+        let id = backend.snapshot().unwrap().id;
+        backend
+            .select_view(&id, Selection::default(), Some(Projection::None))
+            .unwrap();
+        wait_ready(&backend);
+        assert_eq!(samples(&backend), initial);
+        assert_eq!(fs::read(&source).unwrap(), bytes);
+        backend.shutdown();
+        drop(backend);
         fs::remove_dir_all(root).unwrap();
     }
 

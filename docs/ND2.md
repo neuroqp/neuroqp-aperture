@@ -27,6 +27,22 @@ Z spacing and nominal time interval are retained in image state and display-cach
 metadata; the panel shows this calibration. The nominal interval is acquisition
 metadata, not a substitute for per-frame timestamps.
 
+## Max projections
+
+Enable Z max, Time max, or both in the Dimensions panel. The current position
+stays separate; unprojected dimensions and Channel remain available. A projected
+axis shows “Max of N” and disables its range. Clear the toggles to return to the
+first slice of each projected axis. Viewport and compatible Color settings survive.
+
+Maxima are calculated from original unsigned samples before display normalization.
+The reducer reserves a full-depth accumulator, reads one input frame at a time,
+borrows cached inputs, and drops uncached inputs after reducing them. Additional projection workspace
+does not grow with the number of Z/time frames. Cancellation is checked between
+frames and during reduction, normalization and writing; one dependency decode
+still finishes before yielding. Finished projections have separate canonical
+cache keys and reuse the disk cache. Automatic projection preloading is disabled.
+These are display projections, not scientific exports.
+
 ## Display and limits
 
 The loader decodes whole position/Z/time frames, including their channels,
@@ -107,6 +123,7 @@ cargo build --manifest-path src-tauri/Cargo.toml --locked --features custom-prot
 python3 scripts/native-nd2.py src-tauri/target/debug/aperture
 python3 scripts/native-nd2.py src-tauri/target/debug/aperture --renderer cpu
 python3 scripts/native-memory.py src-tauri/target/debug/aperture
+python3 scripts/native-projection.py src-tauri/target/debug/aperture
 ```
 
 Public acquisitions and generated evidence stay in ignored `test-data/nd2/` and
