@@ -90,14 +90,16 @@ jobs:
       - name: Record successful development validation
         run: python3 scripts/release/release-state.py build linux src-tauri/target/release/aperture build/development/linux/BUILDINFO-linux.json build/evidence/build-linux.json --source-sha "${{ inputs.source_sha }}"
       - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
+        if: always()
         with:
           name: development-linux
           path: |
+            src-tauri/target/release/aperture
             build/evidence/development-linux.tar.gz
             build/linux/dependencies.json
             build/evidence/build-linux.json
             dist/
-          if-no-files-found: error
+          if-no-files-found: ignore
           retention-days: 90
 
   windows:
@@ -178,14 +180,16 @@ jobs:
       - name: Record successful development validation
         run: python scripts/release/release-state.py build windows src-tauri/target/x86_64-pc-windows-msvc/release/aperture.exe build/windows/payload/BUILDINFO-windows.json build/evidence/build-windows.json --source-sha "${{ inputs.source_sha }}"
       - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
+        if: always()
         with:
           name: development-windows
           path: |
+            src-tauri/target/x86_64-pc-windows-msvc/release/aperture.exe
             build/evidence/development-windows.zip
             build/windows/dependencies.json
             build/evidence/build-windows.json
             dist/
-          if-no-files-found: error
+          if-no-files-found: ignore
           retention-days: 90
 
   seal:
