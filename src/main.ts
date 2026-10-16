@@ -21,7 +21,7 @@ import {
   type PointRoi,
   type AnnotationSettings,
 } from "./annotations";
-import appIcon from "../src-tauri/icons/icon.png";
+import neuroqpLogo from "./assets/neuroqp-logo.png";
 import { icon, type IconName } from "./icons";
 import { bindTools, toolPanels } from "./tools";
 import { bindTheme } from "./theme";
@@ -49,11 +49,14 @@ const tool = (id: string, name: IconName, label: string, panel = false) =>
 document.querySelector<HTMLDivElement>("#app")!.innerHTML = `
   <header class="image-bar">
     <div class="image-title" data-tauri-drag-region>
-      <img src="${appIcon}" width="20" height="20" alt="" draggable="false" data-tauri-drag-region>
+      <div class="app-brand" data-tauri-drag-region>
+        <img class="brand-logo" src="${neuroqpLogo}" width="98" height="24" alt="NeuroQP" draggable="false" data-tauri-drag-region>
+        <span data-tauri-drag-region>Aperture</span>
+      </div>
       <button id="previous-image-button" class="tool image-navigation" type="button" title="Previous image" aria-label="Previous image" disabled>${icon("previous")}</button>
       <div class="filename-progress" data-tauri-drag-region>
         <div id="progress" role="progressbar" aria-label="Image loading" aria-valuemin="0" aria-valuemax="100" hidden><span></span></div>
-        <span id="filename" data-tauri-drag-region>NeuroQP Aperture</span>
+        <span id="filename" data-tauri-drag-region></span>
         <span id="loading-percent" aria-hidden="true" data-tauri-drag-region hidden></span>
       </div>
       <button id="next-image-button" class="tool image-navigation" type="button" title="Next image" aria-label="Next image" disabled>${icon("next")}</button>

@@ -132,6 +132,18 @@ svg {
   min-width: 0;
   height: 100%;
 }
+.app-brand {
+  display: flex;
+  align-items: center;
+  flex-shrink: 0;
+  gap: 10px;
+  margin-right: 8px;
+  font-size: 13px;
+  font-weight: 600;
+}
+.brand-logo {
+  object-fit: contain;
+}
 .filename-progress {
   position: relative;
   display: flex;
@@ -315,6 +327,9 @@ svg {
   }
   .file-actions {
     padding-right: 5px;
+  }
+  .file-actions .file-button span {
+    display: none;
   }
   .window-button {
     width: 32px;
