@@ -7,21 +7,6 @@ import {
 } from "./update-policy";
 
 export const updatePanel = `
-  <dialog id="update-dialog" aria-labelledby="update-title">
-    <h2 id="update-title">Aperture updates</h2>
-    <p id="update-edition"></p>
-    <p id="update-status" role="status" aria-live="polite">Check for a new version.</p>
-    <pre id="update-notes" hidden></pre>
-    <progress id="update-download-progress" aria-label="Update download" hidden></progress>
-    <label class="update-preference"><input id="update-auto" type="checkbox"> Check automatically once a day</label>
-    <div class="save-actions">
-      <button id="update-check" class="file-button" type="button">Check now</button>
-      <button id="update-action" class="file-button save-primary" type="button" hidden>Download update</button>
-      <button id="update-later" class="file-button" type="button" hidden>Later</button>
-      <button id="update-releases" class="file-button" type="button">Releases</button>
-      <button id="update-close" class="file-button" type="button">Close</button>
-    </div>
-  </dialog>
   <dialog id="update-unsaved-dialog" aria-labelledby="update-unsaved-title">
     <form method="dialog">
       <h2 id="update-unsaved-title">Unsaved annotations</h2>
@@ -43,15 +28,18 @@ type UpdateInfo = { version: string; notes: string };
 export function bindUpdates(
   prepare: () => Promise<boolean>,
   finish: () => void,
+  settings: {
+    showGeneral(): void;
+    close(): void;
+    setBusy(busy: boolean): void;
+  },
 ) {
   const get = <T extends HTMLElement = HTMLElement>(id: string) =>
     document.getElementById(id)! as T;
-  const dialog = get<HTMLDialogElement>("update-dialog");
-  const button = get<HTMLButtonElement>("update-button");
+  const button = get<HTMLButtonElement>("settings-button");
   const check = get<HTMLButtonElement>("update-check");
   const action = get<HTMLButtonElement>("update-action");
   const later = get<HTMLButtonElement>("update-later");
-  const close = get<HTMLButtonElement>("update-close");
   const auto = get<HTMLInputElement>("update-auto");
   const status = get("update-status");
   const progress = get<HTMLProgressElement>("update-download-progress");
@@ -77,7 +65,7 @@ export function bindUpdates(
     check.disabled = value;
     action.disabled = value;
     later.disabled = value;
-    close.disabled = value;
+    settings.setBusy(value);
   };
   const refreshAction = () => {
     action.hidden = !update;
@@ -89,9 +77,7 @@ export function bindUpdates(
           ? "Install and restart"
           : "Download update";
   };
-  const show = () => {
-    if (!dialog.open) dialog.showModal();
-  };
+  const show = () => settings.showGeneral();
   const runCheck = async (manual: boolean) => {
     if (busy) return;
     setBusy(true);
@@ -111,8 +97,9 @@ export function bindUpdates(
         !!update && announceUpdate(update.version, preferences, manual),
       );
       button.title = update
-        ? `Aperture ${update.version} is available`
-        : "Aperture updates";
+        ? `Settings · Aperture ${update.version} is available`
+        : "Settings";
+      button.setAttribute("aria-label", button.title);
     } catch (error) {
       if (manual)
         status.textContent =
@@ -125,11 +112,6 @@ export function bindUpdates(
       refreshAction();
     }
   };
-  button.addEventListener("click", show);
-  close.addEventListener("click", () => dialog.close());
-  dialog.addEventListener("cancel", (event) => {
-    if (busy) event.preventDefault();
-  });
   check.addEventListener("click", () => void runCheck(true));
   auto.checked = preferences.enabled;
   auto.addEventListener("change", () => {
@@ -140,7 +122,7 @@ export function bindUpdates(
     preferences.deferredVersion = update?.version ?? "";
     persist();
     button.classList.remove("update-available");
-    dialog.close();
+    settings.close();
   });
   get("update-releases").addEventListener("click", () => {
     void invoke("update_release_page").catch(() => {
@@ -166,7 +148,7 @@ export function bindUpdates(
           status.textContent =
             "Update downloaded and signature verified. Install when you are ready to restart.";
         } else {
-          dialog.close();
+          settings.close();
           if (!(await prepare())) {
             show();
             return;

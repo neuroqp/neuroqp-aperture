@@ -190,6 +190,18 @@ operate the real file chooser and capture the application window. It uses the
 keyboard, clipboard, and window focus while running. Results and screenshots
 stay in ignored `test-data/`.
 
+For Settings and update-restart regression checks, start `tauri-driver` with
+isolated `XDG_CONFIG_HOME`, `XDG_CACHE_HOME` and `TMPDIR`, then run:
+
+```sh
+python3 scripts/native-settings.py src-tauri/target/debug/aperture
+python3 scripts/native-update-recovery.py src-tauri/target/debug/aperture
+```
+
+These checks use real native image loading, annotations and saving where relevant,
+with supplied file-chooser and updater responses. They never install an update.
+Results and screenshots stay in ignored `artifacts/` directories.
+
 ## ImageJ annotation validation
 
 Run the optional interoperability check against a local ImageJ installation:

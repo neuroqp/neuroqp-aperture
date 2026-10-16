@@ -99,6 +99,21 @@ Enable Save when annotations are available or deletions need saving, including
 after removing the final point. Confirm before discarding unsaved annotations
 on Open, folder navigation or Close. Cancellation or save failure must retain unsaved edits.
 
+## Settings
+
+- A single gear beside the image bar's window controls opens a full-window
+  settings view. Keep native window controls available in its title bar.
+- Start on General, with General and Appearance in a left sidebar and controls
+  on the right. Closing settings or pressing Escape returns focus to the gear
+  and preserves the loaded image, viewport, tool panels and unsaved annotations.
+  Image-editing and viewer shortcuts do not act behind settings.
+- General shows the running version and package edition, manual update checking,
+  automatic daily checking, release notes, download progress and deferral. Keep
+  the existing package-specific update and unsaved-work restart protections.
+  Mark the gear with a small dot when an update is available.
+- Appearance offers System, Light and Dark. Apply the selection immediately,
+  remember it across launches, and follow operating-system changes in System mode.
+
 ## Tool option panels
 
 - Panels open independently in a row anchored to the viewer's top-right.
@@ -193,8 +208,8 @@ on Open, folder navigation or Close. Cancellation or save failure must retain un
 - Use the approved T1/B2/C1/D1/S1/P2/M2 styling: recessed lavender toggles, tinted
   action buttons, solid purple checkboxes, raised dropdowns, fine round-handle
   sliders, and quiet compact panels. Use purple and orange accents in light and
-  dark modes. Follow system appearance initially; a header theme button switches
-  modes and remembers the choice.
+  dark modes. Follow system appearance initially; Settings > Appearance selects
+  System, Light or Dark and remembers the choice.
 
 ## ImageJ annotation interchange
 

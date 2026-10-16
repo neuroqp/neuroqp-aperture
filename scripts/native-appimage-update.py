@@ -164,7 +164,8 @@ def main():
         raise TimeoutError(code)
 
     def click(element):
-        js('document.getElementById(' + json.dumps(element) + ').click()')
+        # Prior releases still have the standalone update dialog.
+        js('const id=' + json.dumps(element) + ";const old={'settings-button':'update-button','settings-close':'update-close'};(document.getElementById(id)||document.getElementById(old[id])).click()")
 
     def check():
         click('update-check')
@@ -212,8 +213,8 @@ def main():
             time.sleep(.1)
         assert fixture['checks'] > 0, 'Automatic startup check did not reach the offline fixture'
         wait("return !document.getElementById('update-check').disabled")
-        assert js("return !document.getElementById('update-dialog').open && document.getElementById('viewer').dataset.phase==='ready'")
-        click('update-button')
+        assert js("return !(document.getElementById('settings-dialog') || document.getElementById('update-dialog')).open && document.getElementById('viewer').dataset.phase==='ready'")
+        click('settings-button')
         click('update-check')
         wait("return document.getElementById('update-status').textContent.includes('Could not check') && !document.getElementById('update-check').disabled")
 
@@ -234,7 +235,7 @@ def main():
         downloaded()
         click('update-action')
         choose('cancel')
-        wait("return document.getElementById('update-dialog').open && !document.getElementById('update-action').disabled")
+        wait("return (document.getElementById('settings-dialog') || document.getElementById('update-dialog')).open && !document.getElementById('update-action').disabled")
         assert digest(appimage) == prior_hash
         assert js("return document.getElementById('filename').classList.contains('unsaved')")
 
@@ -244,13 +245,13 @@ def main():
         failed()
         assert digest(appimage) == prior_hash, 'Failed replacement changed the installed AppImage'
         assert js("return document.getElementById('filename').classList.contains('unsaved')")
-        click('update-close')
+        click('settings-close')
         assert js("return !document.querySelector('.point-choice').disabled")
         click('open-button')
         wait('return window.__signedUpdateTest.confirmations===1')
         assert js("return document.getElementById('filename').classList.contains('unsaved')")
         run.chmod(0o755)
-        click('update-button')
+        click('settings-button')
         assert js("return document.getElementById('update-action').textContent==='Install and restart'")
         checks, downloads = fixture['checks'], fixture['downloads']
         fixture['mode'] = 'offline'

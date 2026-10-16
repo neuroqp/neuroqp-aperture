@@ -273,7 +273,10 @@ def main():
             resize(width, 400 if width == 640 else 800)
             for theme in ('light', 'dark'):
                 if js('return document.documentElement.dataset.theme;') != theme:
-                    click('theme-button')
+                    click('settings-button')
+                    click('settings-appearance-button')
+                    js("const s=document.getElementById('theme-select');s.value=arguments[0];s.dispatchEvent(new Event('change',{bubbles:true}));", [theme])
+                    click('settings-close')
                 positions = []
                 for name, _ in names[:2]:
                     open_ready(files / name)
