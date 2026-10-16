@@ -26,7 +26,7 @@ import { icon, type IconName } from "./icons";
 import { bindTools, toolPanels } from "./tools";
 import { bindTheme } from "./theme";
 import { bindUpdates, updatePanel } from "./updates";
-import { applyDisplay, loadHistogram } from "./display";
+import { loadChannelHistograms } from "./display";
 import { channelHistograms } from "./display-settings";
 import { bindColorPanel } from "./color-panel";
 import { bindColorRenderer } from "./color-renderer";
@@ -72,7 +72,6 @@ document.querySelector<HTMLDivElement>("#app")!.innerHTML = `
   </header>
   <nav class="quick-bar" aria-label="Image tools">
     <div class="tool-group" role="group" aria-label="Image adjustments and annotation tools">
-      ${tool("brightness-button", "brightness", "Display range", true)}
       ${tool("color-button", "color", "Color", true)}
       ${tool("points-button", "points", "Multi-point", true)}
     </div>
@@ -109,7 +108,7 @@ document.querySelector<HTMLDivElement>("#app")!.innerHTML = `
 
 const $ = <T extends HTMLElement = HTMLElement>(id: string) =>
   document.getElementById(id)! as T;
-const tools = bindTools(applyDisplay, updatePointTool, {
+const tools = bindTools(updatePointTool, {
   visibility: (open) => {
     if (open) colorPanel.redraw();
     else colorPanel.closeTransient();
@@ -463,7 +462,6 @@ function resetViewer() {
   colorImageId = null;
   colorPanel.setChannels([]);
   colorPanel.setEnabled(false);
-  tools.resetImage();
   document
     .querySelectorAll<HTMLButtonElement>("[data-image-control]")
     .forEach((button) => (button.disabled = true));
@@ -564,21 +562,19 @@ function showImage(state: ImageState) {
 
   if (state.previewReady && !previewAdded) {
     previewAdded = true;
-    histogramLoad = new AbortController();
-    void loadHistogram(
-      `${tileUrl(state.id)}/preview.jpg`,
-      state.channelMode ? 0 : (state.channels?.length ?? 0),
-      histogramLoad.signal,
-    ).then(
-      (bins) => {
-        if (currentId !== state.id) return;
-        tools.setHistogram(bins.display);
-        if (!state.channelMode) colorPanel.setHistograms(bins.channels);
-      },
-      () => {
-        if (currentId === state.id) tools.setHistogram(null);
-      },
-    );
+    if (!state.channelMode && state.channels?.length) {
+      histogramLoad = new AbortController();
+      void loadChannelHistograms(
+        `${tileUrl(state.id)}/preview.jpg`,
+        state.channels.length,
+        histogramLoad.signal,
+      ).then(
+        (bins) => {
+          if (currentId === state.id) colorPanel.setHistograms(bins);
+        },
+        () => {},
+      );
+    }
     viewer.addTiledImage({
       tileSource: trackDownloads(
         colorRenderer!.wrapSource(
@@ -599,7 +595,6 @@ function showImage(state: ImageState) {
           return;
         }
         cancelInitialFit = fitInitialImage(viewer);
-        tools.setImageReady(true);
         colorPanel.setEnabled(Boolean(state.channels?.length));
         document
           .querySelectorAll<HTMLButtonElement>("[data-image-control]")

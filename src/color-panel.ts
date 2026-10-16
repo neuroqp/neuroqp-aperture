@@ -2,23 +2,21 @@ import { icon } from "./icons";
 import {
   adjustColorConnection,
   colorName,
+  colorConnectionValue,
   connectColor,
   copyColorSettings,
   defaultColorSettings,
   removeColorConnection,
+  resetColorConnection,
   setOutputColor,
   setColorConnectionRange,
   toHex,
   toHSV,
+  type ColorAdjustment,
   type ColorChannel,
   type ColorSettings,
 } from "./color-settings";
-import {
-  defaultDisplaySettings,
-  displayValue,
-  percentileRange,
-  type DisplaySettings,
-} from "./display-settings";
+import { percentileRange } from "./display-settings";
 import "./color-panel.css";
 
 const trash = icon("trash");
@@ -31,7 +29,7 @@ export const colorPanelMarkup = `
           <strong>Color connections</strong><ul>
             <li>Drag a channel to a color, or click them in order. Channels and colors can have several connections.</li>
             <li>Click a color to change its shade or hex value.</li>
-            <li>Click a wire to adjust its display range using the source channel histogram. These adjustments change the display only.</li>
+            <li>Click a wire to adjust its range and brightness using the source channel histogram. Drag the cutoff lines horizontally, or the right plateau vertically. Brightness scales the full ramp and plateau. These adjustments change the display only.</li>
             <li>Drag a wire to another color to move it. Drop in empty space to remove it. Escape cancels.</li>
             <li>The trash button removes the selected wire.</li>
             <li>With a wire focused, Enter selects, R starts moving, and Delete removes. Then choose a color with Tab and Enter.</li>
@@ -103,6 +101,15 @@ export function bindColorPanel(onChange: (settings: ColorSettings) => void) {
         pointerId: number;
       })
     | null = null;
+  let rangeGesture: {
+    pointerId: number;
+    edgeId: number;
+    field: keyof ColorAdjustment;
+    startValue: number;
+    startX: number;
+    startY: number;
+    target: HTMLElement;
+  } | null = null;
   const edgeById = (id: number | null) =>
     settings.connections.find((edge) => edge.id === id);
   const sourceButton = (source: string) =>
@@ -157,7 +164,7 @@ export function bindColorPanel(onChange: (settings: ColorSettings) => void) {
   function refreshInspectorRange() {
     const edge = edgeById(selected);
     if (!edge) return;
-    for (const field of ["minimum", "maximum"] as const) {
+    for (const field of ["minimum", "maximum", "brightness"] as const) {
       const input = get<HTMLInputElement>(`range-${field}`);
       if (!input) continue;
       input.value = String(edge[field]);
@@ -165,11 +172,21 @@ export function bindColorPanel(onChange: (settings: ColorSettings) => void) {
         "--fill",
         `${((edge[field] - Number(input.min)) / (Number(input.max) - Number(input.min))) * 100}%`,
       );
-      get(`value-${field}`).textContent = String(edge[field]);
+      get(`value-${field}`).textContent =
+        `${edge[field]}${field === "brightness" ? "%" : ""}`;
+      input.setAttribute(
+        "aria-valuetext",
+        `${edge[field]}${field === "brightness" ? "%" : ""}`,
+      );
+      if (field === "brightness") continue;
       const cutoff = document.getElementById(`color-cutoff-${field}`)!;
       cutoff.setAttribute("x1", String(edge[field]));
       cutoff.setAttribute("x2", String(edge[field]));
     }
+    const controls = get("range-controls");
+    controls.style.setProperty("--minimum", `${(edge.minimum / 255) * 100}%`);
+    controls.style.setProperty("--maximum", `${(edge.maximum / 255) * 100}%`);
+    controls.style.setProperty("--brightness", `${100 - edge.brightness}%`);
     document
       .getElementById("color-range-line")!
       .setAttribute(
@@ -177,7 +194,7 @@ export function bindColorPanel(onChange: (settings: ColorSettings) => void) {
         Array.from(
           { length: 256 },
           (_, x) =>
-            `${x === 0 ? "M" : "L"}${x} ${64 * (1 - displayValue(x, edge))}`,
+            `${x === 0 ? "M" : "L"}${x} ${64 * (1 - colorConnectionValue(x, edge))}`,
         ).join(""),
       );
   }
@@ -205,6 +222,7 @@ export function bindColorPanel(onChange: (settings: ColorSettings) => void) {
     scale.title = `Switch to ${logarithmic ? "linear" : "logarithmic"} scale`;
   }
   function renderInspector() {
+    stopRangeGesture();
     const edge = edgeById(selected),
       inspector = get("inspector");
     inspector.hidden = !edge;
@@ -223,6 +241,7 @@ export function bindColorPanel(onChange: (settings: ColorSettings) => void) {
       <button id="delete-color-connection" class="tool" type="button" aria-label="Delete ${escape(label(edge))} connection" title="Delete connection" ${enabled ? "" : "disabled"}>${trash}</button>
     </div>
     <div class="histogram-container">
+      <div id="color-range-controls" class="color-range-controls">
       <svg class="range-graph" viewBox="0 0 255 64" preserveAspectRatio="none" role="img" aria-label="Approximate source channel histogram">
         <title id="color-histogram-description"></title>
         <path class="graph-grid" d="M63.75 0v64M127.5 0v64M191.25 0v64M0 32h255"/>
@@ -231,10 +250,17 @@ export function bindColorPanel(onChange: (settings: ColorSettings) => void) {
         <line id="color-cutoff-minimum" class="histogram-cutoff" y1="0" y2="64"/>
         <line id="color-cutoff-maximum" class="histogram-cutoff" y1="0" y2="64"/>
       </svg>
-      <button id="color-histogram-scale" class="text-button histogram-scale" type="button" aria-label="Logarithmic histogram scale" ${enabled ? "" : "disabled"}></button>
+      <div class="color-range-highlights" aria-hidden="true">
+        <div class="color-range-highlight minimum"></div>
+        <div class="color-range-highlight maximum"></div>
+        <div class="color-range-highlight brightness"></div>
+      </div>
+      </div>
+      <div class="range-labels"><span>0</span><span>255</span>
+      <button id="color-histogram-scale" class="text-button histogram-scale" type="button" aria-label="Logarithmic histogram scale" ${enabled ? "" : "disabled"}></button></div>
     </div>
-    <div class="range-labels"><span>0</span><span>255</span></div>
     ${(["minimum", "maximum"] as const).map((field) => `<label class="adjustment" for="color-range-${field}"><span>${field === "minimum" ? "Minimum" : "Maximum"}</span><input id="color-range-${field}" type="range" data-color-field="${field}" min="${field === "minimum" ? 0 : 1}" max="${field === "minimum" ? 254 : 255}" aria-label="${escape(label(edge))} ${field}" ${enabled ? "" : "disabled"}><output id="color-value-${field}" for="color-range-${field}"></output></label>`).join("")}
+    <label class="adjustment" for="color-range-brightness"><span>Brightness</span><input id="color-range-brightness" type="range" data-color-field="brightness" min="0" max="100" step="1" aria-label="${escape(label(edge))} brightness" ${enabled ? "" : "disabled"}><output id="color-value-brightness" for="color-range-brightness"></output></label>
     <footer class="panel-footer display-presets">${[0, 0.1, 0.5, 1].map((tail) => `<button class="text-button" type="button" data-color-percentile="${tail}" title="${tail === 0 ? "Set display range to the sampled source channel minimum and maximum" : `Set display range to the ${tail}–${100 - tail} percentiles`}">${tail}–${100 - tail}</button>`).join("")}<button id="color-reset-range" class="text-button" type="button" ${enabled ? "" : "disabled"}>${icon("reset")}Reset</button></footer>`;
     refreshInspectorRange();
     refreshInspectorHistogram();
@@ -294,6 +320,7 @@ export function bindColorPanel(onChange: (settings: ColorSettings) => void) {
     editing = null;
   }
   function closeTransient() {
+    stopRangeGesture();
     cancelConnection();
     closeEditor();
     showHelp(false);
@@ -466,6 +493,126 @@ export function bindColorPanel(onChange: (settings: ColorSettings) => void) {
       removeEdge(id);
     }
   });
+  function stopRangeGesture() {
+    const drag = rangeGesture,
+      target = drag?.target ?? get("range-controls");
+    rangeGesture = null;
+    if (target) {
+      delete target.dataset.graphField;
+      delete target.dataset.graphDragging;
+    }
+    if (drag?.target.hasPointerCapture(drag.pointerId))
+      drag.target.releasePointerCapture(drag.pointerId);
+  }
+  function rangePoint(target: HTMLElement, event: PointerEvent) {
+    // Measure the SVG's inner plotting area; HTML capture and highlights avoid
+    // WebKit's zero-width bounds for vertical SVG lines.
+    const graph = target.querySelector("svg")!,
+      rect = graph.getBoundingClientRect();
+    return {
+      x: event.clientX - rect.left - graph.clientLeft,
+      y: event.clientY - rect.top - graph.clientTop,
+      width: graph.clientWidth,
+      height: graph.clientHeight,
+    };
+  }
+  function rangeField(target: HTMLElement, event: PointerEvent) {
+    const edge = edgeById(selected);
+    if (!enabled || !edge) return;
+    const { x, y, width, height } = rangePoint(target, event);
+    if (!width || !height || x < 0 || x > width || y < 0 || y > height) return;
+    const minimum = (edge.minimum / 255) * width,
+      maximum = (edge.maximum / 255) * width,
+      plateau = (1 - edge.brightness / 100) * height,
+      nearPlateau = Math.abs(y - plateau) <= 10;
+    // Preserve a brightness target even when the true plateau has zero width.
+    if (nearPlateau && x >= width - 20) return "brightness";
+    const minimumDistance = Math.abs(x - minimum),
+      maximumDistance = Math.abs(x - maximum);
+    if (Math.min(minimumDistance, maximumDistance) <= 10)
+      return minimumDistance < maximumDistance ? "minimum" : "maximum";
+    if (nearPlateau && x >= maximum) return "brightness";
+  }
+  function moveRange(event: PointerEvent) {
+    const drag = rangeGesture;
+    if (!drag || event.pointerId !== drag.pointerId) return;
+    if (!enabled || selected !== drag.edgeId || !edgeById(drag.edgeId)) {
+      stopRangeGesture();
+      return;
+    }
+    const { width, height } = rangePoint(drag.target, event);
+    if (!width || !height) return;
+    settings = adjustColorConnection(
+      settings,
+      drag.edgeId,
+      drag.field,
+      drag.startValue +
+        (drag.field === "brightness"
+          ? ((drag.startY - event.clientY) / height) * 100
+          : ((event.clientX - drag.startX) / width) * 255),
+    );
+    refreshInspectorRange();
+    publish();
+  }
+  get("inspector").addEventListener("pointerdown", (event) => {
+    const target = (event.target as Element).closest<HTMLElement>(
+      "#color-range-controls",
+    );
+    if (!target || rangeGesture || !event.isPrimary || event.button !== 0)
+      return;
+    const field = rangeField(target, event);
+    if (!field || selected === null) return;
+    event.preventDefault();
+    cancelConnection();
+    rangeGesture = {
+      pointerId: event.pointerId,
+      edgeId: selected,
+      field,
+      startValue: edgeById(selected)![field],
+      startX: event.clientX,
+      startY: event.clientY,
+      target,
+    };
+    target.dataset.graphField = field;
+    target.dataset.graphDragging = "true";
+    target.setPointerCapture(event.pointerId);
+  });
+  get("inspector").addEventListener("pointermove", (event) => {
+    if (rangeGesture) {
+      moveRange(event);
+      return;
+    }
+    const target = (event.target as Element).closest<HTMLElement>(
+      "#color-range-controls",
+    );
+    if (!target) return;
+    const field = rangeField(target, event);
+    if (field) target.dataset.graphField = field;
+    else delete target.dataset.graphField;
+  });
+  get("inspector").addEventListener("pointerout", (event) => {
+    if (rangeGesture) return;
+    const target = (event.target as Element).closest<HTMLElement>(
+      "#color-range-controls",
+    );
+    if (target && !target.contains(event.relatedTarget as Node | null))
+      delete target.dataset.graphField;
+  });
+  for (const type of [
+    "pointerup",
+    "pointercancel",
+    "lostpointercapture",
+  ] as const)
+    get("inspector").addEventListener(type, (event) => {
+      const drag = rangeGesture;
+      if (!drag || drag.pointerId !== event.pointerId) return;
+      if (type === "pointerup") moveRange(event);
+      stopRangeGesture();
+      if (type === "pointerup" && drag.target.isConnected) {
+        const field = rangeField(drag.target, event);
+        if (field) drag.target.dataset.graphField = field;
+      }
+    });
   get("inspector").addEventListener("click", (event) => {
     if (!enabled || selected === null) return;
     const target = event.target as Element;
@@ -479,24 +626,23 @@ export function bindColorPanel(onChange: (settings: ColorSettings) => void) {
       return;
     }
     const preset = target.closest<HTMLButtonElement>("[data-color-percentile]");
-    let range: DisplaySettings;
     if (preset) {
       const bins = selectedHistogram();
       if (!bins) return;
-      range = percentileRange(
+      const range = percentileRange(
         Array.from(bins),
         Number(preset.dataset.colorPercentile),
       );
+      settings = setColorConnectionRange(settings, selected, range);
     } else if (target.closest("#color-reset-range"))
-      range = defaultDisplaySettings;
+      settings = resetColorConnection(settings, selected);
     else return;
-    settings = setColorConnectionRange(settings, selected, range);
     refreshInspectorRange();
     publish();
   });
   get("inspector").addEventListener("input", (event) => {
     const input = event.target as HTMLInputElement,
-      field = input.dataset.colorField as keyof DisplaySettings | undefined;
+      field = input.dataset.colorField as keyof ColorAdjustment | undefined;
     if (!enabled || !field || selected === null) return;
     settings = adjustColorConnection(
       settings,
@@ -625,6 +771,10 @@ export function bindColorPanel(onChange: (settings: ColorSettings) => void) {
   const handleEscape = () => {
     if (editor.matches(":popover-open")) {
       closeEditor(true);
+      return true;
+    }
+    if (rangeGesture) {
+      stopRangeGesture();
       return true;
     }
     if (pending || gesture) {

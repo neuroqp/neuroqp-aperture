@@ -42,22 +42,7 @@ test("display adjustments round, ignore invalid values and leave defaults unchan
 });
 
 test("display transfer clips the selected range and resets to identity", async () => {
-  const { displayValue, displayFilter } = await import("./display-settings.ts");
-  for (const minimum of [0, 1, 50, 127, 254]) {
-    for (const maximum of [minimum + 1, 255]) {
-      const range = { minimum, maximum };
-      const factors = [
-        ...displayFilter(range).matchAll(/\(([0-9.e+-]+)\)/g),
-      ].map((m) => Number(m[1]));
-      const clamp = (x: number) => Math.max(0, Math.min(1, x));
-      for (let value = 0; value < 256; value++) {
-        const filtered = clamp(
-          (clamp((value / 255) * factors[0]) - 0.5) * factors[1] + 0.5,
-        );
-        assert.ok(Math.abs(filtered - displayValue(value, range)) < 1e-12);
-      }
-    }
-  }
+  const { displayValue } = await import("./display-settings.ts");
   for (let value = 0; value < 256; value++)
     assert.equal(displayValue(value, defaults), value / 255);
   const range = { minimum: 50, maximum: 150 };
@@ -66,23 +51,6 @@ test("display transfer clips the selected range and resets to identity", async (
   assert.equal(displayValue(100, range), 0.5);
   assert.equal(displayValue(150, range), 1);
   assert.equal(displayValue(255, range), 1);
-});
-
-test("histogram counts original preview luminance and ignores transparent pixels", async () => {
-  const { histogram } = await import("./display-settings.ts");
-  const pixels = new Uint8ClampedArray([
-    0, 0, 0, 255, 255, 255, 255, 255, 255, 0, 0, 255, 0, 255, 0, 255, 0, 0, 255,
-    255, 90, 90, 90, 0,
-  ]);
-  const before = pixels.slice();
-  const bins = histogram(pixels);
-  assert.equal(bins.length, 256);
-  assert.equal(
-    bins.reduce((sum, n) => sum + n, 0),
-    5,
-  );
-  for (const value of [0, 255, 54, 182, 18]) assert.equal(bins[value], 1);
-  assert.deepEqual(pixels, before);
 });
 
 test("percentile presets clip the requested tails and handle uniform and empty images", async () => {

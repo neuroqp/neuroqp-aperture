@@ -4,9 +4,9 @@ A minimal desktop image viewer built with Tauri, Rust, and OpenSeadragon.
 Two compact toolbars leave the rest of the window to the image. Large images
 load through a preview and progressively available detail tiles.
 
-Display range, Color, and multi-point options open independently at the viewer's top-right.
+Color and multi-point options open independently at the viewer's top-right.
 Color connects image channels to editable output colors, with a live display
-range, source histogram, presets and Reset per connection. Drag wires to reroute or remove them; click an
+range, brightness, source histogram, presets and Reset per connection. Drag wires to reroute or remove them; click an
 output to pick its shade. These settings affect only the display.
 WebGL2 keeps image samples on the GPU and redraws cached tiles when colors change;
 unavailable or lost GPU contexts fall back to CPU rendering. No additional Rust
@@ -214,11 +214,15 @@ No microscopy source files are modified.
   Click with Multi-point active to add
   points; closing the panel or selecting Pan leaves placement mode. Imported
   ImageJ point selections and overlays remain editable annotations.
-- Display-range sliders and percentile presets adjust only
-  the displayed image. The approximate histogram samples the 8-bit preview, with
-  linear counts by default and an optional Log toggle on hover. The 0–100 preset
-  uses the sampled minimum and maximum; Reset restores 0–255. Original images
-  and cached tiles stay unchanged.
+- Select a wire in Color to adjust its Minimum/Maximum range and Brightness.
+  Drag the graph's black/white cutoff lines horizontally or its right-hand
+  plateau vertically for brightness. Hover highlights each target and shows
+  its drag direction. Brightness runs from 0 to 100% and scales the channel's contribution without
+  changing the input white point. The approximate source histogram uses 8-bit
+  display samples, with linear counts and a Linear/Log toggle below the graph.
+  Percentile presets change only the input range; Reset restores 0–255 and
+  100% brightness for that connection. Original images and cached tiles stay
+  unchanged.
 - TIFF copies preserve their original layout. Stock ImageJ cannot directly open
   all tiled TIFFs or BigTIFFs; those need a suitable image reader. Other formats
   convert to a classic stripped TIFF, subject to its 4 GiB addressing limit.

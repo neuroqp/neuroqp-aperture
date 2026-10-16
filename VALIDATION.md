@@ -1102,3 +1102,44 @@ base channel metadata and disable partial native reuse. Tests cover existing
 levels without rebuilt tiles, classic/BigTIFF byte orders, offsets, cycles and
 budgets. All 62 Linux Rust tests, strict Clippy, rustfmt and independent review
 passed. The final Windows package workflow will verify the worker path.
+
+## Per-connection brightness and unified Color controls
+
+On October 16, 2026, the embedded Linux debug app passed native Tauri/WebDriver
+checks for RGB PNG, 16-bit grayscale TIFF and a five-channel ImageJ TIFF in both
+WebGL2 and forced CPU modes. Framebuffer samples verified that 50% brightness
+halves the selected RGB contribution, leaves the other components unchanged,
+and restores the original pixels at 100%. Zero brightness silences that
+connection. Both renderers passed graph-ramp/plateau, keyboard, percentile
+preservation, selected Reset and close/reopen retention checks. Light and dark
+native screenshots were inspected. Only the file-picker response was supplied
+by the harness; display, loading and rendering used the real frontend/backend.
+Source SHA-256 hashes stayed unchanged.
+
+The separate Display range panel, button and composite CSS filter are removed.
+The final native rebuild passed the same six renderer/image checks with a fresh
+isolated cache, including loading and reopening channel previews without the
+obsolete JPEG. All 76 frontend tests and 76 Rust tests, the frontend/native
+builds, Prettier and rustfmt passed. Rust checks cover ordinary JPEG validation,
+channel PNG validation, channel-cache reuse and both preview-generation paths.
+Ignored evidence is under `artifacts/connection-brightness/`; fixtures and
+screenshots are not committed. Windows packages were not exercised here.
+
+## Draggable Color range graph
+
+The October 16, 2026 Linux native Tauri/WebDriver check now exercises real
+pointer drags on both cutoff lines and the brightness plateau in WebGL2 and
+forced CPU rendering. It verifies horizontal/vertical cursors and background
+highlights in both themes, grab-offset retention, synchronized slider values,
+framebuffer changes, out-of-graph clamping, adjacent cutoffs, and brightness
+access at a 255 white point and 0%/100% output. Pointer release, cancellation,
+lost capture, panel closure, connection selection and image replacement all
+end the old gesture. Cancellation is supplied as a pointer event; file-picker
+responses are supplied by the harness. Ordinary drag input is delivered through
+native WebDriver pointer actions. The Linear/Log toggle is below the plot.
+
+The isolated production component also passed hover, disabled-state and
+640-by-400 overflow checks through the T3 browser. Native light/dark screenshots
+were inspected. The 76 frontend tests, Prettier, TypeScript, frontend build,
+embedded Linux native build and independent code review passed. Local runnable
+checks and screenshots remain ignored under `artifacts/graph-controls/`.

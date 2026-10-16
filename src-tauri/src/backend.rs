@@ -632,7 +632,7 @@ fn write_manifest(job: &Job, dir: &Path) -> Result<(), String> {
 }
 
 fn cached_manifest(job: &Job, dir: &Path) -> Option<CacheManifest> {
-    if !dir.join("complete").is_file() || !valid_preview(&dir.join("preview.jpg"), false) {
+    if !dir.join("complete").is_file() {
         return None;
     }
     let file = File::open(dir.join("manifest.json")).ok()?;
@@ -675,7 +675,6 @@ fn cached_manifest(job: &Job, dir: &Path) -> Option<CacheManifest> {
 
 fn valid_cache_assets(dir: &Path, channels: usize, channel_mode: bool, native: bool) -> bool {
     dir.join("complete").is_file()
-        && valid_preview(&dir.join("preview.jpg"), false)
         && if channel_mode {
             (0..channels).all(|index| {
                 let channel = dir.join("channels").join(index.to_string());
@@ -683,7 +682,8 @@ fn valid_cache_assets(dir: &Path, channels: usize, channel_mode: bool, native: b
                     && (native || channel.join("tiles_files").is_dir())
             })
         } else {
-            native || dir.join("tiles_files").is_dir()
+            valid_preview(&dir.join("preview.jpg"), false)
+                && (native || dir.join("tiles_files").is_dir())
         }
 }
 
@@ -1167,18 +1167,6 @@ fn load_channels(job: &Arc<Job>, width: u32, height: u32, ushort: bool) -> Resul
             )?;
             let _ = fs::remove_file(resized);
             fs::rename(partial, channel.join("preview.png")).map_err(|e| e.to_string())?;
-            if index == 0 {
-                // Display range histogram retains the first channel preview.
-                run(
-                    job,
-                    "vips",
-                    &[
-                        "copy".into(),
-                        channel.join("preview.png").into_os_string(),
-                        dir.join("preview.jpg").into_os_string(),
-                    ],
-                )?;
-            }
         }
     }
     job.update(|state| {
@@ -1242,13 +1230,7 @@ fn load_channels(job: &Arc<Job>, width: u32, height: u32, ushort: bool) -> Resul
         .root
         .join(format!("promote-{}", job.state.lock().unwrap().id));
     fs::create_dir(&staging).map_err(|e| e.to_string())?;
-    for name in [
-        "preview.jpg",
-        "channels",
-        "manifest.json",
-        "complete",
-        "access",
-    ] {
+    for name in ["channels", "manifest.json", "complete", "access"] {
         fs::rename(dir.join(name), staging.join(name)).map_err(|e| e.to_string())?;
     }
     if complete.exists() {
@@ -2235,6 +2217,43 @@ mod tests {
     }
 
     #[test]
+    fn cache_assets_require_only_the_previews_used_by_each_mode() {
+        let root = std::env::temp_dir().join(format!(
+            "aperture-cache-previews-{}-{}",
+            std::process::id(),
+            NEXT_ID.fetch_add(1, Ordering::Relaxed)
+        ));
+        fs::create_dir_all(root.join("tiles_files")).unwrap();
+        fs::write(root.join("complete"), []).unwrap();
+        let jpeg = [0xff, 0xd8, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0xff, 0xd9];
+        assert!(!valid_cache_assets(&root, 1, false, false));
+        assert!(!valid_cache_assets(&root, 1, false, true));
+        fs::write(root.join("preview.jpg"), jpeg).unwrap();
+        assert!(valid_cache_assets(&root, 1, false, false));
+        assert!(valid_cache_assets(&root, 1, false, true));
+        fs::remove_file(root.join("preview.jpg")).unwrap();
+        let png = b"\x89PNG\r\n\x1a\n\0\0\0\0IEND\xaeB`\x82";
+        for channel in 0..2 {
+            let dir = root.join("channels").join(channel.to_string());
+            fs::create_dir_all(dir.join("tiles_files")).unwrap();
+            fs::write(dir.join("preview.png"), png).unwrap();
+        }
+        assert!(valid_cache_assets(&root, 2, true, false));
+        assert!(valid_cache_assets(&root, 2, true, true));
+        // Older channel caches can retain an unused JPEG, even a corrupt one.
+        fs::write(root.join("preview.jpg"), b"unused legacy preview").unwrap();
+        assert!(valid_cache_assets(&root, 2, true, false));
+        fs::remove_dir(root.join("channels/1/tiles_files")).unwrap();
+        assert!(!valid_cache_assets(&root, 2, true, false));
+        assert!(valid_cache_assets(&root, 2, true, true));
+        fs::write(root.join("channels/1/preview.png"), b"broken preview").unwrap();
+        assert!(!valid_cache_assets(&root, 2, true, true));
+        fs::remove_file(root.join("channels/1/preview.png")).unwrap();
+        assert!(!valid_cache_assets(&root, 2, true, true));
+        fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
     fn early_cache_requires_valid_manifest_preview_and_source_fingerprint() {
         let root = std::env::temp_dir().join(format!(
             "aperture-early-cache-{}",
@@ -2533,6 +2552,10 @@ mod tests {
             }
             let job = backend.current.lock().unwrap().clone().unwrap();
             let id = job.state.lock().unwrap().id.clone();
+            assert!(
+                !job.dir.lock().unwrap().join("preview.jpg").exists(),
+                "channel previews must not encode an unused composite JPEG"
+            );
             while !events
                 .lock()
                 .unwrap()
@@ -2629,6 +2652,18 @@ mod tests {
                 assert!(std::time::Instant::now() < deadline);
                 thread::sleep(Duration::from_millis(20));
             }
+            assert_eq!(
+                backend
+                    .current
+                    .lock()
+                    .unwrap()
+                    .as_ref()
+                    .unwrap()
+                    .process_number
+                    .load(Ordering::Relaxed),
+                0,
+                "channel cache without a JPEG must reuse its manifest directly"
+            );
         }
         backend.shutdown();
         fs::remove_dir_all(root).unwrap();

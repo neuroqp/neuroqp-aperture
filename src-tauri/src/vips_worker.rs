@@ -555,21 +555,9 @@ impl Worker {
                 partial.to_str().ok_or("Invalid preview path.")?,
                 progress,
                 (index as f64 + 0.9) / planes.len() as f64,
-                0.05 / planes.len() as f64,
+                0.1 / planes.len() as f64,
             )?;
             fs::rename(partial, channel.join("preview.png")).map_err(|e| e.to_string())?;
-            if index == 0 {
-                save_image(
-                    &display,
-                    Path::new(directory)
-                        .join("preview.jpg")
-                        .to_str()
-                        .ok_or("Invalid preview path.")?,
-                    progress,
-                    (index as f64 + 0.95) / planes.len() as f64,
-                    0.05 / planes.len() as f64,
-                )?;
-            }
             progress.update(((index + 1) as f64 / planes.len() as f64).min(0.99));
             // Each page needs at most one <=1024px image. Release pages as soon
             // as their last band is written instead of retaining all 32 pages.
@@ -916,6 +904,19 @@ mod tests {
             images: HashMap::new(),
             source: None,
         };
+        let channel_directory = directory.join("channel-previews");
+        worker
+            .process(Request::ChannelPreviews {
+                input: source.to_str().unwrap().into(),
+                options: vec!["[page=0,n=1,access=sequential]".into()],
+                scale: vec![1.0],
+                planes: vec![Plane { page: 0, band: 0 }],
+                ushort: true,
+                directory: channel_directory.to_str().unwrap().into(),
+            })
+            .unwrap();
+        assert!(channel_directory.join("channels/0/preview.png").is_file());
+        assert!(!channel_directory.join("preview.jpg").exists());
         assert_eq!(
             worker
                 .process(Request::RawPreview {

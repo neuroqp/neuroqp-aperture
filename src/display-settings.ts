@@ -22,14 +22,6 @@ export function adjustDisplay(
   };
 }
 
-// CSS brightness followed by contrast implements the selected black/white points.
-// The first stage can only clip values already above the chosen white point.
-export function displayFilter(settings: DisplaySettings) {
-  const sum = settings.minimum + settings.maximum;
-  const width = settings.maximum - settings.minimum;
-  return `brightness(${255 / sum}) contrast(${sum / width})`;
-}
-
 export function displayValue(value: number, settings: DisplaySettings) {
   return Math.max(
     0,
@@ -38,19 +30,6 @@ export function displayValue(value: number, settings: DisplaySettings) {
       (value - settings.minimum) / (settings.maximum - settings.minimum),
     ),
   );
-}
-
-// Luminance in the existing 8-bit display preview, never source-file intensities.
-export function histogram(rgba: ArrayLike<number>) {
-  const bins = Array<number>(256).fill(0);
-  for (let i = 0; i + 3 < rgba.length; i += 4) {
-    if (rgba[i + 3] === 0) continue;
-    const value = Math.round(
-      0.2126 * rgba[i] + 0.7152 * rgba[i + 1] + 0.0722 * rgba[i + 2],
-    );
-    bins[value]++;
-  }
-  return bins;
 }
 
 // Sample original display planes once, independently of their color/range mapping.
