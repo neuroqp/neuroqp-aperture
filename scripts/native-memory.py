@@ -40,7 +40,10 @@ def main():
     args = parser.parse_args()
     binary = args.binary.resolve()
     primary = args.fixtures.resolve() / 'dims_p4z5t3c2y32x32.nd2'
-    sources = [primary] + ([args.real.resolve()] if args.real else [])
+    ordinary = [ROOT / f'tests/fixtures/rgb-65x49.{extension}'
+                for extension in ('png', 'jpg', 'webp', 'bmp')]
+    ordinary.append(ROOT / 'tests/fixtures/rgba-alpha.png')
+    sources = [primary, *ordinary] + ([args.real.resolve()] if args.real else [])
     hashes = {str(path): digest(path) for path in sources}
     output = args.output.absolute()
     output.parent.mkdir(parents=True, exist_ok=True)
@@ -146,7 +149,9 @@ def main():
                 raise RuntimeError(value.get('error') or value)
             if not value or value.get('path') != str(path) or value.get('phase') != 'ready' or value['id'] == previous_id:
                 return False
-            d = value['dimensions']
+            d = value.get('dimensions')
+            if d is None:
+                return value
             return value if (d['position'], d['zIndex'], d['timeIndex']) == (position, z, time_index) else False
         result = wait(selected, 'ready ' + path.name)
         wait(lambda: js("""
@@ -297,6 +302,17 @@ def main():
         assert plane_hash(recovered) == first_hash
         framebuffer()
         report['checks']['replacementRecoversAfterPreviewFailure'] = True
+        # Exercise both Linux CLI decoders and the isolated BMP worker at the
+        # minimum budget, through actual Open and visible native pixels.
+        ordinary_results = []
+        for path in ordinary:
+            image = open_ready(path)
+            assert not image.get('readOnly') and not image.get('dimensions'), image
+            assert (image['width'], image['height']) == (65, 49), image
+            ordinary_results.append({'path': str(path), 'pixels': framebuffer(),
+                                     'memory': memory()})
+        report['checks']['ordinaryFormatsAtMinimumBudget'] = ordinary_results
+        open_ready(primary)
         if args.real:
             restored = invoke('set_memory_budget', {'limitBytes': original_limit})
             assert restored.get('limitBytes') == original_limit, restored

@@ -106,12 +106,19 @@ pub struct Job {
     cache_key: String,
     process_number: AtomicU64,
     decoder: Mutex<Option<Arc<crate::decoder::Decoder>>>,
-    decoder_memory: Mutex<Option<crate::memory::Reservation>>,
+    decoder_memory: Mutex<Option<DecoderMemory>>,
+    frame_memory: AtomicU64,
     processes: Mutex<HashMap<u64, Arc<Mutex<Child>>>>,
     notifier: Option<Notifier>,
     budget_check: Mutex<Instant>,
     housekeeping: AtomicBool,
     cache_access: Arc<Mutex<()>>,
+}
+
+struct DecoderMemory {
+    bytes: u64,
+    // Additional admission after metadata discovery keeps the initial lease alive.
+    reservations: Vec<crate::memory::Reservation>,
 }
 
 #[derive(Clone, Copy)]
@@ -499,6 +506,22 @@ impl LoadContext {
         }
         let nd2 =
             (extension == "nd2").then(|| frame.as_ref().map(|frame| frame.0).unwrap_or_default());
+        // BMP opens eagerly in the worker, including for vipsheader. Read only
+        // its dimensions here, before permitting any full-frame allocations.
+        let frame_memory = if extension == "bmp" {
+            let (width, height) = image::ImageReader::with_format(
+                std::io::BufReader::new(File::open(&source).map_err(|e| e.to_string())?),
+                image::ImageFormat::Bmp,
+            )
+            .into_dimensions()
+            .map_err(|e| e.to_string())?;
+            if width == 0 || height == 0 || width > i32::MAX as u32 || height > i32::MAX as u32 {
+                return Err("Invalid or unsupported image dimensions.".into());
+            }
+            decoded_workspace(width, height, 4, 1)?
+        } else {
+            64 * 1024 * 1024
+        };
         let id = format!(
             "{}-{}",
             SystemTime::now()
@@ -602,6 +625,7 @@ impl LoadContext {
             process_number: AtomicU64::new(0),
             decoder: Mutex::new(None),
             decoder_memory: Mutex::new(None),
+            frame_memory: AtomicU64::new(frame_memory),
             processes: Mutex::new(HashMap::new()),
             notifier,
             budget_check: Mutex::new(Instant::now()),
@@ -1117,6 +1141,18 @@ pub(crate) fn load(job: &Arc<Job>) -> Result<(), String> {
     };
     let header = run(job, "vipsheader", &["-a".into(), input(job, "")])?;
     let (width, height) = validate_header(&header)?;
+    if field(&header, "vips-loader") != Some("tiffload") {
+        let bands = field(&header, "bands").unwrap().parse::<u64>().unwrap();
+        let sample_bytes = if field(&header, "format") == Some("ushort") {
+            2
+        } else {
+            1
+        };
+        job.frame_memory.fetch_max(
+            decoded_workspace(width, height, bands, sample_bytes)?,
+            Ordering::Relaxed,
+        );
+    }
     let tiffinfo = if field(&header, "vips-loader") == Some("tiffload") {
         #[cfg(unix)]
         let info = run(job, "tiffinfo", &[job.input.clone().into_os_string()]).ok();
@@ -1895,6 +1931,16 @@ fn run_with_progress(
             progress,
         );
     }
+    // Direct tools have the same admission rules as the worker. Keep this lease
+    // local until the child has exited or has been killed and reaped, including
+    // when Job::cancel drains the process table from another thread.
+    let bytes = if matches!(program, "vips" | "vipsheader") {
+        decoder_workspace(job)?
+    } else {
+        // Metadata tools do not need a second image workspace beside a live worker.
+        8 * 1024 * 1024
+    };
+    let _memory = reserve_workspace(job, bytes)?;
     let dir = job.work.clone();
     let number = job.process_number.fetch_add(1, Ordering::Relaxed);
     let stdout_path = dir.join(format!("stdout-{number}"));
@@ -2002,6 +2048,74 @@ fn uses_worker(job: &Job) -> bool {
         )
 }
 
+fn decoded_workspace(
+    width: u32,
+    height: u32,
+    bands: u64,
+    sample_bytes: u64,
+) -> Result<u64, String> {
+    // Full-image codecs can retain source pixels alongside decoder/output copies.
+    // Four copies also cover BMP's two retained loader variants and copy peak.
+    u64::from(width)
+        .checked_mul(u64::from(height))
+        .and_then(|bytes| bytes.checked_mul(bands))
+        .and_then(|bytes| bytes.checked_mul(sample_bytes))
+        .and_then(|bytes| bytes.checked_mul(4))
+        .ok_or_else(|| "Image decoder workspace is too large.".into())
+}
+
+fn decoder_workspace(job: &Job) -> Result<u64, String> {
+    let state = job.state.lock().unwrap();
+    let preview = state.channels.len().max(1) as u64 * 1024 * 1024 * 4;
+    let (overhead, frame) = if job.nd2.is_some() {
+        // ND2 display TIFFs have one whole-image strip; preserve its full decode.
+        (
+            128 * 1024 * 1024,
+            decoded_workspace(state.width, state.height, state.channels.len() as u64, 1)?,
+        )
+    } else {
+        // A bounded metadata/streaming allowance, plus geometry for codecs that
+        // can materialize a complete frame. Small images fit the minimum budget.
+        (
+            64 * 1024 * 1024,
+            job.frame_memory
+                .load(Ordering::Relaxed)
+                .max(64 * 1024 * 1024),
+        )
+    };
+    frame
+        .checked_add(overhead)
+        .and_then(|bytes| bytes.checked_add(preview))
+        .ok_or_else(|| "Image decoder workspace is too large.".into())
+}
+
+fn reserve_workspace(job: &Job, bytes: u64) -> Result<crate::memory::Reservation, String> {
+    if job.cancel.load(Ordering::Relaxed) {
+        return Err("Loading cancelled.".into());
+    }
+    let reservation = if let Some(acquisition) = &job.acquisition {
+        acquisition.reserve_workspace(bytes, job.background)?
+    } else {
+        let mut reservation = job.memory.try_reserve(bytes, job.background)?;
+        if reservation.is_none() && !job.background && bytes <= job.memory.status()?.limit_bytes {
+            job.memory.request_reclaim()?;
+            let deadline = Instant::now() + Duration::from_secs(2);
+            while reservation.is_none() && Instant::now() < deadline {
+                if job.cancel.load(Ordering::Relaxed) {
+                    return Err("Loading cancelled.".into());
+                }
+                thread::sleep(Duration::from_millis(25));
+                reservation = job.memory.try_reserve(bytes, false)?;
+            }
+        }
+        reservation
+    };
+    if job.cancel.load(Ordering::Relaxed) {
+        return Err("Loading cancelled.".into());
+    }
+    reservation.ok_or_else(|| "Image decoding does not fit the memory limit. Increase it in Settings or close another image window.".into())
+}
+
 fn worker_call(
     job: &Job,
     request: &crate::vips_worker::Request,
@@ -2012,27 +2126,23 @@ fn worker_call(
         if job.cancel.load(Ordering::Relaxed) {
             return Err("Loading cancelled.".into());
         }
+        let amount = decoder_workspace(job)?;
+        let mut memory = job.decoder_memory.lock().unwrap();
+        let previous = memory.as_ref().map_or(0, |memory| memory.bytes);
+        if amount > previous {
+            let reservation = reserve_workspace(job, amount - previous)?;
+            let memory = memory.get_or_insert_with(|| DecoderMemory {
+                bytes: 0,
+                reservations: Vec::new(),
+            });
+            memory.bytes = amount;
+            memory.reservations.push(reservation);
+        }
         if slot.is_none() {
-            let state = job.state.lock().unwrap().clone();
-            // Reserve the native workspace while its process/retained image handles live.
-            // ND2 display TIFFs have one whole-image strip, so include its full decode.
-            let preview = state.channels.len().max(1) as u64 * 1024 * 1024 * 4;
-            let frame = if job.nd2.is_some() {
-                u64::from(state.width) * u64::from(state.height) * state.channels.len() as u64 * 4
-            } else {
-                64 * 1024 * 1024
-            };
-            let amount = 128 * 1024 * 1024 + frame + preview;
-            let reservation = if let Some(acquisition) = &job.acquisition {
-                acquisition.reserve_workspace(amount, job.background)?
-            } else {
-                job.memory.try_reserve(amount, job.background)?
-            }.ok_or("Image decoding does not fit the memory limit. Increase it in Settings or close another image window.")?;
-            *job.decoder_memory.lock().unwrap() = Some(reservation);
             *slot = match crate::decoder::Decoder::start(&job.work) {
                 Ok(decoder) => Some(Arc::new(decoder)),
                 Err(error) => {
-                    job.decoder_memory.lock().unwrap().take();
+                    memory.take();
                     return Err(error);
                 }
             };
@@ -2308,6 +2418,164 @@ fn prune_except(root: &Path, limit: u64, protected: Option<&Path>) -> Result<(),
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    fn workspace_fixture() -> (PathBuf, Backend, Arc<Job>) {
+        let root = std::env::temp_dir().join(format!(
+            "aperture-decoder-memory-{}-{}",
+            std::process::id(),
+            NEXT_ID.fetch_add(1, Ordering::Relaxed)
+        ));
+        fs::create_dir_all(&root).unwrap();
+        let source = root.join("source.png");
+        fs::write(&source, []).unwrap();
+        let backend = Backend::new(root.join("cache")).unwrap();
+        backend
+            .memory
+            .set_limit(crate::memory::MIN_LIMIT_BYTES)
+            .unwrap();
+        let context = LoadContext {
+            root: backend.root.clone(),
+            memory: backend.memory.clone(),
+            cache_access: backend.cache_access.clone(),
+        };
+        let job = context
+            .create_job(
+                &source,
+                source.clone(),
+                None,
+                None,
+                LoadMode::Foreground,
+                None,
+            )
+            .unwrap();
+        (root, backend, job)
+    }
+
+    #[test]
+    fn decoder_workspace_accounts_for_rgba_ushort_and_eager_bmp() {
+        assert_eq!(decoded_workspace(8000, 8000, 4, 2).unwrap(), 2_048_000_000);
+        assert_eq!(decoded_workspace(8000, 8000, 3, 1).unwrap(), 768_000_000);
+        assert!(decoded_workspace(u32::MAX, u32::MAX, 4, 2).is_err());
+        let (root, backend, job) = workspace_fixture();
+        // The browser allowance plus a small image workspace fits 256 MiB.
+        assert!(
+            96 * 1024 * 1024 + decoder_workspace(&job).unwrap() <= crate::memory::MIN_LIMIT_BYTES
+        );
+        let bmp = root.join("source.bmp");
+        image::RgbaImage::new(16, 12).save(&bmp).unwrap();
+        let context = LoadContext {
+            root: backend.root.clone(),
+            memory: backend.memory.clone(),
+            cache_access: backend.cache_access.clone(),
+        };
+        let bmp_job = context
+            .create_job(&bmp, bmp.clone(), None, None, LoadMode::Foreground, None)
+            .unwrap();
+        assert_eq!(
+            bmp_job.frame_memory.load(Ordering::Relaxed),
+            16 * 12 * 4 * 4
+        );
+        backend.shutdown();
+        drop((job, bmp_job, backend));
+        fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn ordinary_foreground_workspace_reclaims_another_windows_optional_memory() {
+        let (root, backend, job) = workspace_fixture();
+        let peer = crate::memory::Budget::new(root.join("cache")).unwrap();
+        let optional = peer.try_reserve(200 * 1024 * 1024, false).unwrap().unwrap();
+        let epoch = peer.reclaim_epoch().unwrap();
+        let maintenance = thread::spawn(move || {
+            let deadline = Instant::now() + Duration::from_secs(5);
+            while peer.reclaim_epoch().unwrap() == epoch {
+                assert!(
+                    Instant::now() < deadline,
+                    "Foreground admission did not request reclaim"
+                );
+                thread::sleep(Duration::from_millis(2));
+            }
+            drop(optional);
+        });
+        let bytes = decoder_workspace(&job).unwrap();
+        let reservation = reserve_workspace(&job, bytes).unwrap();
+        maintenance.join().unwrap();
+        assert_eq!(backend.memory.status().unwrap().used_bytes, bytes);
+        drop(reservation);
+        assert_eq!(backend.memory.status().unwrap().used_bytes, 0);
+        backend.shutdown();
+        drop((job, backend));
+        fs::remove_dir_all(root).unwrap();
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn direct_decoder_refuses_oversized_geometry_before_spawning() {
+        let (root, backend, job) = workspace_fixture();
+        job.frame_memory.store(
+            decoded_workspace(8000, 8000, 4, 2).unwrap(),
+            Ordering::Relaxed,
+        );
+        let error = run(&job, "vipsheader", &["-a".into(), input(&job, "")]).unwrap_err();
+        assert!(error.contains("does not fit the memory limit"), "{error}");
+        assert!(job.processes.lock().unwrap().is_empty());
+        assert_eq!(backend.memory.status().unwrap().used_bytes, 0);
+        backend.shutdown();
+        drop((job, backend));
+        fs::remove_dir_all(root).unwrap();
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn direct_admission_cancels_before_spawn_and_releases_after_reaping() {
+        let (root, backend, job) = workspace_fixture();
+        let full = backend
+            .memory
+            .try_reserve(crate::memory::MIN_LIMIT_BYTES, false)
+            .unwrap()
+            .unwrap();
+        let epoch = backend.memory.reclaim_epoch().unwrap();
+        let pending = {
+            let job = job.clone();
+            thread::spawn(move || run(&job, "sleep", &["0".into()]))
+        };
+        let deadline = Instant::now() + Duration::from_secs(5);
+        while backend.memory.reclaim_epoch().unwrap() == epoch {
+            assert!(
+                Instant::now() < deadline,
+                "Direct command did not wait for admission"
+            );
+            thread::sleep(Duration::from_millis(2));
+        }
+        assert!(job.processes.lock().unwrap().is_empty());
+        let cancelled = Instant::now();
+        job.cancel();
+        assert!(pending.join().unwrap().unwrap_err().contains("cancelled"));
+        assert!(cancelled.elapsed() < Duration::from_secs(1));
+        drop(full);
+        assert_eq!(backend.memory.status().unwrap().used_bytes, 0);
+
+        job.cancel.store(false, Ordering::Relaxed);
+        run(&job, "sleep", &["0".into()]).unwrap();
+        assert_eq!(backend.memory.status().unwrap().used_bytes, 0);
+        let running = {
+            let job = job.clone();
+            thread::spawn(move || run(&job, "sleep", &["30".into()]))
+        };
+        let deadline = Instant::now() + Duration::from_secs(5);
+        while job.processes.lock().unwrap().is_empty() {
+            assert!(Instant::now() < deadline, "Admitted child did not spawn");
+            thread::sleep(Duration::from_millis(2));
+        }
+        assert_eq!(backend.memory.status().unwrap().used_bytes, 8 * 1024 * 1024);
+        job.cancel();
+        assert!(running.join().unwrap().unwrap_err().contains("cancelled"));
+        assert!(job.processes.lock().unwrap().is_empty());
+        assert_eq!(backend.memory.status().unwrap().used_bytes, 0);
+        backend.shutdown();
+        drop((job, backend));
+        fs::remove_dir_all(root).unwrap();
+    }
 
     #[cfg(windows)]
     #[test]
