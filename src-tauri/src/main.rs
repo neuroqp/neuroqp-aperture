@@ -8,6 +8,7 @@ mod memory;
 mod native;
 mod nd2;
 mod nd2_cache;
+mod nd2_metadata;
 mod platform;
 mod preload;
 mod raw_tiff;

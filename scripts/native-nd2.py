@@ -92,6 +92,8 @@ def main():
     def ready(path, position=0, z=0, time_index=0, previous_id=None):
         def current():
             s = state()
+            if s and s.get('path') == str(path) and s['id'] != previous_id and s.get('phase') == 'error':
+                raise RuntimeError(s.get('error') or s)
             if not s or s.get('path') != str(path) or s.get('phase') != 'ready' or s['id'] == previous_id:
                 return False
             d = s.get('dimensions')

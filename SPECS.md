@@ -241,6 +241,8 @@ on Open, folder navigation or Close. Cancellation or save failure must retain un
   experiment loops and oversized frames explicitly. Limit a decoded selected frame
   to 256 MiB; this is not a total process-memory limit. Reader/codec buffers can
   coexist with the assembled frame. Bound encoded frames and metadata too.
+  Validate compressed metadata expansion before parsing and include per-position
+  metadata cloning in opening reservations; retain only compact typed summaries.
 - Validate pixel values, dimension mapping and RGB sample order with synthetic
   fixtures; check real public acquisitions and native UI separately. Keep real
   acquisitions and generated evidence outside Git.

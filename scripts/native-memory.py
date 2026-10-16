@@ -142,6 +142,8 @@ def main():
     def ready(path, position=0, z=0, time_index=0, previous_id=None):
         def selected():
             value = state()
+            if value and value.get('path') == str(path) and value['id'] != previous_id and value.get('phase') == 'error':
+                raise RuntimeError(value.get('error') or value)
             if not value or value.get('path') != str(path) or value.get('phase') != 'ready' or value['id'] == previous_id:
                 return False
             d = value['dimensions']

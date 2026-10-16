@@ -117,6 +117,8 @@ impl Budget {
         if status.used_bytes > status.limit_bytes
             || bytes > status.available_bytes
             || (background && status.preloading_paused)
+            || pressure_sample()
+                .is_some_and(|(_, available)| !physical_headroom_allows(bytes, available))
         {
             return Ok(None);
         }
@@ -221,6 +223,11 @@ impl Budget {
 }
 
 impl Reservation {
+    #[cfg(test)]
+    pub fn bytes(&self) -> u64 {
+        self.bytes
+    }
+
     /// Reduce a decode peak to the retained buffer without releasing admission
     /// between the two. Free the corresponding allocation before shrinking.
     pub fn shrink(&mut self, bytes: u64) -> Result<(), String> {
@@ -270,9 +277,14 @@ fn read_amount(path: &Path) -> io::Result<u64> {
 
 fn pressure_paused(was_paused: bool, total: u64, available: u64) -> bool {
     // Resume only after twice the free-memory margin, avoiding rapid toggles.
-    let pause_at = (total / 20).max(MIN_LIMIT_BYTES);
-    let resume_at = (total / 10).max(2 * MIN_LIMIT_BYTES);
+    let pause_at = (total / 20).max(MIN_LIMIT_BYTES).min(total / 4);
+    let resume_at = (total / 10).max(2 * MIN_LIMIT_BYTES).min(total / 2);
     available < if was_paused { resume_at } else { pause_at }
+}
+
+fn physical_headroom_allows(bytes: u64, available: u64) -> bool {
+    // During pressure, leave a small margin for the window and other processes.
+    bytes <= available.saturating_sub(64 * 1024 * 1024)
 }
 
 #[cfg(target_os = "linux")]
@@ -288,21 +300,46 @@ fn pressure_sample() -> Option<(u64, u64)> {
                 .checked_mul(1024)
         })
     };
-    let mut total = kib("MemTotal:")?;
-    let mut available = kib("MemAvailable:")?;
-    // Respect the current cgroup namespace's root limit (usual container layout).
-    if let (Some(max), Some(current)) = (
-        fs::read_to_string("/sys/fs/cgroup/memory.max")
-            .ok()
-            .and_then(|v| v.trim().parse::<u64>().ok()),
-        fs::read_to_string("/sys/fs/cgroup/memory.current")
-            .ok()
-            .and_then(|v| v.trim().parse::<u64>().ok()),
-    ) {
-        total = total.min(max);
-        available = available.min(max.saturating_sub(current));
+    Some(cgroup_pressure(
+        kib("MemTotal:")?,
+        kib("MemAvailable:")?,
+        Path::new("/sys/fs/cgroup"),
+        &fs::read_to_string("/proc/self/cgroup").unwrap_or_default(),
+    ))
+}
+
+#[cfg(target_os = "linux")]
+fn cgroup_pressure(
+    mut total: u64,
+    mut available: u64,
+    root: &Path,
+    membership: &str,
+) -> (u64, u64) {
+    let relative = membership
+        .lines()
+        .find_map(|line| line.strip_prefix("0::/"))
+        .unwrap_or("");
+    let path = if Path::new(relative)
+        .components()
+        .all(|part| matches!(part, std::path::Component::Normal(_)))
+    {
+        root.join(relative)
+    } else {
+        root.to_path_buf()
+    };
+    // Every ancestor can impose the tightest limit, including a namespace root.
+    for directory in path.ancestors().take_while(|path| path.starts_with(root)) {
+        let number = |name| {
+            fs::read_to_string(directory.join(name))
+                .ok()
+                .and_then(|v| v.trim().parse::<u64>().ok())
+        };
+        if let (Some(max), Some(current)) = (number("memory.max"), number("memory.current")) {
+            total = total.min(max);
+            available = available.min(max.saturating_sub(current));
+        }
     }
-    Some((total, available))
+    (total, available)
 }
 
 #[cfg(windows)]
@@ -407,12 +444,53 @@ mod tests {
     }
 
     #[test]
+    fn pressure_can_resume_inside_a_small_cgroup() {
+        let total = 512 * 1024 * 1024;
+        assert!(pressure_paused(false, total, 100 * 1024 * 1024));
+        assert!(pressure_paused(true, total, 200 * 1024 * 1024));
+        assert!(!pressure_paused(true, total, 300 * 1024 * 1024));
+    }
+
+    #[test]
     fn pressure_hysteresis() {
         let gib = 1024 * 1024 * 1024;
         assert!(pressure_paused(false, 16 * gib, gib / 2));
         assert!(pressure_paused(true, 16 * gib, gib));
         assert!(!pressure_paused(false, 16 * gib, gib));
         assert!(!pressure_paused(true, 16 * gib, 2 * gib));
+        let mib = 1024 * 1024;
+        assert!(physical_headroom_allows(36 * mib, 100 * mib));
+        assert!(!physical_headroom_allows(36 * mib + 1, 100 * mib));
+        assert!(!physical_headroom_allows(gib, 100 * mib));
+        assert!(!physical_headroom_allows(1, 63 * mib));
+    }
+
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn nested_cgroup_limits_include_ancestors_and_ignore_bad_records() {
+        let directory = Directory::new();
+        let root = directory.0.join("cgroup");
+        let leaf = root.join("user.slice/app.scope");
+        fs::create_dir_all(&leaf).unwrap();
+        for (path, max, current) in [
+            (root.clone(), "max", "0"),
+            (root.join("user.slice"), "800", "750"),
+            (leaf.clone(), "600", "100"),
+        ] {
+            fs::write(path.join("memory.max"), max).unwrap();
+            fs::write(path.join("memory.current"), current).unwrap();
+        }
+        let member = "3:cpu:/elsewhere\n0::/user.slice/app.scope\n";
+        assert_eq!(cgroup_pressure(1000, 900, &root, member), (600, 50));
+        fs::write(leaf.join("memory.current"), "malformed").unwrap();
+        assert_eq!(cgroup_pressure(1000, 900, &root, member), (800, 50));
+        // Malformed membership cannot walk outside the mounted hierarchy.
+        fs::write(directory.0.join("memory.max"), "1").unwrap();
+        fs::write(directory.0.join("memory.current"), "1").unwrap();
+        assert_eq!(cgroup_pressure(1000, 900, &root, "0::/../"), (1000, 900));
+        assert_eq!(cgroup_pressure(1000, 900, &root, "malformed"), (1000, 900));
+        fs::remove_file(root.join("user.slice/memory.max")).unwrap();
+        assert_eq!(cgroup_pressure(1000, 900, &root, member), (1000, 900));
     }
 
     #[test]

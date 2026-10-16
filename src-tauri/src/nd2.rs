@@ -66,9 +66,14 @@ fn frame_bytes(width: u32, height: u32, bands: u32, bytes: usize) -> Result<usiz
         .ok_or_else(|| "ND2 selected frame exceeds the 256 MiB decoded-frame limit or has invalid dimensions. Export a smaller frame as TIFF.".into())
 }
 
+pub(crate) struct Preflight {
+    pub storage_bytes: u64,
+    pub positions: u32,
+}
+
 // The dependency's public parser API is pinned to 0.3.0. Check storage geometry
 // before its Dataset allocates/splits a whole acquisition frame, including padding.
-pub(crate) fn preflight(path: &Path) -> Result<u64, String> {
+pub(crate) fn preflight(path: &Path) -> Result<Preflight, String> {
     let mut source = SourceFile::open_local(path).map_err(error)?;
     let mut head = [0; 12];
     source.read_exact(&mut head).map_err(error)?;
@@ -135,9 +140,10 @@ pub(crate) fn preflight(path: &Path) -> Result<u64, String> {
             return Err("ND2 row stride is shorter than its declared pixels.".into());
         }
     }
-    if let Some(experiment) = metadata("ImageMetadataLV!", "ImageMetadata!") {
-        experiment_bounds(&experiment)?;
-    }
+    let positions = metadata("ImageMetadataLV!", "ImageMetadata!")
+        .map(|experiment| experiment_bounds(&experiment))
+        .transpose()?
+        .unwrap_or(1);
     // The decoder allocates from the on-disk header, not the map's advertised
     // length. Check that actual length even when the two intentionally differ.
     for chunk in file
@@ -168,17 +174,21 @@ pub(crate) fn preflight(path: &Path) -> Result<u64, String> {
             return Err("ND2 image chunk extends beyond its source file.".into());
         }
     }
-    Ok(if attrs.row_bytes == 0 {
+    let storage_bytes = if attrs.row_bytes == 0 {
         u64::from(attrs.width)
             * u64::from(attrs.height)
             * u64::from(attrs.components)
             * bytes as u64
     } else {
         u64::from(attrs.row_bytes) * u64::from(attrs.height)
+    };
+    Ok(Preflight {
+        storage_bytes,
+        positions,
     })
 }
 
-fn experiment_bounds(experiment: &serde_json::Value) -> Result<(), String> {
+fn experiment_bounds(experiment: &serde_json::Value) -> Result<u32, String> {
     let mut pending = vec![experiment];
     let mut counts = 0u32;
     while let Some(value) = pending.pop() {
@@ -225,22 +235,22 @@ fn experiment_bounds(experiment: &serde_json::Value) -> Result<(), String> {
                 .ok_or("ND2 supports at most 4096 positions.")?;
         }
     }
-    Ok(())
+    Ok(positions)
 }
 
-fn legacy_preflight(path: &Path, source: &mut SourceFile) -> Result<u64, String> {
+fn legacy_preflight(path: &Path, source: &mut SourceFile) -> Result<Preflight, String> {
     let file = LegacyFile::open(path).map_err(error)?;
     let (height, width, channels, bits) = file.image_header(source).map_err(error)?;
     if bits > 16 || channels == 0 || u32::from(channels) > MAX_CHANNELS {
         return Err("ND2 legacy JPEG2000 requires unsigned samples of at most 16 bits and at most 32 channel samples.".into());
     }
     frame_bytes(width, height, u32::from(channels), 2)?;
-    if let Some(experiment) = file
+    let positions = file
         .xml(source, "AIM1", 0)
         .or_else(|| file.xml(source, "AIMD", 0))
-    {
-        experiment_bounds(&experiment)?;
-    }
+        .map(|experiment| experiment_bounds(&experiment))
+        .transpose()?
+        .unwrap_or(1);
     // Check every codestream's encoded size, SIZ geometry and signedness before
     // the JPEG2000 decoder allocates its coefficient/sample planes. Its codec
     // also enforces its own fixed output and compression-ratio ceilings.
@@ -286,7 +296,10 @@ fn legacy_preflight(path: &Path, source: &mut SourceFile) -> Result<u64, String>
             );
         }
     }
-    Ok(storage_bytes)
+    Ok(Preflight {
+        storage_bytes,
+        positions,
+    })
 }
 
 pub(crate) fn description(
@@ -402,13 +415,13 @@ type Opened = (Box<dyn Dataset>, Vec<ImageInfo>, u64);
 
 #[cfg(test)]
 fn open(path: &Path) -> Result<Opened, String> {
-    let storage_bytes = preflight(path)?;
+    let preflight = preflight(path)?;
     let dataset = Nd2Reader.open(path).map_err(error)?;
     let info = dataset.info().map_err(error)?;
     if info.images.len() > MAX_POSITIONS as usize {
         return Err("ND2 supports at most 4096 positions.".into());
     }
-    Ok((dataset, info.images, storage_bytes))
+    Ok((dataset, info.images, preflight.storage_bytes))
 }
 
 #[cfg(test)]

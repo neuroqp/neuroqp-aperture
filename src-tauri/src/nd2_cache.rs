@@ -2,8 +2,9 @@
 
 use crate::memory::{Budget, Reservation};
 use crate::nd2::{self, ExtractedNd2, RawFrame, Selection};
+use crate::nd2_metadata;
 use openreadout_core::source::{ByteSource, Input, LocalFile};
-use openreadout_core::{FormatReader, ImageInfo};
+use openreadout_core::{ChannelInfo, FormatReader, ImageInfo};
 use std::collections::VecDeque;
 use std::fs::File;
 use std::io::{BufReader, Read, Seek, SeekFrom};
@@ -42,28 +43,51 @@ pub struct Cache {
 impl Cache {
     pub fn new(source: PathBuf, budget: Arc<Budget>) -> Result<Self, String> {
         let source = Arc::new(CheckedSource::open(source)?);
-        // Only bounded header reads occur before reserving parser allocations.
-        let bounds = Bounds::scan(&source.stable_path())?;
+        // First reject oversized raw blocks without reading their payloads.
+        Bounds::scan(&source.stable_path())?;
         source.check().map_err(|e| e.to_string())?;
-        let metadata = reserve_after_reclaim(&budget, bounds.metadata_workspace, false)?
-            .ok_or("ND2 metadata does not fit the application memory budget.")?;
-        let storage_bytes = nd2::preflight(&source.stable_path())?;
+        let bounds = {
+            let _validation = reserve_after_reclaim(&budget, 64 * MIB, false)?
+                .ok_or("ND2 metadata validation does not fit the application memory budget.")?;
+            let bounds = Bounds::validated(&source.stable_path())?;
+            source.check().map_err(|e| e.to_string())?;
+            bounds
+        };
+        let preflight = {
+            let _parser = reserve_after_reclaim(&budget, bounds.metadata_workspace, false)?
+                .ok_or("ND2 metadata parsing does not fit the application memory budget.")?;
+            source.check().map_err(|e| e.to_string())?;
+            nd2::preflight(&source.stable_path())?
+        };
         source.check().map_err(|e| e.to_string())?;
+        // info() clones position-specific trees as well as global metadata. Pay
+        // for that opening peak before calling it, then retain only typed summaries.
+        let opening_bytes = bounds.metadata_workspace
+            + bounds.expanded_bytes * 128 * (u64::from(preflight.positions) + 1);
+        let mut metadata = reserve_after_reclaim(&budget, opening_bytes, false)?
+            .ok_or("ND2 position metadata expansion does not fit the application memory budget.")?;
         let input = Input::from_source(&source.path, source.clone());
         let dataset = openreadout_nd2::Nd2Reader
             .open_input(&input)
             .map_err(|e| format!("ND2: {e}"))?;
-        let images = dataset.info().map_err(|e| format!("ND2: {e}"))?.images;
+        let full_images = dataset.info().map_err(|e| format!("ND2: {e}"))?.images;
+        if full_images.len() > preflight.positions as usize {
+            return Err(
+                "ND2 decoded position count exceeds its validated experiment loops.".into(),
+            );
+        }
+        let images = compact_images(full_images);
         source.check().map_err(|e| e.to_string())?;
         // The library retains split channel data internally; never retain a reader.
         drop(dataset);
         nd2::description(&images, Selection::default())?;
+        metadata.shrink(summary_bytes(&images, images.capacity()))?;
         Ok(Self {
             source,
             input,
             budget,
             images,
-            storage_bytes,
+            storage_bytes: preflight.storage_bytes,
             bounds,
             _metadata: metadata,
             frames: VecDeque::new(),
@@ -181,12 +205,11 @@ impl Cache {
             let mut dataset = openreadout_nd2::Nd2Reader
                 .open_input(&self.input)
                 .map_err(|e| format!("ND2: {e}"))?;
-            let images = dataset.info().map_err(|e| format!("ND2: {e}"))?.images;
-            nd2::decode_frame(dataset.as_mut(), &images, selection)
+            nd2::decode_frame(dataset.as_mut(), &self.images, selection)
         })();
         self.check_source()?;
         let raw = decoded?;
-        reservation.shrink(raw.pixels.len() as u64 + FRAME_OVERHEAD)?;
+        reservation.shrink(retained_frame_bytes(&raw))?;
         Ok(Some(Frame {
             raw,
             _reservation: reservation,
@@ -236,7 +259,7 @@ impl Cache {
         } else {
             0
         };
-        let result = match self.reserve(display_bytes + FRAME_OVERHEAD, background)? {
+        let result = match self.reserve(display_bytes + FRAME_OVERHEAD + metadata_bytes(&frame.raw.metadata), background)? {
             Some(_display) => nd2::write_frame(&frame.raw, output, true),
             None => Err("ND2 display conversion does not fit the application memory budget. Increase the limit in Settings.".into()),
         };
@@ -249,6 +272,84 @@ impl Cache {
         self.frames.push_back((selection, frame));
         result
     }
+}
+
+fn metadata_bytes(metadata: &ExtractedNd2) -> u64 {
+    let positions = &metadata.dimensions.positions;
+    let mut bytes = positions.capacity() as u64 * std::mem::size_of::<String>() as u64
+        + positions
+            .iter()
+            .map(|name| name.capacity() as u64)
+            .sum::<u64>()
+        + metadata.channels.capacity() as u64
+            * std::mem::size_of::<crate::channels::Channel>() as u64
+        + metadata.display_ranges.capacity() as u64 * std::mem::size_of::<[u16; 2]>() as u64;
+    for channel in &metadata.channels {
+        bytes += channel.name.capacity() as u64 + channel.color.capacity() as u64;
+    }
+    bytes
+}
+
+fn retained_frame_bytes(frame: &RawFrame) -> u64 {
+    frame.pixels.capacity() as u64 + FRAME_OVERHEAD + metadata_bytes(&frame.metadata)
+}
+
+fn compact_images(images: Vec<ImageInfo>) -> Vec<ImageInfo> {
+    fn name(value: Option<String>) -> Option<String> {
+        value.map(|value| value.chars().take(256).collect())
+    }
+    images
+        .into_iter()
+        .map(|image| {
+            let mut compact =
+                ImageInfo::new(image.index, image.size_x, image.size_y, image.pixel_type);
+            compact.name = name(image.name);
+            compact.size_c = image.size_c;
+            compact.size_z = image.size_z;
+            compact.size_t = image.size_t;
+            compact.samples_per_pixel = image.samples_per_pixel;
+            compact.physical_size = image.physical_size;
+            compact.time_increment_s = image.time_increment_s;
+            compact.channels = image
+                .channels
+                .into_iter()
+                .take(image.size_c.min(crate::channels::MAX_CHANNELS) as usize)
+                .map(|channel| ChannelInfo {
+                    index: channel.index,
+                    name: name(channel.name),
+                    color: channel.color.filter(|color| {
+                        color.len() == 7
+                            && color.starts_with('#')
+                            && color.as_bytes()[1..].iter().all(u8::is_ascii_hexdigit)
+                    }),
+                    ..ChannelInfo::default()
+                })
+                .collect();
+            compact
+        })
+        .collect()
+}
+
+// compact_images constructs fresh defaults, so these are its only heap fields.
+fn summary_bytes(images: &[ImageInfo], capacity: usize) -> u64 {
+    let mut bytes = FRAME_OVERHEAD + capacity as u64 * std::mem::size_of::<ImageInfo>() as u64;
+    for image in images {
+        bytes += image.dimension_order.capacity() as u64
+            + image.physical_size.unit.capacity() as u64
+            + image.name.as_ref().map_or(0, |name| name.capacity() as u64)
+            + image.channels.capacity() as u64 * std::mem::size_of::<ChannelInfo>() as u64;
+        for channel in &image.channels {
+            bytes += channel
+                .name
+                .as_ref()
+                .map_or(0, |name| name.capacity() as u64)
+                + channel
+                    .color
+                    .as_ref()
+                    .map_or(0, |color| color.capacity() as u64);
+        }
+    }
+    bytes
 }
 
 fn reserve_after_reclaim(
@@ -372,7 +473,28 @@ impl ByteSource for CheckedSource {
     }
 }
 
+// Pinned openreadout-nd2 0.3.0 dataset.rs::open_chunked parses these through
+// lv()/decode_any(). Its XML-only fallbacks never inflate LV data. Keep this
+// list aligned when updating the reader; other chunks still count toward raw caps.
+fn parsed_metadata_chunk(name: &[u8]) -> bool {
+    matches!(
+        name,
+        b"ImageAttributesLV!"
+            | b"ImageMetadataLV!"
+            | b"ImageMetadataSeqLV|0!"
+            | b"ImageCalibrationLV|0!"
+            | b"ImageTextInfoLV!"
+            | b"ImageEventsLV!"
+            | b"ImageEvents!"
+            | b"CustomData|ExperimentEventsV1_0!"
+            | b"CustomData|RoiMetadata_v1!"
+            | b"CustomDataVar|CustomDataV2_0!"
+            | b"CustomDataVar|AppInfo_V1_0!"
+    )
+}
+
 struct Bounds {
+    expanded_bytes: u64,
     metadata_workspace: u64,
     encoded_bytes: u64,
     legacy: bool,
@@ -382,6 +504,14 @@ impl Bounds {
     // Walk legacy boxes or stream the modern chunk map before allocating the
     // reader's parsed metadata. Pixel payloads are skipped, never read here.
     fn scan(path: &Path) -> Result<Self, String> {
+        Self::scan_inner(path, false)
+    }
+
+    fn validated(path: &Path) -> Result<Self, String> {
+        Self::scan_inner(path, true)
+    }
+
+    fn scan_inner(path: &Path, validate: bool) -> Result<Self, String> {
         let mut file = File::open(path).map_err(|e| format!("ND2: {e}"))?;
         let file_len = file.metadata().map_err(|e| format!("ND2: {e}"))?.len();
         let mut signature = [0; 12];
@@ -389,7 +519,7 @@ impl Bounds {
             .map_err(|e| format!("ND2: {e}"))?;
         let legacy = signature == openreadout_nd2::LEGACY_SIGNATURE;
         if !legacy {
-            return Self::scan_chunk_map(path, file, file_len);
+            return Self::scan_chunk_map(path, file, file_len, validate);
         }
         let mut offset = 0u64;
         let mut metadata_bytes = 0u64;
@@ -438,12 +568,18 @@ impl Bounds {
             offset += length;
         }
         Ok(Self {
-            metadata_workspace: metadata_bytes * 24 + entries * 256 + 8 * MIB,
+            expanded_bytes: metadata_bytes,
+            metadata_workspace: metadata_bytes * 128 + entries * 256 + 8 * MIB,
             encoded_bytes,
             legacy,
         })
     }
-    fn scan_chunk_map(path: &Path, mut file: File, file_len: u64) -> Result<Self, String> {
+    fn scan_chunk_map(
+        path: &Path,
+        mut file: File,
+        file_len: u64,
+        validate: bool,
+    ) -> Result<Self, String> {
         fn read(file: &mut File, offset: u64, bytes: &mut [u8]) -> Result<(), String> {
             file.seek(SeekFrom::Start(offset))
                 .and_then(|_| file.read_exact(bytes))
@@ -495,6 +631,7 @@ impl Bounds {
         let mut cursor = map_start;
         let map_end = map_start + map_bytes;
         let mut metadata_bytes = map_bytes;
+        let mut expanded_bytes = map_bytes;
         let mut encoded_bytes = 0u64;
         let mut entries = 0u64;
         let mut has_attributes = false;
@@ -522,7 +659,7 @@ impl Bounds {
             let mut item = [0; 16];
             map.read_exact(&mut item).map_err(|e| format!("ND2: {e}"))?;
             cursor += 16;
-            let (mut actual_name, _, length) = header(
+            let (mut actual_name, payload_start, length) = header(
                 &mut file,
                 u64::from_le_bytes(item[..8].try_into().unwrap()),
                 file_len,
@@ -548,6 +685,23 @@ impl Bounds {
                 if metadata_bytes > MAX_METADATA_BYTES {
                     return Err("ND2 metadata and chunk map exceed the 32 MiB input limit.".into());
                 }
+                let expanded = if validate && parsed_metadata_chunk(&actual_name) {
+                    let mut raw = vec![0; length as usize];
+                    read(&mut file, payload_start, &mut raw)?;
+                    nd2_metadata::expanded_size(&raw).map_err(|error| {
+                        let name: String = String::from_utf8_lossy(&actual_name)
+                            .chars()
+                            .take(256)
+                            .collect();
+                        format!("ND2 metadata chunk {name}: {error}")
+                    })?
+                } else {
+                    length
+                };
+                expanded_bytes = expanded_bytes
+                    .checked_add(expanded)
+                    .filter(|count| *count <= MAX_METADATA_BYTES)
+                    .ok_or("ND2 metadata and chunk map exceed the 32 MiB expanded input limit.")?;
             }
             entries += 1;
         }
@@ -555,7 +709,8 @@ impl Bounds {
             return Err("ND2 requires a nonempty chunk map containing image attributes; rescue scanning is unsupported by bounded decoding.".into());
         }
         Ok(Self {
-            metadata_workspace: metadata_bytes * 24 + entries * 256 + 8 * MIB,
+            expanded_bytes,
+            metadata_workspace: expanded_bytes * 128 + entries * 256 + 8 * MIB,
             encoded_bytes,
             legacy: false,
         })
@@ -566,6 +721,8 @@ impl Bounds {
 mod tests {
     use super::*;
     use crate::nd2::tests::{strip, synthetic, temporary};
+    use flate2::{write::ZlibEncoder, Compression};
+    use std::io::Write;
 
     #[test]
     fn raw_frames_survive_display_conversion_and_foreground_evicts_for_admission() {
@@ -587,6 +744,10 @@ mod tests {
             .collect();
         assert_eq!(cache.frames[0].1.raw.pixels, original);
         assert_eq!(cache.retained_bytes(), 8);
+        assert_eq!(
+            cache.frames[0].1._reservation.bytes(),
+            retained_frame_bytes(&cache.frames[0].1.raw)
+        );
         assert!(cache.contains(first));
         let raw_pointer = cache.frames[0].1.raw.pixels.as_ptr();
         let cached = temp.join("cached.tif");
@@ -616,6 +777,300 @@ mod tests {
         cache.clear();
         assert_eq!(cache.cached_count(), 0);
         drop(cache);
+        assert_eq!(budget.status().unwrap().used_bytes, 0);
+        drop(budget);
+        std::fs::remove_dir_all(temp).unwrap();
+    }
+
+    #[test]
+    fn frame_accounting_includes_large_name_vectors_and_spare_pixel_capacity() {
+        let image = ImageInfo::new(0, 1, 1, openreadout_core::PixelType::Uint8);
+        let mut metadata = nd2::description(&[image], Selection::default()).unwrap();
+        metadata.dimensions.positions = Vec::with_capacity(8192);
+        metadata
+            .dimensions
+            .positions
+            .extend((0..4096).map(|_| "p".into()));
+        metadata.display_ranges = Vec::with_capacity(32);
+        let mut pixels = Vec::with_capacity(1024);
+        pixels.push(1);
+        let frame = RawFrame {
+            width: 1,
+            height: 1,
+            bands: 1,
+            bytes: 1,
+            rgb: false,
+            pixels,
+            metadata,
+        };
+        let vector_bytes = 8192 * std::mem::size_of::<String>() as u64;
+        assert!(
+            retained_frame_bytes(&frame) >= 1024 + FRAME_OVERHEAD + vector_bytes + 4096 + 32 * 4
+        );
+        assert!(serde_json::to_vec(&frame.metadata).unwrap().len() < 48 * 1024);
+    }
+
+    fn metadata_source(additions: Vec<(&str, Vec<u8>)>) -> Vec<u8> {
+        let original = synthetic(16, false);
+        let mut chunks = Vec::new();
+        let mut cursor = 0;
+        loop {
+            let name_bytes =
+                u32::from_le_bytes(original[cursor + 4..cursor + 8].try_into().unwrap()) as usize;
+            let length =
+                u64::from_le_bytes(original[cursor + 8..cursor + 16].try_into().unwrap()) as usize;
+            let name = String::from_utf8(original[cursor + 16..cursor + 16 + name_bytes].to_vec())
+                .unwrap();
+            if name == openreadout_nd2::FILE_MAP_NAME {
+                break;
+            }
+            let payload =
+                original[cursor + 16 + name_bytes..cursor + 16 + name_bytes + length].to_vec();
+            chunks.push((name, payload));
+            cursor += 16 + name_bytes + length;
+        }
+        for (name, payload) in additions {
+            if let Some(chunk) = chunks.iter_mut().find(|(key, _)| key == name) {
+                chunk.1 = payload;
+            } else {
+                chunks.push((name.into(), payload));
+            }
+        }
+        let mut output = Vec::new();
+        let mut map = Vec::new();
+        for (name, payload) in chunks {
+            map.extend(name.as_bytes());
+            map.extend((output.len() as u64).to_le_bytes());
+            map.extend((payload.len() as u64).to_le_bytes());
+            output.extend(openreadout_nd2::CHUNK_MAGIC_BYTES);
+            output.extend((name.len() as u32).to_le_bytes());
+            output.extend((payload.len() as u64).to_le_bytes());
+            output.extend(name.as_bytes());
+            output.extend(payload);
+        }
+        let offset = output.len() as u64;
+        let name = openreadout_nd2::FILE_MAP_NAME;
+        output.extend(openreadout_nd2::CHUNK_MAGIC_BYTES);
+        output.extend((name.len() as u32).to_le_bytes());
+        output.extend((map.len() as u64).to_le_bytes());
+        output.extend(name.as_bytes());
+        output.extend(map);
+        output.extend(offset.to_le_bytes());
+        output
+    }
+
+    fn lv_item(name: &str, value: &serde_json::Value) -> Vec<u8> {
+        let kind = if value.is_object() {
+            11
+        } else if value.is_string() {
+            8
+        } else if value.as_u64().is_some() {
+            3
+        } else {
+            6
+        };
+        let name: Vec<u16> = name.encode_utf16().chain([0]).collect();
+        let mut raw = vec![kind, name.len().try_into().unwrap()];
+        for word in name {
+            raw.extend(word.to_le_bytes());
+        }
+        match kind {
+            3 => raw.extend((value.as_u64().unwrap() as u32).to_le_bytes()),
+            6 => raw.extend(value.as_f64().unwrap().to_le_bytes()),
+            8 => {
+                for word in value.as_str().unwrap().encode_utf16().chain([0]) {
+                    raw.extend(word.to_le_bytes());
+                }
+            }
+            _ => {
+                let children = value.as_object().unwrap();
+                raw.extend((children.len() as u32).to_le_bytes());
+                raw.extend(0u64.to_le_bytes());
+                for (name, value) in children {
+                    raw.extend(lv_item(name, value));
+                }
+                for _ in children {
+                    raw.extend(0u64.to_le_bytes());
+                }
+            }
+        }
+        raw
+    }
+
+    fn compressed_lv(value: serde_json::Value) -> Vec<u8> {
+        let raw: Vec<u8> = value
+            .as_object()
+            .unwrap()
+            .iter()
+            .flat_map(|(name, value)| lv_item(name, value))
+            .collect();
+        compressed_bytes(&raw)
+    }
+
+    fn compressed_bytes(raw: &[u8]) -> Vec<u8> {
+        let mut encoder = ZlibEncoder::new(Vec::new(), Compression::fast());
+        encoder.write_all(raw).unwrap();
+        let mut output = vec![76; 10];
+        output.extend(encoder.finish().unwrap());
+        output
+    }
+
+    fn experiment_xml(positions: u32) -> Vec<u8> {
+        format!(r#"<variant><no_name><eType runtype="lx_uint32" value="1"/><uLoopPars><uiCount runtype="lx_uint32" value="2"/><dPeriod runtype="double" value="2000"/></uLoopPars><ppNextLevelEx><i0><eType runtype="lx_uint32" value="2"/><uLoopPars><uiCount runtype="lx_uint32" value="{positions}"/></uLoopPars><ppNextLevelEx><i0><eType runtype="lx_uint32" value="4"/><uLoopPars><uiCount runtype="lx_uint32" value="2"/><dZStep runtype="double" value="1.5"/></uLoopPars></i0></ppNextLevelEx></i0></ppNextLevelEx></no_name></variant>"#).into_bytes()
+    }
+
+    #[test]
+    fn compressed_metadata_is_bounded_and_compacted_without_losing_display_information() {
+        let temp = temporary();
+        let source = temp.join("compressed-metadata.nd2");
+        let attrs = serde_json::json!({"uiWidth":2,"uiHeight":1,"uiComp":2,"uiWidthBytes":8,
+            "uiBpcInMemory":16,"uiBpcSignificant":16,"uiSequenceCount":8,"ePixelType":1,"eCompression":2});
+        let seq = serde_json::json!({"dCalibration":0.25,"unused": "microscope".repeat(1024),
+            "sPicturePlanes":{"sPlaneNew":{
+                "a0":{"uiCompCount":1,"sDescription":"DAPI","uiColor":4278190335u32},
+                "a1":{"uiCompCount":1,"sDescription":"CY5","uiColor":4278255360u32}}}});
+        let bytes = metadata_source(vec![
+            ("ImageAttributesLV!", compressed_lv(attrs)),
+            ("ImageMetadata!", experiment_xml(2)),
+            ("ImageMetadataSeqLV|0!", compressed_lv(seq)),
+        ]);
+        std::fs::write(&source, &bytes).unwrap();
+        let raw = Bounds::scan(&source).unwrap();
+        let expanded = Bounds::validated(&source).unwrap();
+        assert!(expanded.expanded_bytes > raw.expanded_bytes);
+        assert!(expanded.metadata_workspace > raw.metadata_workspace);
+        assert_eq!(nd2::preflight(&source).unwrap().positions, 2);
+        let budget = Budget::new(temp.join("budget")).unwrap();
+        let mut cache = Cache::new(source.clone(), Arc::clone(&budget)).unwrap();
+        assert_eq!(
+            cache._metadata.bytes(),
+            summary_bytes(&cache.images, cache.images.capacity())
+        );
+        assert!(cache._metadata.bytes() < expanded.metadata_workspace);
+        assert!(cache
+            .images
+            .iter()
+            .all(|image| image.physical_size.unit == "µm"));
+        assert!(cache.images.iter().all(|image| image.extra.is_empty()
+            && image.objective.is_none()
+            && image.instrument.is_none()));
+        let result = cache
+            .extract_display(
+                &temp.join("metadata.tif"),
+                Selection {
+                    position: 1,
+                    z: 1,
+                    time: 1,
+                },
+            )
+            .unwrap();
+        assert_eq!(
+            result
+                .channels
+                .iter()
+                .map(|channel| (&*channel.name, &*channel.color))
+                .collect::<Vec<_>>(),
+            [("DAPI", "#FF0000"), ("CY5", "#00FF00")]
+        );
+        let calibration = result.calibration.unwrap();
+        assert_eq!(calibration.pixel_width_um, Some(0.25));
+        assert_eq!(calibration.pixel_height_um, Some(0.25));
+        assert_eq!(calibration.z_step_um, Some(1.5));
+        assert_eq!(calibration.time_increment_seconds, Some(2.0));
+        assert_eq!(result.display_ranges, [[71, 73], [72, 74]]);
+        assert_eq!(std::fs::read(&source).unwrap(), bytes);
+        drop(cache);
+        assert_eq!(budget.status().unwrap().used_bytes, 0);
+        drop(budget);
+        std::fs::remove_dir_all(temp).unwrap();
+    }
+
+    #[test]
+    fn position_metadata_peak_is_admitted_before_reader_info_is_materialized() {
+        let temp = temporary();
+        let source = temp.join("many-positions.nd2");
+        let bytes = metadata_source(vec![
+            ("ImageMetadata!", experiment_xml(4096)),
+            (
+                "ImageMetadataSeqLV|0!",
+                compressed_lv(serde_json::json!({"unused":"x".repeat(8192)})),
+            ),
+        ]);
+        std::fs::write(&source, bytes).unwrap();
+        assert_eq!(nd2::preflight(&source).unwrap().positions, 4096);
+        let budget = Budget::new(temp.join("budget")).unwrap();
+        budget.set_limit(crate::memory::MIN_LIMIT_BYTES).unwrap();
+        let error = Cache::new(source, Arc::clone(&budget)).err().unwrap();
+        assert!(error.contains("position metadata expansion"), "{error}");
+        assert_eq!(budget.status().unwrap().used_bytes, 0);
+        drop(budget);
+        std::fs::remove_dir_all(temp).unwrap();
+    }
+
+    #[test]
+    fn ignored_and_xml_only_chunks_do_not_get_misread_as_compressed_lv() {
+        let temp = temporary();
+        let source = temp.join("ignored-lv0z.nd2");
+        // This vendor-specific LV0Z envelope starts with 76 but its zlib stream
+        // is not at the LV type-76 offset. The reader does not parse this chunk.
+        let opaque = b"LV0Zr\0\0\0\0\0\0\0\x78\x9c".to_vec();
+        assert!(nd2_metadata::expanded_size(&opaque).is_err());
+        let bytes = metadata_source(vec![
+            ("CustomData|CustomDescriptionV1_0!", opaque.clone()),
+            ("CustomData|unknown!", opaque.clone()),
+            ("ImageTextInfo!", opaque),
+        ]);
+        std::fs::write(&source, &bytes).unwrap();
+        let raw = Bounds::scan(&source).unwrap();
+        let validated = Bounds::validated(&source).unwrap();
+        assert_eq!(validated.expanded_bytes, raw.expanded_bytes);
+        let budget = Budget::new(temp.join("budget")).unwrap();
+        let mut cache = Cache::new(source.clone(), Arc::clone(&budget)).unwrap();
+        let output = temp.join("ignored-lv0z.tif");
+        let result = cache
+            .extract_display(&output, Selection::default())
+            .unwrap();
+        assert_eq!(result.display_ranges, [[1, 3], [2, 4]]);
+        assert_eq!(strip(&output), [0, 0, 255, 255]);
+        assert_eq!(std::fs::read(&source).unwrap(), bytes);
+        drop(cache);
+        assert_eq!(budget.status().unwrap().used_bytes, 0);
+        drop(budget);
+        std::fs::remove_dir_all(temp).unwrap();
+    }
+
+    #[test]
+    fn parsed_compression_errors_identify_the_metadata_chunk() {
+        let temp = temporary();
+        let source = temp.join("bad-parsed-lv.nd2");
+        std::fs::write(
+            &source,
+            metadata_source(vec![("ImageTextInfoLV!", vec![76; 26])]),
+        )
+        .unwrap();
+        let error = Bounds::validated(&source).err().unwrap();
+        assert!(error.contains("ImageTextInfoLV!"), "{error}");
+        assert!(error.contains("compressed metadata is invalid"), "{error}");
+        std::fs::remove_dir_all(temp).unwrap();
+    }
+
+    #[test]
+    fn metadata_expansion_is_shared_across_compressed_chunks_before_parsing() {
+        let temp = temporary();
+        let source = temp.join("aggregate-metadata.nd2");
+        let packed = compressed_bytes(&vec![0; 17 * 1024 * 1024]);
+        std::fs::write(
+            &source,
+            metadata_source(vec![
+                ("ImageTextInfoLV!", packed.clone()),
+                ("ImageMetadataSeqLV|0!", packed),
+            ]),
+        )
+        .unwrap();
+        assert!(Bounds::scan(&source).is_ok());
+        let budget = Budget::new(temp.join("budget")).unwrap();
+        let error = Cache::new(source, Arc::clone(&budget)).err().unwrap();
+        assert!(error.contains("32 MiB expanded"), "{error}");
         assert_eq!(budget.status().unwrap().used_bytes, 0);
         drop(budget);
         std::fs::remove_dir_all(temp).unwrap();

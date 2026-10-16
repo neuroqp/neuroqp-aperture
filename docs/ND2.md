@@ -65,7 +65,10 @@ memory are separate. OSD's channel-aware tile-cache target remains soft because
 visible tiles must stay available. The disk cache has its own 2 GiB limit.
 A decoded selected frame is additionally limited to 256 MiB. Encoded frames are
 limited to 257 MiB, positions to 4096, and the serialized position/channel summary
-to 48 KiB. The integration validates storage geometry and actual chunk headers
+to 48 KiB. Encoded and recursively expanded metadata are capped at 32 MiB
+before reader parsing. Opening reserves JSON/position-cloning workspaces, then
+retains compact typed summaries instead of full vendor trees. The integration
+validates storage geometry and actual chunk headers
 before pixel decoding. Whole-frame decoding remains the principal scaling limit;
 region decoding and time playback are not implemented.
 
