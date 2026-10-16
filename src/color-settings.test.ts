@@ -225,3 +225,48 @@ test("the connection transfer function scales its ramp and clamped plateau", () 
     [0, 0, 0],
   );
 });
+
+test("single-channel viewing filters display connections without changing adjustments", async () => {
+  const { visibleChannelSettings } = await import("./color-settings.ts");
+  const settings = defaultColorSettings([
+    { id: "0", name: "DAPI" },
+    { id: "1", name: "FITC" },
+  ]);
+  settings.connections[1].brightness = 37;
+  const selected = visibleChannelSettings(settings, 1);
+  assert.equal(selected.connections.length, 1);
+  assert.equal(selected.connections[0].source, "1");
+  assert.equal(selected.connections[0].brightness, 37);
+  assert.equal(settings.connections.length, 2);
+  assert.equal(visibleChannelSettings(settings, -1), settings);
+});
+
+test("color layouts initialize after empty metadata and reset when channel identity changes", async () => {
+  const { sameColorChannels } = await import("./color-settings.ts");
+  const channels = [
+    { id: "0", name: "DAPI", color: "#0000ff" },
+    { id: "1", name: "FITC", color: "#00ff00" },
+  ];
+  assert.equal(sameColorChannels([], channels), false);
+  assert.equal(
+    sameColorChannels(
+      channels,
+      channels.map((channel) => ({ ...channel })),
+    ),
+    true,
+  );
+  assert.equal(sameColorChannels(channels, channels.slice(0, 1)), false);
+  assert.equal(sameColorChannels(channels, [...channels].reverse()), false);
+  for (const replacement of [
+    { id: "2" },
+    { name: "TRITC" },
+    { color: "#ff0000" },
+  ])
+    assert.equal(
+      sameColorChannels(channels, [
+        { ...channels[0], ...replacement },
+        channels[1],
+      ]),
+      false,
+    );
+});

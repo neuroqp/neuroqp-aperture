@@ -16,6 +16,13 @@ Point type, color, and size buttons preview the current combination. The header'
 sun/moon button switches light and dark modes and remembers your choice; the
 initial theme follows the system.
 
+Nikon ND2 files can be browsed through the **Dimensions** toolbar button. Choose
+Position, Z, Time or Channel, then use the range, arrow buttons or mouse wheel over
+the control. Channel includes the composite and each named channel. This initial
+Rust reader supports unsigned 8/16-bit channels and single-channel RGB acquisitions;
+it loads one selected frame at a time. ND2 annotation editing, saving and scientific
+export are not implemented. See [ND2 support](docs/ND2.md) for limits and validation.
+
 ## Multiple windows and file opening
 
 Each Aperture window displays one image. Launch another copy or press **Ctrl+N**

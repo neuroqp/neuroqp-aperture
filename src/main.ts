@@ -30,11 +30,14 @@ import { bindUpdates, updatePanel } from "./updates";
 import { loadChannelHistograms } from "./display";
 import { channelHistograms } from "./display-settings";
 import { bindColorPanel } from "./color-panel";
+import { bindDimensionNavigation } from "./dimension-navigation";
+import { visibleChannelSettings } from "./color-settings";
 import { bindColorRenderer } from "./color-renderer";
 import { createGpuColorDrawer } from "./gpu-color-drawer";
 import { fitInitialImage } from "./initial-fit";
 import {
   ImageLoader,
+  imageTileCacheCount,
   orientation,
   preview,
   pyramid,
@@ -75,6 +78,7 @@ document.querySelector<HTMLDivElement>("#app")!.innerHTML = `
   <nav class="quick-bar" aria-label="Image tools">
     <div class="tool-group" role="group" aria-label="Image adjustments and annotation tools">
       ${tool("color-button", "color", "Color", true)}
+      ${tool("navigator-button", "navigator", "Dimensions", true)}
       ${tool("points-button", "points", "Multi-point", true)}
     </div>
     <div class="load-status">
@@ -124,13 +128,29 @@ const native = isTauri();
 const windowHandle = native ? getCurrentWindow() : null;
 let colorRenderer: ReturnType<typeof bindColorRenderer> | undefined;
 const colorPanel = bindColorPanel(() => colorRenderer?.refresh());
+const dimensionNavigation = bindDimensionNavigation(
+  async (position, z, time, hint) => {
+    if (
+      !native ||
+      saving ||
+      dialogOpen ||
+      $("settings-dialog").hasAttribute("open")
+    )
+      return false;
+    setLoading(true);
+    return loader.selectPlane(position, z, time, hint);
+  },
+  () => colorRenderer?.refresh(),
+);
+const displayColors = () =>
+  visibleChannelSettings(colorPanel.settings(), dimensionNavigation.channel());
 const colorError = (message: string) => {
   tileError = message;
   if (currentImage) showImage(currentImage);
 };
 const GpuColorDrawer = createGpuColorDrawer(
   OpenSeadragon,
-  () => colorPanel.settings(),
+  displayColors,
   (message) => queueMicrotask(() => colorError(message)),
 );
 const viewer = OpenSeadragon({
@@ -146,7 +166,7 @@ const viewer = OpenSeadragon({
   crossOriginPolicy: "Anonymous",
   imageSmoothingEnabled: false,
   imageLoaderLimit: 4,
-  maxImageCacheCount: 128,
+  maxImageCacheCount: imageTileCacheCount(),
   timeout: 600_000,
   blendTime: 0.12,
   animationTime: 0.25,
@@ -162,7 +182,7 @@ if (new URLSearchParams(location.search).has("colorBenchmark")) {
 
 colorRenderer = bindColorRenderer(
   viewer,
-  () => colorPanel.settings(),
+  displayColors,
   colorError,
   (imageId, data) => {
     if (currentId === imageId)
@@ -171,7 +191,6 @@ colorRenderer = bindColorRenderer(
       );
   },
 );
-let colorImageId: string | null = null;
 
 let currentImage: ImageState | null = null;
 let rois: PointRoi[] = [];
@@ -382,12 +401,19 @@ async function saveAnnotations() {
 
 let currentId: string | null = null;
 let previewAdded = false;
+let previewDisplayed = false;
+let pendingPreview: OpenSeadragon.TiledImage | null = null;
+const loadedImages = new WeakSet<OpenSeadragon.TiledImage>();
+viewer.addHandler("tile-loaded", (event) => {
+  loadedImages.add(event.tiledImage);
+});
 let pyramidAdded = false;
 let dialogOpen = false;
 let loading = false;
 let tileError: string | null = null;
 let histogramLoad: AbortController | null = null;
 let cancelInitialFit: (() => void) | undefined;
+let pendingViewportBounds: OpenSeadragon.Rect | null = null;
 const downloads = new Set<OpenSeadragon.ImageJob>();
 const tileUrl = (id: string) => convertFileSrc(id, "aperture");
 
@@ -439,7 +465,7 @@ function setLoading(active: boolean, progress: number | null = null) {
   );
 }
 
-function resetViewer() {
+function resetViewer(preserveDisplay = false) {
   cancelInitialFit?.();
   cancelInitialFit = undefined;
   histogramLoad?.abort();
@@ -458,13 +484,19 @@ function resetViewer() {
   annotationViewer.setRois([]);
   updatePointTool();
   previewAdded = false;
+  previewDisplayed = false;
+  if (pendingPreview) viewer.world.removeItem(pendingPreview);
+  pendingPreview = null;
   pyramidAdded = false;
   tileError = null;
-  viewer.close();
+  if (!preserveDisplay) viewer.close();
   for (const job of downloads) job.abort();
   downloads.clear();
-  colorImageId = null;
-  colorPanel.setChannels([]);
+  if (!preserveDisplay) {
+    pendingViewportBounds = null;
+    colorPanel.setChannels([]);
+    dimensionNavigation.setImage(null);
+  }
   colorPanel.setEnabled(false);
   document
     .querySelectorAll<HTMLButtonElement>("[data-image-control]")
@@ -485,42 +517,69 @@ function showImage(state: ImageState) {
     selectedPath = state.path;
     folder.select(state.path);
   }
+  const previousImage = currentImage;
+  const sameDimensions = Boolean(
+    state.dimensions &&
+    previousImage?.dimensions &&
+    state.path &&
+    state.path === previousImage.path,
+  );
+  const preservedBounds =
+    currentId !== state.id && sameDimensions
+      ? viewer.world.getItemCount() > 0
+        ? viewer.viewport.getBounds()
+        : pendingViewportBounds
+      : null;
   if (currentId !== state.id) {
-    resetViewer();
+    resetViewer(sameDimensions);
+    pendingViewportBounds = preservedBounds;
     currentId = state.id;
-    void invoke<PointRoi[]>("load_annotations", { id: state.id }).then(
-      (loaded) => {
-        if (currentId !== state.id) return;
-        rois = loaded;
-        tools.setPointSettings(
-          settingsForRois(rois, tools.pointSettings().counter),
-        );
-        annotationsReady = true;
-        annotationViewer.setRois(rois);
-        updatePointTool();
-      },
-      (error) => {
-        if (
-          currentId !== state.id ||
-          String(error) === "Image replaced or cancelled."
-        )
-          return;
-        annotationError = `Annotations could not load: ${String(error)}`;
-        $("status").textContent = annotationError;
-        $("status").classList.add("error");
-      },
-    );
+    if (state.readOnly) tools.deactivatePoints();
+    else
+      void invoke<PointRoi[]>("load_annotations", { id: state.id }).then(
+        (loaded) => {
+          if (currentId !== state.id) return;
+          rois = loaded;
+          tools.setPointSettings(
+            settingsForRois(rois, tools.pointSettings().counter),
+          );
+          annotationsReady = true;
+          annotationViewer.setRois(rois);
+          updatePointTool();
+        },
+        (error) => {
+          if (
+            currentId !== state.id ||
+            String(error) === "Image replaced or cancelled."
+          )
+            return;
+          annotationError = `Annotations could not load: ${String(error)}`;
+          $("status").textContent = annotationError;
+          $("status").classList.add("error");
+        },
+      );
   }
   currentImage = state;
-  if (state.channels?.length && colorImageId !== state.id) {
-    colorImageId = state.id;
-    colorPanel.setChannels(
-      state.channels.map((channel, index) => ({
-        id: String(index),
-        ...channel,
-      })),
-    );
-  }
+  // OSD has no public setter. This is its eviction target; visible tiles stay resident.
+  (
+    viewer.tileCache as OpenSeadragon.TileCache & { _maxCacheItemCount: number }
+  )._maxCacheItemCount = imageTileCacheCount(state.channels?.length || 3);
+  dimensionNavigation.setImage(
+    state,
+    sameDimensions || previousImage?.id === state.id,
+  );
+  $("points-button").setAttribute(
+    "title",
+    state.readOnly ? "Annotations unavailable for ND2" : "Multi-point",
+  );
+  $<HTMLButtonElement>("points-button").disabled = Boolean(state.readOnly);
+  colorPanel.setChannels(
+    (state.channels ?? []).map((channel, index) => ({
+      id: String(index),
+      ...channel,
+    })),
+    sameDimensions || previousImage?.id === state.id,
+  );
   if (state.width > 0) annotationViewer.setImage(state);
   $("filename").textContent = state.name;
   $("filename").classList.toggle("unsaved", dirty);
@@ -552,7 +611,9 @@ function showImage(state: ImageState) {
               : state.width > 0
                 ? "Building preview…"
                 : "Reading image…"
-            : ""));
+            : state.readOnly
+              ? "ND2 browsing only · annotations unavailable"
+              : ""));
   if ($("status").textContent !== status) $("status").textContent = status;
   $("status").title = errorStatus || saveNotice || state.detail || status;
   const transform = orientation(state.orientation);
@@ -579,6 +640,8 @@ function showImage(state: ImageState) {
         () => {},
       );
     }
+    const viewportBounds = pendingViewportBounds;
+    pendingViewportBounds = null;
     viewer.addTiledImage({
       tileSource: trackDownloads(
         colorRenderer!.wrapSource(
@@ -590,7 +653,9 @@ function showImage(state: ImageState) {
       ),
       ...transform,
       width: 1,
-      index: 0,
+      index: viewer.world.getItemCount(),
+      opacity: sameDimensions ? 0 : 1,
+      preload: true,
       success: (event) => {
         if (currentId !== state.id) {
           viewer.world.removeItem(
@@ -598,13 +663,41 @@ function showImage(state: ImageState) {
           );
           return;
         }
-        cancelInitialFit = fitInitialImage(viewer);
-        colorPanel.setEnabled(Boolean(state.channels?.length));
-        document
-          .querySelectorAll<HTMLButtonElement>("[data-image-control]")
-          .forEach((button) => (button.disabled = false));
-        updatePointTool();
-        if (state.tilesReady) addPyramid(state);
+        const item = (event as unknown as { item: OpenSeadragon.TiledImage })
+          .item;
+        pendingPreview = item;
+        if (!sameDimensions || viewer.world.getItemCount() === 1) {
+          if (viewportBounds) viewer.viewport.fitBounds(viewportBounds, true);
+          else cancelInitialFit = fitInitialImage(viewer);
+        }
+        const display = () => {
+          // OSD can report fully loaded after its only tile failed.
+          if (!item.getFullyLoaded() || !loadedImages.has(item)) return;
+          item.removeHandler("fully-loaded-change", display);
+          if (currentId !== state.id) {
+            viewer.world.removeItem(item);
+            return;
+          }
+          pendingPreview = null;
+          // Keep the previous plane visible until all channels of this preview are ready.
+          const previous = Array.from(
+            { length: viewer.world.getItemCount() },
+            (_, index) => viewer.world.getItemAt(index),
+          );
+          item.setOpacity(1);
+          for (const old of previous)
+            if (old !== item) viewer.world.removeItem(old);
+          previewDisplayed = true;
+          colorPanel.setEnabled(Boolean(state.channels?.length));
+          document
+            .querySelectorAll<HTMLButtonElement>("[data-image-control]")
+            .forEach((button) => (button.disabled = false));
+          updatePointTool();
+          if (currentImage?.id === state.id && currentImage.tilesReady)
+            addPyramid(currentImage);
+        };
+        item.addHandler("fully-loaded-change", display);
+        display();
       },
       error: () => {
         if (currentId === state.id)
@@ -612,8 +705,7 @@ function showImage(state: ImageState) {
       },
     });
   }
-  if (state.tilesReady && previewAdded && viewer.world.getItemCount() > 0)
-    addPyramid(state);
+  if (state.tilesReady && previewDisplayed) addPyramid(state);
 }
 
 function addPyramid(state: ImageState) {
@@ -647,6 +739,15 @@ function addPyramid(state: ImageState) {
 const loader = new ImageLoader(
   {
     open: (path) => invoke<ImageState>("open_image", { path }),
+    selectPlane: (id, position, z, time, hint) =>
+      invoke<ImageState>("select_plane", {
+        id,
+        position,
+        z,
+        time,
+        navigationAxis: hint?.axis,
+        navigationDirection: hint?.direction,
+      }),
     state: () => invoke<ImageState | null>("image_state"),
     cancel: () => invoke("cancel_load"),
     listen: native
