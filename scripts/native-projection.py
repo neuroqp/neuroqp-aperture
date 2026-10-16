@@ -267,6 +267,27 @@ def main():
         both = ready(primary, 'zTime')
         assert plane_hash(both) == projection_hashes['zTime']
         screenshot('nd2-max-projection')
+        # The pinned reader exposes global Z/time counts for every position.
+        # Inject a singleton metadata update through the production event path
+        # to exercise the UI contract without claiming a heterogeneous-file test.
+        def singleton_metadata():
+            current = state()
+            current['revision'] += 1
+            current['dimensions'].update(z=1, time=1, zIndex=0, timeIndex=0)
+            result = invoke('plugin:event|emit', {'event': 'image-state', 'payload': current})
+            assert not isinstance(result, dict) or not result.get('error'), result
+
+        singleton_metadata()
+        wait(lambda: js("return ['dimension-max-z','dimension-max-time'].every(id=>{const e=document.getElementById(id);return e.checked && !e.disabled;});"), 'active singleton projections remain clearable')
+        project('time')
+        singleton_metadata()
+        wait(lambda: js("const z=document.getElementById('dimension-max-z'),t=document.getElementById('dimension-max-time');return !z.checked && z.disabled && t.checked && !t.disabled;"), 'inactive singleton Z disabled, active Time clearable')
+        cleared = project('none')
+        assert plane_hash(cleared) == source_hash
+        retained(expected_display)
+        framebuffer()
+        report['checks']['singletonMetadataAllowsClearingEachProjection'] = True
+        both = project('zTime')
         # Backend-only contract phase. Reopen through the UI before rendered checks.
         canonical = invoke('select_plane', {'id': both['id'], 'position': 0, 'z': 4, 'time': 2, 'projection': 'zTime'})
         assert not canonical.get('error'), canonical

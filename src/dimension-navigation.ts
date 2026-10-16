@@ -91,10 +91,12 @@ export function bindDimensionNavigation(
       : `${selected.index + 1} / ${selected.count}`;
     get("dimension-name").textContent = selected.name;
     get("dimension-projections").hidden = !spatial;
-    maxZ.disabled = !spatial || (image?.dimensions?.z ?? 1) <= 1;
-    maxTime.disabled = !spatial || (image?.dimensions?.time ?? 1) <= 1;
     maxZ.checked = projectsAxis(planeNavigation.projection, "z");
     maxTime.checked = projectsAxis(planeNavigation.projection, "time");
+    maxZ.disabled =
+      !spatial || (!maxZ.checked && (image?.dimensions?.z ?? 1) <= 1);
+    maxTime.disabled =
+      !spatial || (!maxTime.checked && (image?.dimensions?.time ?? 1) <= 1);
     const projectionStatus = get("dimension-projection-status");
     projectionStatus.hidden = planeNavigation.projection === "none";
     projectionStatus.textContent =
