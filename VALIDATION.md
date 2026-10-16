@@ -1124,3 +1124,22 @@ builds, Prettier and rustfmt passed. Rust checks cover ordinary JPEG validation,
 channel PNG validation, channel-cache reuse and both preview-generation paths.
 Ignored evidence is under `artifacts/connection-brightness/`; fixtures and
 screenshots are not committed. Windows packages were not exercised here.
+
+## Draggable Color range graph
+
+The October 16, 2026 Linux native Tauri/WebDriver check now exercises real
+pointer drags on both cutoff lines and the brightness plateau in WebGL2 and
+forced CPU rendering. It verifies horizontal/vertical cursors and background
+highlights in both themes, grab-offset retention, synchronized slider values,
+framebuffer changes, out-of-graph clamping, adjacent cutoffs, and brightness
+access at a 255 white point and 0%/100% output. Pointer release, cancellation,
+lost capture, panel closure, connection selection and image replacement all
+end the old gesture. Cancellation is supplied as a pointer event; file-picker
+responses are supplied by the harness. Ordinary drag input is delivered through
+native WebDriver pointer actions. The Linear/Log toggle is below the plot.
+
+The isolated production component also passed hover, disabled-state and
+640-by-400 overflow checks through the T3 browser. Native light/dark screenshots
+were inspected. The 76 frontend tests, Prettier, TypeScript, frontend build,
+embedded Linux native build and independent code review passed. Local runnable
+checks and screenshots remain ignored under `artifacts/graph-controls/`.

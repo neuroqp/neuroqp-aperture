@@ -328,3 +328,60 @@
     width: min(112px, 34%);
   }
 }
+.color-range-controls {
+  position: relative;
+  touch-action: none;
+  user-select: none;
+}
+.color-range-highlights {
+  position: absolute;
+  inset: 1px;
+  overflow: hidden;
+  pointer-events: none;
+}
+.color-range-highlight {
+  position: absolute;
+  background: color-mix(in srgb, var(--accent) 20%, transparent);
+  opacity: 0;
+}
+.color-range-highlight.minimum,
+.color-range-highlight.maximum {
+  top: 0;
+  bottom: 0;
+  width: 20px;
+  transform: translateX(-50%);
+}
+.color-range-highlight.minimum {
+  left: var(--minimum);
+}
+.color-range-highlight.maximum {
+  left: var(--maximum);
+}
+.color-range-highlight.brightness {
+  left: min(var(--maximum), calc(100% - 20px));
+  right: 0;
+  top: var(--brightness);
+  height: 20px;
+  transform: translateY(-50%);
+}
+.color-range-controls[data-graph-field="minimum"],
+.color-range-controls[data-graph-field="maximum"] {
+  cursor: ew-resize;
+}
+.color-range-controls[data-graph-field="brightness"] {
+  cursor: ns-resize;
+}
+.color-range-controls[data-graph-field="minimum"] .minimum,
+.color-range-controls[data-graph-field="maximum"] .maximum,
+.color-range-controls[data-graph-field="brightness"] .brightness {
+  opacity: 1;
+}
+.color-inspector .range-labels {
+  position: relative;
+}
+.color-inspector .histogram-scale {
+  top: 0;
+  right: 24px;
+  padding: 0 5px;
+  line-height: 1.2;
+}

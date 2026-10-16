@@ -215,9 +215,11 @@ No microscopy source files are modified.
   points; closing the panel or selecting Pan leaves placement mode. Imported
   ImageJ point selections and overlays remain editable annotations.
 - Select a wire in Color to adjust its Minimum/Maximum range and Brightness.
-  Brightness runs from 0 to 100% and scales the channel's contribution without
+  Drag the graph's black/white cutoff lines horizontally or its right-hand
+  plateau vertically for brightness. Hover highlights each target and shows
+  its drag direction. Brightness runs from 0 to 100% and scales the channel's contribution without
   changing the input white point. The approximate source histogram uses 8-bit
-  display samples, with linear counts and an optional Log toggle on hover.
+  display samples, with linear counts and a Linear/Log toggle below the graph.
   Percentile presets change only the input range; Reset restores 0–255 and
   100% brightness for that connection. Original images and cached tiles stay
   unchanged.

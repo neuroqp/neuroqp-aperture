@@ -143,12 +143,19 @@ on Open, folder navigation or Close. Cancellation or save failure must retain un
   no light; 50% halves the contribution, including the white-point plateau.
   Plot this scaled ramp with vertical input cutoff lines over an approximate
   histogram of the original source channel's 8-bit display samples.
+  Drag the black-point or white-point line horizontally to adjust its input
+  cutoff; drag the right-hand plateau vertically to adjust brightness. Each
+  target highlights its background on hover and while dragging, with horizontal
+  or vertical resize cursors. Keep brightness reachable at a white point of 255
+  and at 0%/100% brightness. Capture the pointer during dragging, clamp values
+  to the same bounds as the sliders, and stop on release, cancellation, panel
+  closure or image/connection replacement. Sliders remain keyboard accessible.
   Provide percentile presets 0–100, 0.1–99.9, 0.5–99.5, and 1–99 beside Reset.
   The 0–100 preset uses the sampled occupied minimum and maximum. Presets change
   only the selected connection's input range and retain its brightness.
   Reset restores that connection's full 0–255 range and 100% brightness.
-  The histogram defaults to linear counts; its upper-right Linear/Log toggle
-  appears on hover or keyboard focus and changes only histogram heights.
+  The histogram defaults to linear counts; its Linear/Log toggle sits below
+  the graph, clear of its drag targets, and changes only histogram heights.
   Input ranges use the 8-bit display domain, not original high-bit-depth values.
   Selection and keyboard focus follow the curved wire with a glow in its current
   line color, without a
