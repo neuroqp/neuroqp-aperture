@@ -2,9 +2,11 @@ import { icon } from "./icons";
 import {
   PlaneNavigation,
   dimensionAxis,
+  projectsAxis,
   type DimensionAxis,
   type ImageState,
   type NavigationHint,
+  type ProjectionMode,
 } from "./image";
 
 export const dimensionPanelMarkup = `
@@ -13,6 +15,11 @@ export const dimensionPanelMarkup = `
     <label class="dimension-axis">Scroll <select id="dimension-axis" aria-label="Dimension"><option value="position">Position</option><option value="z">Z</option><option value="time">Time</option><option value="channel">Channel</option></select><output id="dimension-count" aria-live="polite"></output></label>
     <div id="dimension-scroll" class="dimension-scroll"><button id="dimension-previous" class="tool" type="button" aria-label="Previous dimension value">${icon("previous")}</button><input id="dimension-range" type="range" min="1" max="1" value="1" aria-label="Position"><button id="dimension-next" class="tool" type="button" aria-label="Next dimension value">${icon("next")}</button></div>
     <div id="dimension-name" class="dimension-name"></div>
+    <div id="dimension-projections" class="dimension-projections" role="group" aria-label="Maximum intensity projection" hidden>
+      <label title="Maximum intensity across all Z planes"><input id="dimension-max-z" type="checkbox">Z max</label>
+      <label title="Maximum intensity across all time points"><input id="dimension-max-time" type="checkbox">Time max</label>
+    </div>
+    <p id="dimension-projection-status" class="dimension-scope" role="status" hidden></p>
     <p id="dimension-calibration" class="dimension-scope" hidden></p>
     <p id="dimension-display" class="dimension-scope" hidden>16-bit display ranges adapt to each frame and channel. Brightness across frames is not quantitative.</p>
     <p id="dimension-scope" class="dimension-scope" hidden>ND2 browsing only. Annotation editing and saving are unavailable.</p>
@@ -24,6 +31,7 @@ export function bindDimensionNavigation(
     z: number,
     time: number,
     hint?: NavigationHint,
+    projection?: ProjectionMode,
   ) => Promise<boolean>,
   channelChanged: () => void,
 ) {
@@ -33,6 +41,8 @@ export function bindDimensionNavigation(
   const range = get<HTMLInputElement>("dimension-range");
   const previous = get<HTMLButtonElement>("dimension-previous");
   const next = get<HTMLButtonElement>("dimension-next");
+  const maxZ = get<HTMLInputElement>("dimension-max-z");
+  const maxTime = get<HTMLInputElement>("dimension-max-time");
   let image: ImageState | null = null;
   let channel = -1;
   const selectedAxis = () => {
@@ -41,6 +51,7 @@ export function bindDimensionNavigation(
       image?.dimensions && plane
         ? {
             ...image,
+            projection: planeNavigation.projection,
             dimensions: {
               ...image.dimensions,
               position: plane.position,
@@ -59,7 +70,8 @@ export function bindDimensionNavigation(
     const enabled =
       axis.value === "channel" ? Boolean(image?.previewReady) : spatial;
     axis.disabled = !image;
-    range.disabled = !enabled || selected.count <= 1;
+    const projected = Boolean("projected" in selected && selected.projected);
+    range.disabled = !enabled || selected.count <= 1 || projected;
     previous.disabled = range.disabled || selected.index <= 0;
     next.disabled = range.disabled || selected.index >= selected.count - 1;
     range.max = String(selected.count);
@@ -70,11 +82,27 @@ export function bindDimensionNavigation(
     );
     range.setAttribute(
       "aria-valuetext",
-      `${selected.index + 1} of ${selected.count}, ${selected.name}`,
+      projected
+        ? `Maximum of ${selected.count}, ${selected.name}`
+        : `${selected.index + 1} of ${selected.count}, ${selected.name}`,
     );
-    get("dimension-count").textContent =
-      `${selected.index + 1} / ${selected.count}`;
+    get("dimension-count").textContent = projected
+      ? `Max of ${selected.count}`
+      : `${selected.index + 1} / ${selected.count}`;
     get("dimension-name").textContent = selected.name;
+    get("dimension-projections").hidden = !spatial;
+    maxZ.disabled = !spatial || (image?.dimensions?.z ?? 1) <= 1;
+    maxTime.disabled = !spatial || (image?.dimensions?.time ?? 1) <= 1;
+    maxZ.checked = projectsAxis(planeNavigation.projection, "z");
+    maxTime.checked = projectsAxis(planeNavigation.projection, "time");
+    const projectionStatus = get("dimension-projection-status");
+    projectionStatus.hidden = planeNavigation.projection === "none";
+    projectionStatus.textContent =
+      maxZ.checked && maxTime.checked
+        ? "Maximum intensity across Z and Time"
+        : maxZ.checked
+          ? "Maximum intensity across Z"
+          : "Maximum intensity across Time";
     get("dimension-scope").hidden = !image?.readOnly;
     get("dimension-display").hidden = !image?.displayRanges?.length;
     const calibration = image?.calibration;
@@ -110,6 +138,18 @@ export function bindDimensionNavigation(
       planeNavigation.select(axis.value as "position" | "z" | "time", index);
     }
   };
+  const project = () => {
+    const mode = maxZ.checked
+      ? maxTime.checked
+        ? "zTime"
+        : "z"
+      : maxTime.checked
+        ? "time"
+        : "none";
+    planeNavigation.setProjection(mode);
+  };
+  maxZ.addEventListener("change", project);
+  maxTime.addEventListener("change", project);
   axis.addEventListener("change", render);
   range.addEventListener("input", () => void choose(Number(range.value) - 1));
   previous.addEventListener(
@@ -144,6 +184,7 @@ export function bindDimensionNavigation(
             }
           : null,
         preserve,
+        next?.projection ?? "none",
       );
       if (!preserve) channel = -1;
       if (!preserve || dimensionsAppeared)

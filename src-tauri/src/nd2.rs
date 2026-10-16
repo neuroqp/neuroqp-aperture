@@ -11,6 +11,7 @@ use serde::{Deserialize, Serialize};
 use std::fs::OpenOptions;
 use std::io::{Read, Seek, SeekFrom, Write};
 use std::path::Path;
+use std::sync::atomic::{AtomicBool, Ordering};
 
 pub(crate) const MAX_FRAME_BYTES: u64 = 256 * 1024 * 1024;
 const MAX_POSITIONS: u32 = 4096;
@@ -20,6 +21,39 @@ pub struct Selection {
     pub position: u32,
     pub z: u32,
     pub time: u32,
+}
+
+#[derive(Clone, Copy, Debug, Default, Deserialize, Serialize, PartialEq, Eq, Hash)]
+pub enum Projection {
+    #[default]
+    #[serde(rename = "none")]
+    None,
+    #[serde(rename = "z")]
+    Z,
+    #[serde(rename = "time")]
+    Time,
+    #[serde(rename = "zTime")]
+    ZTime,
+}
+
+impl Projection {
+    pub fn projects_z(self) -> bool {
+        matches!(self, Self::Z | Self::ZTime)
+    }
+    pub fn projects_time(self) -> bool {
+        matches!(self, Self::Time | Self::ZTime)
+    }
+    pub fn canonical(self, selection: Selection) -> Selection {
+        Selection {
+            z: if self.projects_z() { 0 } else { selection.z },
+            time: if self.projects_time() {
+                0
+            } else {
+                selection.time
+            },
+            ..selection
+        }
+    }
 }
 
 #[derive(Clone, Debug, Deserialize, Serialize, PartialEq, Eq)]
@@ -507,22 +541,43 @@ fn extract_frame(
     write_frame(&frame, output, display)
 }
 
+#[cfg(test)]
 pub(crate) fn write_frame(
     frame: &RawFrame,
     output: &Path,
     display: bool,
 ) -> Result<ExtractedNd2, String> {
+    write_frame_cancellable(frame, output, display, None)
+}
+
+pub(crate) fn check_cancel(cancel: Option<&AtomicBool>) -> Result<(), String> {
+    if cancel.is_some_and(|cancel| cancel.load(Ordering::Relaxed)) {
+        Err("Loading cancelled.".into())
+    } else {
+        Ok(())
+    }
+}
+
+pub(crate) fn write_frame_cancellable(
+    frame: &RawFrame,
+    output: &Path,
+    display: bool,
+    cancel: Option<&AtomicBool>,
+) -> Result<ExtractedNd2, String> {
+    check_cancel(cancel)?;
     let mut result = frame.metadata.clone();
     // Normalize only the disposable display cache; original frame samples stay intact.
     let normalized;
     let (pixels, output_bits) = if display && frame.bytes == 2 {
-        let (samples, ranges) = display_samples(&frame.pixels, frame.bands as usize, frame.rgb);
+        let (samples, ranges) =
+            display_samples_cancellable(&frame.pixels, frame.bands as usize, frame.rgb, cancel)?;
         normalized = samples;
         result.display_ranges = ranges;
         (normalized.as_slice(), 8)
     } else {
         (frame.pixels.as_slice(), (frame.bytes * 8) as u16)
     };
+    check_cancel(cancel)?;
     let header = tiff_header(
         frame.width,
         frame.height,
@@ -538,45 +593,65 @@ pub(crate) fn write_frame(
         .create_new(true)
         .open(output)
         .map_err(error)?;
-    if let Err(failure) = file.write_all(&header).and_then(|_| file.write_all(pixels)) {
+    let written = (|| {
+        file.write_all(&header).map_err(error)?;
+        for block in pixels.chunks(65536 * usize::from(output_bits / 8)) {
+            check_cancel(cancel)?;
+            file.write_all(block).map_err(error)?;
+        }
+        check_cancel(cancel)
+    })();
+    if let Err(failure) = written {
         drop(file);
         let _ = std::fs::remove_file(output);
-        return Err(error(failure));
+        return Err(failure);
     }
     Ok(result)
 }
 
+#[cfg(test)]
 fn display_samples(pixels: &[u8], bands: usize, rgb: bool) -> (Vec<u8>, Vec<[u16; 2]>) {
+    display_samples_cancellable(pixels, bands, rgb, None).unwrap()
+}
+
+fn display_samples_cancellable(
+    pixels: &[u8],
+    bands: usize,
+    rgb: bool,
+    cancel: Option<&AtomicBool>,
+) -> Result<(Vec<u8>, Vec<[u16; 2]>), String> {
     let mut ranges = vec![[u16::MAX, 0]; if rgb { 1 } else { bands }];
     for (index, sample) in pixels.as_chunks::<2>().0.iter().enumerate() {
+        if index % 65536 == 0 {
+            check_cancel(cancel)?;
+        }
         let value = u16::from_le_bytes(*sample);
         let range = &mut ranges[if rgb { 0 } else { index % bands }];
         range[0] = range[0].min(value);
         range[1] = range[1].max(value);
     }
-    let display = pixels
-        .as_chunks::<2>()
-        .0
-        .iter()
-        .enumerate()
-        .map(|(index, sample)| {
-            let value = u32::from(u16::from_le_bytes(*sample));
-            let [minimum, maximum] = ranges[if rgb { 0 } else { index % bands }].map(u32::from);
-            if maximum == minimum {
-                if value == 0 {
-                    0
-                } else {
-                    255
-                }
+    let mut display = Vec::with_capacity(pixels.len() / 2);
+    for (index, sample) in pixels.as_chunks::<2>().0.iter().enumerate() {
+        if index % 65536 == 0 {
+            check_cancel(cancel)?;
+        }
+        let value = u32::from(u16::from_le_bytes(*sample));
+        let [minimum, maximum] = ranges[if rgb { 0 } else { index % bands }].map(u32::from);
+        display.push(if maximum == minimum {
+            if value == 0 {
+                0
             } else {
-                (((value - minimum) * 255 + (maximum - minimum) / 2) / (maximum - minimum)) as u8
+                255
             }
-        })
-        .collect();
+        } else {
+            (((value - minimum) * 255 + (maximum - minimum) / 2) / (maximum - minimum)) as u8
+        });
+    }
+    check_cancel(cancel)?;
     if rgb {
         ranges = vec![ranges[0]; bands];
     }
-    (display, ranges)
+    Ok((display, ranges))
 }
 
 fn interleave(output: &mut [u8], plane: &[u8], bands: usize, channel: usize, bytes: usize) {
@@ -751,6 +826,60 @@ pub(crate) mod tests {
         bytes.extend(map);
         bytes.extend(map_offset.to_le_bytes());
         bytes
+    }
+
+    pub(crate) fn synthetic_samples(bits: u32, rgb: bool, frames: &[&[u16]; 8]) -> Vec<u8> {
+        let mut bytes = synthetic(bits, rgb);
+        let expected_samples = if rgb { 6 } else { 4 };
+        for (frame, samples) in frames.iter().enumerate() {
+            assert_eq!(samples.len(), expected_samples);
+            let name = format!("ImageDataSeq|{frame}!");
+            let start = bytes
+                .windows(name.len())
+                .position(|v| v == name.as_bytes())
+                .unwrap()
+                + name.len()
+                + 8;
+            for (index, value) in samples.iter().enumerate() {
+                if bits == 16 {
+                    bytes[start + index * 2..start + index * 2 + 2]
+                        .copy_from_slice(&value.to_le_bytes());
+                } else {
+                    bytes[start + index] = u8::try_from(*value).unwrap();
+                }
+            }
+        }
+        bytes
+    }
+
+    #[test]
+    fn projection_modes_have_stable_names_and_canonical_coordinates() {
+        let selection = Selection {
+            position: 7,
+            z: 3,
+            time: 5,
+        };
+        for (projection, name, z, time) in [
+            (Projection::None, "none", 3, 5),
+            (Projection::Z, "z", 0, 5),
+            (Projection::Time, "time", 3, 0),
+            (Projection::ZTime, "zTime", 0, 0),
+        ] {
+            assert_eq!(serde_json::to_value(projection).unwrap(), name);
+            assert_eq!(
+                serde_json::from_value::<Projection>(serde_json::json!(name)).unwrap(),
+                projection
+            );
+            assert_eq!(
+                projection.canonical(selection),
+                Selection {
+                    position: 7,
+                    z,
+                    time
+                }
+            );
+        }
+        assert_eq!(Projection::default(), Projection::None);
     }
 
     #[test]
