@@ -8,7 +8,6 @@ import re
 import shutil
 import subprocess
 import tarfile
-import tempfile
 import zipfile
 
 from release import ASSETS, current_version, digest, lockfile_hashes, native_identity, notes, source_plan, verify_source_material, verify, verify_signatures
@@ -251,11 +250,9 @@ def publish(directory, package_path, smoke_path):
     if matches:
         release = matches[0]
     else:
-        with tempfile.TemporaryDirectory(prefix="aperture-notes-") as temporary:
-            release_notes = Path(temporary) / "notes.md"
-            release_notes.write_text(notes(package["version"]), encoding="utf-8")
-            gh("release", "create", tag, "--repo", REPO, "--verify-tag", "--draft", "--title", "Aperture " + package["version"], "--notes-file", str(release_notes))
-        release = json.loads(gh("api", f"repos/{REPO}/releases/tags/{tag}"))
+        release = json.loads(gh("api", f"repos/{REPO}/releases", "--method", "POST",
+                                "-f", "tag_name=" + tag, "-f", "name=Aperture " + package["version"],
+                                "-f", "body=" + notes(package["version"]), "-F", "draft=true"))
     missing = existing_assets(release["assets"], package["assets"])
     if not release["draft"] and not release["prerelease"] and not missing:
         print(release["html_url"])

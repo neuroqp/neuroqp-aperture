@@ -2,6 +2,8 @@
 """Critical release identity and idempotency checks."""
 import copy
 import importlib.util
+import io
+import json
 from pathlib import Path
 import tarfile
 import tempfile
@@ -14,6 +16,32 @@ spec.loader.exec_module(state)
 
 
 class ReleaseStateTests(unittest.TestCase):
+    def test_new_draft_uses_creation_response_without_public_tag_lookup(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            directory = root / "release"
+            directory.mkdir()
+            (directory / "latest.json").write_bytes(b"{}")
+            package = {"operation": "package", "version": "0.2.1", "source_sha": "a" * 40,
+                       "assets": {"latest.json": state.digest(directory / "latest.json")}}
+            package_path, smoke_path = root / "package.json", root / "smoke.json"
+            package_path.write_text(json.dumps(package))
+            smoke_path.write_text("{}")
+            draft = {"id": 123, "tag_name": "v0.2.1", "draft": True, "prerelease": False,
+                     "assets": [], "html_url": "https://github.com/example/release"}
+            uploaded = {**draft, "assets": [{"name": "latest.json", "digest": "sha256:" + package["assets"]["latest.json"]}]}
+            published = {**uploaded, "draft": False}
+            responses = [json.dumps({"object": {"type": "commit", "sha": package["source_sha"]}}), "[[]]",
+                         json.dumps(draft), "", json.dumps(uploaded), "", json.dumps(published), json.dumps(published)]
+            with patch.object(state, "source_identity"), patch.object(state, "acceptance"), patch.object(state, "verify"), patch.object(state, "verify_signatures"), patch.object(state, "notes", return_value="Current notes\n"), patch.object(state, "gh", side_effect=responses) as github, patch("urllib.request.urlopen", return_value=io.BytesIO(b"{}")), patch("builtins.print"):
+                state.publish(directory, package_path, smoke_path)
+            calls = [call.args for call in github.call_args_list]
+            self.assertTrue(calls[0][1].endswith("/git/ref/tags/v0.2.1"))
+            for field in ("POST", "tag_name=v0.2.1", "draft=true", "body=Current notes\n"):
+                self.assertIn(field, calls[2])
+            self.assertEqual(calls[4], ("api", f"repos/{state.REPO}/releases/123"))
+            self.assertFalse(any("/releases/tags/" in arg for call in calls for arg in call))
+
     def test_existing_uploads_reuse_only_identical_bytes(self):
         expected = {"a.exe": "a" * 64, "b.sig": "b" * 64}
         self.assertEqual(state.existing_assets([{"name": "a.exe", "digest": "sha256:" + "a" * 64}], expected), {"b.sig"})
