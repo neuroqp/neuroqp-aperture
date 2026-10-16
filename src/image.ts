@@ -70,6 +70,10 @@ export function dimensionAxis(
 }
 
 export type PlaneSelection = { position: number; z: number; time: number };
+export type NavigationHint = {
+  axis: keyof PlaneSelection;
+  direction: -1 | 1;
+};
 
 /** Serialize native plane changes, keeping only the latest requested coordinates. */
 export class PlaneNavigation {
@@ -77,11 +81,13 @@ export class PlaneNavigation {
   private confirmed: PlaneSelection | null = null;
   private pending = false;
   private generation = 0;
+  private hint: NavigationHint | undefined;
 
   private apply: (
     position: number,
     z: number,
     time: number,
+    hint?: NavigationHint,
   ) => Promise<boolean>;
   private changed: () => void;
 
@@ -101,6 +107,7 @@ export class PlaneNavigation {
 
   select(axis: keyof PlaneSelection, value: number) {
     if (!this.selection) return;
+    this.hint = { axis, direction: value < this.selection[axis] ? -1 : 1 };
     this.selection = { ...this.selection, [axis]: value };
     this.changed();
     void this.flush();
@@ -121,6 +128,7 @@ export class PlaneNavigation {
         selected.position,
         selected.z,
         selected.time,
+        this.hint,
       );
       if (generation !== this.generation) return;
       if (!applied) {
@@ -132,6 +140,12 @@ export class PlaneNavigation {
     this.pending = false;
     this.changed();
   }
+}
+
+/** Keep the detail cache near 32 MiB, allowing source planes and CPU composites. */
+export function imageTileCacheCount(channels = 3) {
+  const tileBytes = 256 ** 2 * (Math.max(1, channels) * 2 + 8);
+  return Math.max(1, Math.min(128, Math.floor((32 * 1024 ** 2) / tileBytes)));
 }
 
 // OSD flips stored pixels horizontally before applying clockwise rotation.
@@ -204,6 +218,7 @@ export class ImageLoader {
       position: number,
       z: number,
       time: number,
+      hint?: NavigationHint,
     ) => Promise<ImageState>;
     state: () => Promise<ImageState | null>;
     cancel: () => Promise<void>;
@@ -257,11 +272,19 @@ export class ImageLoader {
     await this.request(() => this.commands.state());
   }
 
-  async selectPlane(position: number, z: number, time: number) {
+  async selectPlane(
+    position: number,
+    z: number,
+    time: number,
+    hint?: NavigationHint,
+  ) {
     const previous = this.state;
     if (!previous?.dimensions || !this.commands.selectPlane) return false;
     return this.request(
-      () => this.commands.selectPlane!(previous.id, position, z, time),
+      () =>
+        hint
+          ? this.commands.selectPlane!(previous.id, position, z, time, hint)
+          : this.commands.selectPlane!(previous.id, position, z, time),
       previous,
     );
   }

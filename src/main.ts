@@ -37,6 +37,7 @@ import { createGpuColorDrawer } from "./gpu-color-drawer";
 import { fitInitialImage } from "./initial-fit";
 import {
   ImageLoader,
+  imageTileCacheCount,
   orientation,
   preview,
   pyramid,
@@ -128,7 +129,7 @@ const windowHandle = native ? getCurrentWindow() : null;
 let colorRenderer: ReturnType<typeof bindColorRenderer> | undefined;
 const colorPanel = bindColorPanel(() => colorRenderer?.refresh());
 const dimensionNavigation = bindDimensionNavigation(
-  async (position, z, time) => {
+  async (position, z, time, hint) => {
     if (
       !native ||
       saving ||
@@ -137,7 +138,7 @@ const dimensionNavigation = bindDimensionNavigation(
     )
       return false;
     setLoading(true);
-    return loader.selectPlane(position, z, time);
+    return loader.selectPlane(position, z, time, hint);
   },
   () => colorRenderer?.refresh(),
 );
@@ -165,7 +166,7 @@ const viewer = OpenSeadragon({
   crossOriginPolicy: "Anonymous",
   imageSmoothingEnabled: false,
   imageLoaderLimit: 4,
-  maxImageCacheCount: 128,
+  maxImageCacheCount: imageTileCacheCount(),
   timeout: 600_000,
   blendTime: 0.12,
   animationTime: 0.25,
@@ -400,6 +401,12 @@ async function saveAnnotations() {
 
 let currentId: string | null = null;
 let previewAdded = false;
+let previewDisplayed = false;
+let pendingPreview: OpenSeadragon.TiledImage | null = null;
+const loadedImages = new WeakSet<OpenSeadragon.TiledImage>();
+viewer.addHandler("tile-loaded", (event) => {
+  loadedImages.add(event.tiledImage);
+});
 let pyramidAdded = false;
 let dialogOpen = false;
 let loading = false;
@@ -477,9 +484,12 @@ function resetViewer(preserveDisplay = false) {
   annotationViewer.setRois([]);
   updatePointTool();
   previewAdded = false;
+  previewDisplayed = false;
+  if (pendingPreview) viewer.world.removeItem(pendingPreview);
+  pendingPreview = null;
   pyramidAdded = false;
   tileError = null;
-  viewer.close();
+  if (!preserveDisplay) viewer.close();
   for (const job of downloads) job.abort();
   downloads.clear();
   if (!preserveDisplay) {
@@ -550,6 +560,10 @@ function showImage(state: ImageState) {
       );
   }
   currentImage = state;
+  // OSD has no public setter. This is its eviction target; visible tiles stay resident.
+  (
+    viewer.tileCache as OpenSeadragon.TileCache & { _maxCacheItemCount: number }
+  )._maxCacheItemCount = imageTileCacheCount(state.channels?.length || 3);
   dimensionNavigation.setImage(
     state,
     sameDimensions || previousImage?.id === state.id,
@@ -639,7 +653,9 @@ function showImage(state: ImageState) {
       ),
       ...transform,
       width: 1,
-      index: 0,
+      index: viewer.world.getItemCount(),
+      opacity: sameDimensions ? 0 : 1,
+      preload: true,
       success: (event) => {
         if (currentId !== state.id) {
           viewer.world.removeItem(
@@ -647,14 +663,41 @@ function showImage(state: ImageState) {
           );
           return;
         }
-        if (viewportBounds) viewer.viewport.fitBounds(viewportBounds, true);
-        else cancelInitialFit = fitInitialImage(viewer);
-        colorPanel.setEnabled(Boolean(state.channels?.length));
-        document
-          .querySelectorAll<HTMLButtonElement>("[data-image-control]")
-          .forEach((button) => (button.disabled = false));
-        updatePointTool();
-        if (state.tilesReady) addPyramid(state);
+        const item = (event as unknown as { item: OpenSeadragon.TiledImage })
+          .item;
+        pendingPreview = item;
+        if (!sameDimensions || viewer.world.getItemCount() === 1) {
+          if (viewportBounds) viewer.viewport.fitBounds(viewportBounds, true);
+          else cancelInitialFit = fitInitialImage(viewer);
+        }
+        const display = () => {
+          // OSD can report fully loaded after its only tile failed.
+          if (!item.getFullyLoaded() || !loadedImages.has(item)) return;
+          item.removeHandler("fully-loaded-change", display);
+          if (currentId !== state.id) {
+            viewer.world.removeItem(item);
+            return;
+          }
+          pendingPreview = null;
+          // Keep the previous plane visible until all channels of this preview are ready.
+          const previous = Array.from(
+            { length: viewer.world.getItemCount() },
+            (_, index) => viewer.world.getItemAt(index),
+          );
+          item.setOpacity(1);
+          for (const old of previous)
+            if (old !== item) viewer.world.removeItem(old);
+          previewDisplayed = true;
+          colorPanel.setEnabled(Boolean(state.channels?.length));
+          document
+            .querySelectorAll<HTMLButtonElement>("[data-image-control]")
+            .forEach((button) => (button.disabled = false));
+          updatePointTool();
+          if (currentImage?.id === state.id && currentImage.tilesReady)
+            addPyramid(currentImage);
+        };
+        item.addHandler("fully-loaded-change", display);
+        display();
       },
       error: () => {
         if (currentId === state.id)
@@ -662,8 +705,7 @@ function showImage(state: ImageState) {
       },
     });
   }
-  if (state.tilesReady && previewAdded && viewer.world.getItemCount() > 0)
-    addPyramid(state);
+  if (state.tilesReady && previewDisplayed) addPyramid(state);
 }
 
 function addPyramid(state: ImageState) {
@@ -697,8 +739,15 @@ function addPyramid(state: ImageState) {
 const loader = new ImageLoader(
   {
     open: (path) => invoke<ImageState>("open_image", { path }),
-    selectPlane: (id, position, z, time) =>
-      invoke<ImageState>("select_plane", { id, position, z, time }),
+    selectPlane: (id, position, z, time, hint) =>
+      invoke<ImageState>("select_plane", {
+        id,
+        position,
+        z,
+        time,
+        navigationAxis: hint?.axis,
+        navigationDirection: hint?.direction,
+      }),
     state: () => invoke<ImageState | null>("image_state"),
     cancel: () => invoke("cancel_load"),
     listen: native

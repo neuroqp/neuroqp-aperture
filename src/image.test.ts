@@ -4,6 +4,7 @@ import { setTimeout as delay } from "node:timers/promises";
 import {
   ImageLoader,
   PlaneNavigation,
+  imageTileCacheCount,
   orientation,
   preview,
   pyramid,
@@ -604,15 +605,15 @@ test("continuous dimension input coalesces coordinates and waits for each new na
   navigation.select("position", 1);
   navigation.select("time", 2);
   assert.deepEqual(navigation.selection, { position: 1, z: 3, time: 2 });
-  assert.deepEqual(calls, [["initial", 0, 1, 0]]);
+  assert.deepEqual(calls, [["initial", 0, 1, 0, { axis: "z", direction: 1 }]]);
   first.resolve({
     ...state("first"),
     dimensions: { ...dimensions, zIndex: 1 },
   });
   await delay(0);
   assert.deepEqual(calls, [
-    ["initial", 0, 1, 0],
-    ["first", 1, 3, 2],
+    ["initial", 0, 1, 0, { axis: "z", direction: 1 }],
+    ["first", 1, 3, 2, { axis: "time", direction: 1 }],
   ]);
   last.resolve({
     ...state("last"),
@@ -640,14 +641,47 @@ test("dimension queue restores confirmed coordinates on failure and clears inten
   navigation.setPlane({ position: 0, z: 0, time: 0 });
   pending.resolve(true);
   await delay(0);
-  assert.deepEqual(calls, [[0, 1, 0]]);
+  assert.deepEqual(calls, [[0, 1, 0, { axis: "z", direction: 1 }]]);
   assert.deepEqual(navigation.selection, { position: 0, z: 0, time: 0 });
   navigation.select("z", 3);
   navigation.select("time", 1);
   await delay(0);
   assert.deepEqual(navigation.selection, { position: 0, z: 0, time: 0 });
   assert.deepEqual(calls, [
-    [0, 1, 0],
-    [0, 3, 0],
+    [0, 1, 0, { axis: "z", direction: 1 }],
+    [0, 3, 0, { axis: "z", direction: 1 }],
   ]);
+});
+
+test("plane preloading follows the latest axis and direction while input is coalesced", async () => {
+  const pending = deferred<boolean>();
+  const calls: unknown[] = [];
+  const navigation = new PlaneNavigation(
+    async (...args) => {
+      calls.push(args);
+      return calls.length === 1 ? pending.promise : true;
+    },
+    () => {},
+  );
+  navigation.setPlane({ position: 2, z: 4, time: 3 });
+  navigation.select("z", 3);
+  navigation.select("time", 5);
+  navigation.select("time", 4);
+  pending.resolve(true);
+  await delay(0);
+  assert.deepEqual(calls, [
+    [2, 3, 3, { axis: "z", direction: -1 }],
+    [2, 3, 4, { axis: "time", direction: -1 }],
+  ]);
+});
+
+test("detail tile retention scales down with channel count without reducing resolution", () => {
+  assert.equal(imageTileCacheCount(), 36);
+  assert.equal(imageTileCacheCount(1), 51);
+  assert.equal(imageTileCacheCount(32), 7);
+  assert.equal(imageTileCacheCount(512), 1);
+  for (const channels of [1, 3, 8, 32]) {
+    const bytes = 256 ** 2 * (channels * 2 + 8);
+    assert.ok(imageTileCacheCount(channels) * bytes <= 32 * 1024 ** 2);
+  }
 });

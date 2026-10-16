@@ -219,12 +219,13 @@ on Open, folder navigation or Close. Cancellation or save failure must retain un
 
 - Decode ND2 in Rust with pinned `openreadout-nd2` and `openreadout-core` libraries.
   Do not require Python, Java, a vendor SDK, or a TypeScript format reader.
-- Decode the selected position, Z and time frame in the existing cancellable image
-  worker, then write a temporary display TIFF for the existing channel preview and
+- Decode the selected position, Z and time frame on a Rust loader thread, then write a temporary display TIFF for the existing channel preview and
   pyramid pipeline. Normalize 16-bit scalar channels per selected frame into 8-bit
   display samples. RGB uses one shared range. Keep the original ranges in metadata;
   displayed brightness across frames is not quantitative. Cache keys include the source identity and selected coordinates.
-  This first implementation decodes a whole selected frame, not arbitrary regions.
+  This implementation decodes a whole selected frame, not arbitrary regions. Native
+  preview/pyramid operations remain in cancellable child processes. Rust decoding
+  yields between frames; a new selection cancels queued optional work.
 - Support unsigned 8/16-bit scalar acquisition channels, up to 32 samples, and
   one RGB acquisition channel. Preserve channel names/colors and available physical
   pixel sizes, Z spacing and nominal time interval. Keep source pixels unchanged.
@@ -243,6 +244,28 @@ on Open, folder navigation or Close. Cancellation or save failure must retain un
 - Validate pixel values, dimension mapping and RGB sample order with synthetic
   fixtures; check real public acquisitions and native UI separately. Keep real
   acquisitions and generated evidence outside Git.
+
+## Image memory and preloading
+
+- Settings > General sets an image-memory upper limit, default 4 GiB and shared
+  across Aperture windows/processes. Reserve decoder workspaces before allocation;
+  retained original ND2 frames keep their reservations. Crash-released OS leases
+  reclaim accounting. This bounds accounted image data and conservative decoder
+  allowances, not total application RSS, GPU memory or the separately bounded disk cache.
+- A smaller budget changes cache/preload capacity, never source data or display
+  resolution. Foreground work evicts optional frames before admission. If one
+  operation cannot fit, report a clear error instead of exceeding the limit.
+  Lowering the limit stops new admission while active reservations settle and
+  optional caches are evicted. Other windows observe the shared setting.
+- Finish the visible frame's preview and detail first, then preload nearby frames
+  along the active dimension/direction. Generate remaining previews before their
+  detail pyramids, stopping at memory or disk capacity. Keep original ND2 samples
+  under the memory budget and previews/pyramids in the disk cache. Preserve visible
+  pixels and viewport until the next selected preview is ready.
+- Pause optional loading and evict optional raw frames under system memory
+  pressure; resume after a larger available-memory margin. Foreground requests
+  can ask other windows to release optional caches. Single-frame Rust decoding
+  finishes before the next request; native work can be killed immediately.
 
 ## ImageJ annotation interchange
 

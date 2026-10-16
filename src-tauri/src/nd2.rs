@@ -1,17 +1,21 @@
 //! Selected ND2 acquisition frames, decoded in Rust into a lossless cache TIFF.
 
 use crate::channels::{Channel, MAX_CHANNELS};
-use openreadout_core::{Dataset, FormatReader, ImageInfo, PixelType, PlaneIndex, SourceFile};
-use openreadout_nd2::{meta::loops_from_lv, Attributes, LegacyFile, LoopKind, Nd2File, Nd2Reader};
+#[cfg(test)]
+use openreadout_core::FormatReader;
+use openreadout_core::{Dataset, ImageInfo, PixelType, PlaneIndex, SourceFile};
+#[cfg(test)]
+use openreadout_nd2::Nd2Reader;
+use openreadout_nd2::{meta::loops_from_lv, Attributes, LegacyFile, LoopKind, Nd2File};
 use serde::{Deserialize, Serialize};
 use std::fs::OpenOptions;
 use std::io::{Read, Seek, SeekFrom, Write};
 use std::path::Path;
 
-const MAX_FRAME_BYTES: u64 = 256 * 1024 * 1024;
+pub(crate) const MAX_FRAME_BYTES: u64 = 256 * 1024 * 1024;
 const MAX_POSITIONS: u32 = 4096;
 
-#[derive(Clone, Copy, Debug, Default, Deserialize, Serialize, PartialEq, Eq)]
+#[derive(Clone, Copy, Debug, Default, Deserialize, Serialize, PartialEq, Eq, Hash)]
 pub struct Selection {
     pub position: u32,
     pub z: u32,
@@ -64,7 +68,7 @@ fn frame_bytes(width: u32, height: u32, bands: u32, bytes: usize) -> Result<usiz
 
 // The dependency's public parser API is pinned to 0.3.0. Check storage geometry
 // before its Dataset allocates/splits a whole acquisition frame, including padding.
-fn preflight(path: &Path) -> Result<(), String> {
+pub(crate) fn preflight(path: &Path) -> Result<u64, String> {
     let mut source = SourceFile::open_local(path).map_err(error)?;
     let mut head = [0; 12];
     source.read_exact(&mut head).map_err(error)?;
@@ -164,7 +168,14 @@ fn preflight(path: &Path) -> Result<(), String> {
             return Err("ND2 image chunk extends beyond its source file.".into());
         }
     }
-    Ok(())
+    Ok(if attrs.row_bytes == 0 {
+        u64::from(attrs.width)
+            * u64::from(attrs.height)
+            * u64::from(attrs.components)
+            * bytes as u64
+    } else {
+        u64::from(attrs.row_bytes) * u64::from(attrs.height)
+    })
 }
 
 fn experiment_bounds(experiment: &serde_json::Value) -> Result<(), String> {
@@ -217,7 +228,7 @@ fn experiment_bounds(experiment: &serde_json::Value) -> Result<(), String> {
     Ok(())
 }
 
-fn legacy_preflight(path: &Path, source: &mut SourceFile) -> Result<(), String> {
+fn legacy_preflight(path: &Path, source: &mut SourceFile) -> Result<u64, String> {
     let file = LegacyFile::open(path).map_err(error)?;
     let (height, width, channels, bits) = file.image_header(source).map_err(error)?;
     if bits > 16 || channels == 0 || u32::from(channels) > MAX_CHANNELS {
@@ -233,6 +244,7 @@ fn legacy_preflight(path: &Path, source: &mut SourceFile) -> Result<(), String> 
     // Check every codestream's encoded size, SIZ geometry and signedness before
     // the JPEG2000 decoder allocates its coefficient/sample planes. Its codec
     // also enforces its own fixed output and compression-ratio ceilings.
+    let mut storage_bytes = frame_bytes(width, height, u32::from(channels), 2)? as u64;
     for stream in file.codestreams() {
         source
             .seek(SeekFrom::Start(stream.box_offset))
@@ -260,7 +272,7 @@ fn legacy_preflight(path: &Path, source: &mut SourceFile) -> Result<(), String> 
         if (cw, ch) != (width, height) || components == 0 || u32::from(components) > MAX_CHANNELS {
             return Err("ND2 legacy codestream geometry disagrees with the image header.".into());
         }
-        frame_bytes(cw, ch, u32::from(components), 2)?;
+        storage_bytes = storage_bytes.max(frame_bytes(cw, ch, u32::from(components), 2)? as u64);
         let mut precision = vec![0; usize::from(components) * 3];
         source.read_exact(&mut precision).map_err(error)?;
         if precision
@@ -274,10 +286,13 @@ fn legacy_preflight(path: &Path, source: &mut SourceFile) -> Result<(), String> 
             );
         }
     }
-    Ok(())
+    Ok(storage_bytes)
 }
 
-fn description(images: &[ImageInfo], selection: Selection) -> Result<ExtractedNd2, String> {
+pub(crate) fn description(
+    images: &[ImageInfo],
+    selection: Selection,
+) -> Result<ExtractedNd2, String> {
     let image = images
         .get(selection.position as usize)
         .ok_or("ND2 position is out of range.")?;
@@ -382,19 +397,23 @@ fn description(images: &[ImageInfo], selection: Selection) -> Result<ExtractedNd
     Ok(result)
 }
 
-fn open(path: &Path) -> Result<(Box<dyn Dataset>, Vec<ImageInfo>), String> {
-    preflight(path)?;
+#[cfg(test)]
+type Opened = (Box<dyn Dataset>, Vec<ImageInfo>, u64);
+
+#[cfg(test)]
+fn open(path: &Path) -> Result<Opened, String> {
+    let storage_bytes = preflight(path)?;
     let dataset = Nd2Reader.open(path).map_err(error)?;
     let info = dataset.info().map_err(error)?;
     if info.images.len() > MAX_POSITIONS as usize {
         return Err("ND2 supports at most 4096 positions.".into());
     }
-    Ok((dataset, info.images))
+    Ok((dataset, info.images, storage_bytes))
 }
 
 #[cfg(test)]
 fn inspect(path: &Path, selection: Selection) -> Result<Dimensions, String> {
-    let (_, images) = open(path)?;
+    let (_, images, _) = open(path)?;
     Ok(description(&images, selection)?.dimensions)
 }
 
@@ -403,28 +422,27 @@ pub fn extract(input: &Path, output: &Path, selection: Selection) -> Result<Extr
     extract_frame(input, output, selection, false)
 }
 
-pub fn extract_display(
-    input: &Path,
-    output: &Path,
-    selection: Selection,
-) -> Result<ExtractedNd2, String> {
-    extract_frame(input, output, selection, true)
+pub(crate) struct RawFrame {
+    pub width: u32,
+    pub height: u32,
+    pub bands: u32,
+    pub bytes: usize,
+    pub rgb: bool,
+    pub pixels: Vec<u8>,
+    pub metadata: ExtractedNd2,
 }
 
-fn extract_frame(
-    input: &Path,
-    output: &Path,
+pub(crate) fn decode_frame(
+    dataset: &mut dyn Dataset,
+    images: &[ImageInfo],
     selection: Selection,
-    display: bool,
-) -> Result<ExtractedNd2, String> {
-    let (mut dataset, images) = open(input)?;
-    let mut result = description(&images, selection)?;
+) -> Result<RawFrame, String> {
+    let metadata = description(images, selection)?;
     let image = &images[selection.position as usize];
     let bytes = image.pixel_type.bytes_per_sample();
-    let bands = result.channels.len() as u32;
+    let bands = metadata.channels.len() as u32;
     let length = frame_bytes(image.size_x, image.size_y, bands, bytes)?;
-    // ponytail: one selected frame is assembled in memory (256 MiB cap). Region
-    // decoding can replace this only when the reader exposes bounded regions.
+    // ponytail: bounded whole-frame assembly until the reader offers bounded regions.
     let mut pixels = vec![0u8; length];
     for c in 0..image.size_c {
         let plane = dataset
@@ -452,25 +470,52 @@ fn extract_frame(
             interleave(&mut pixels, &plane.data, bands as usize, c as usize, bytes);
         }
     }
+    Ok(RawFrame {
+        width: image.size_x,
+        height: image.size_y,
+        bands,
+        bytes,
+        rgb: image.samples_per_pixel == 3,
+        pixels,
+        metadata,
+    })
+}
+
+#[cfg(test)]
+fn extract_frame(
+    input: &Path,
+    output: &Path,
+    selection: Selection,
+    display: bool,
+) -> Result<ExtractedNd2, String> {
+    let (mut dataset, images, _) = open(input)?;
+    let frame = decode_frame(dataset.as_mut(), &images, selection)?;
     drop(dataset);
-    // ND2 often stores low-valued 12/16-bit signals. Taking only the high byte
-    // would discard their contrast permanently before the Color panel sees it.
-    // Normalize only this disposable display cache; source samples stay intact.
-    let output_bits = if display && bytes == 2 {
-        let (normalized, ranges) =
-            display_samples(&pixels, bands as usize, image.samples_per_pixel == 3);
-        pixels = normalized;
+    write_frame(&frame, output, display)
+}
+
+pub(crate) fn write_frame(
+    frame: &RawFrame,
+    output: &Path,
+    display: bool,
+) -> Result<ExtractedNd2, String> {
+    let mut result = frame.metadata.clone();
+    // Normalize only the disposable display cache; original frame samples stay intact.
+    let normalized;
+    let (pixels, output_bits) = if display && frame.bytes == 2 {
+        let (samples, ranges) = display_samples(&frame.pixels, frame.bands as usize, frame.rgb);
+        normalized = samples;
         result.display_ranges = ranges;
-        8
+        (normalized.as_slice(), 8)
     } else {
-        (bytes * 8) as u16
+        (frame.pixels.as_slice(), (frame.bytes * 8) as u16)
     };
     let header = tiff_header(
-        image.size_x,
-        image.size_y,
-        bands as u16,
+        frame.width,
+        frame.height,
+        frame.bands as u16,
         output_bits,
-        image.samples_per_pixel == 3,
+        frame.rgb,
         pixels.len() as u32,
     );
     // Never truncate an existing path, particularly a source accidentally passed
@@ -480,10 +525,7 @@ fn extract_frame(
         .create_new(true)
         .open(output)
         .map_err(error)?;
-    if let Err(failure) = file
-        .write_all(&header)
-        .and_then(|_| file.write_all(&pixels))
-    {
+    if let Err(failure) = file.write_all(&header).and_then(|_| file.write_all(pixels)) {
         drop(file);
         let _ = std::fs::remove_file(output);
         return Err(error(failure));
@@ -591,10 +633,10 @@ fn tiff_header(width: u32, height: u32, bands: u16, bits: u16, rgb: bool, length
 }
 
 #[cfg(test)]
-mod tests {
+pub(crate) mod tests {
     use super::*;
 
-    fn temporary() -> std::path::PathBuf {
+    pub(crate) fn temporary() -> std::path::PathBuf {
         let path = std::env::temp_dir().join(format!(
             "aperture-nd2-{}-{}",
             std::process::id(),
@@ -607,7 +649,7 @@ mod tests {
         path
     }
 
-    fn strip(path: &Path) -> Vec<u8> {
+    pub(crate) fn strip(path: &Path) -> Vec<u8> {
         let bytes = std::fs::read(path).unwrap();
         let count = u16::from_le_bytes(bytes[8..10].try_into().unwrap()) as usize;
         let entry = bytes[10..10 + count * 12]
@@ -620,7 +662,7 @@ mod tests {
         bytes[offset..].to_vec()
     }
 
-    fn synthetic(bits: u32, rgb: bool) -> Vec<u8> {
+    pub(crate) fn synthetic(bits: u32, rgb: bool) -> Vec<u8> {
         fn number(key: &str, value: u32) -> String {
             format!("<{key} runtype=\"lx_uint32\" value=\"{value}\"/>")
         }
@@ -712,6 +754,11 @@ mod tests {
                 time: 1,
             };
             let result = extract(&source, &output, selection).unwrap();
+            // The pinned reader exposes common Z/time extents for every position.
+            let (_, images, _) = open(&source).unwrap();
+            assert!(images
+                .iter()
+                .all(|image| (image.size_z, image.size_t) == (2, 2)));
             assert_eq!(
                 (
                     result.dimensions.positions.len(),

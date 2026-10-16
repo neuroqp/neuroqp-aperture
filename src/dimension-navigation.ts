@@ -4,6 +4,7 @@ import {
   dimensionAxis,
   type DimensionAxis,
   type ImageState,
+  type NavigationHint,
 } from "./image";
 
 export const dimensionPanelMarkup = `
@@ -18,7 +19,12 @@ export const dimensionPanelMarkup = `
   </section>`;
 
 export function bindDimensionNavigation(
-  selectPlane: (position: number, z: number, time: number) => Promise<boolean>,
+  selectPlane: (
+    position: number,
+    z: number,
+    time: number,
+    hint?: NavigationHint,
+  ) => Promise<boolean>,
   channelChanged: () => void,
 ) {
   const get = <T extends HTMLElement = HTMLElement>(id: string) =>

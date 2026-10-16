@@ -93,6 +93,10 @@ pub struct Job {
     pub input: PathBuf,
     pub source: PathBuf,
     nd2: Option<crate::nd2::Selection>,
+    pub(crate) acquisition: Option<Arc<crate::preload::Acquisition>>,
+    pub(crate) preview_only: bool,
+    pub(crate) background: bool,
+    memory: Arc<crate::memory::Budget>,
     /// Initial metadata remains the sourceIndex basis through repeated saves.
     pub annotations: Mutex<Option<crate::annotation_io::AnnotationBasis>>,
     work: PathBuf,
@@ -102,6 +106,7 @@ pub struct Job {
     cache_key: String,
     process_number: AtomicU64,
     decoder: Mutex<Option<Arc<crate::decoder::Decoder>>>,
+    decoder_memory: Mutex<Option<crate::memory::Reservation>>,
     processes: Mutex<HashMap<u64, Arc<Mutex<Child>>>>,
     notifier: Option<Notifier>,
     budget_check: Mutex<Instant>,
@@ -109,20 +114,43 @@ pub struct Job {
     cache_access: Arc<Mutex<()>>,
 }
 
+#[derive(Clone, Copy)]
+enum LoadMode {
+    Foreground,
+    Preview,
+    Detail,
+}
+
+#[derive(Clone)]
+pub(crate) struct LoadContext {
+    pub root: PathBuf,
+    pub memory: Arc<crate::memory::Budget>,
+    pub cache_access: Arc<Mutex<()>>,
+}
+
 pub struct Backend {
     pub current: Mutex<Option<Arc<Job>>>,
     root: PathBuf,
     workers: Mutex<Vec<thread::JoinHandle<()>>>,
     pub requests: AtomicU64,
-    pub closing: AtomicBool,
+    pub closing: Arc<AtomicBool>,
     pub tile_slots: Arc<tokio::sync::Semaphore>,
     notifier: Option<Notifier>,
     cache_access: Arc<Mutex<()>>,
     open_lock: Mutex<()>,
+    pub memory: Arc<crate::memory::Budget>,
+    acquisition: Arc<Mutex<Option<Arc<crate::preload::Acquisition>>>>,
+    browser_memory: Mutex<Option<crate::memory::Reservation>>,
 }
 
 impl Backend {
+    #[cfg(test)]
     pub fn new(root: PathBuf) -> Result<Self, String> {
+        let memory = crate::memory::Budget::new(root.clone())?;
+        Self::with_memory(root, memory)
+    }
+
+    pub fn with_memory(root: PathBuf, memory: Arc<crate::memory::Budget>) -> Result<Self, String> {
         fs::create_dir_all(&root).map_err(|e| e.to_string())?;
         // Snapshot stale work at startup; deletion runs off the window thread.
         let stale: Vec<_> = fs::read_dir(&root)
@@ -140,16 +168,48 @@ impl Backend {
                 let _ = fs::remove_dir_all(path);
             }
         });
+        let closing = Arc::new(AtomicBool::new(false));
+        let acquisition: Arc<Mutex<Option<Arc<crate::preload::Acquisition>>>> =
+            Arc::new(Mutex::new(None));
+        let maintenance = {
+            let closing = Arc::downgrade(&closing);
+            let acquisition = acquisition.clone();
+            let memory = memory.clone();
+            thread::spawn(move || {
+                let mut epoch = memory.reclaim_epoch().unwrap_or(0);
+                while closing
+                    .upgrade()
+                    .is_some_and(|closing| !closing.load(Ordering::Relaxed))
+                {
+                    let next = memory.reclaim_epoch().unwrap_or(epoch);
+                    let reclaim = next != epoch;
+                    epoch = next;
+                    let current = acquisition.lock().unwrap().clone();
+                    if let Some(current) = current {
+                        if reclaim {
+                            current.foreground();
+                            current.clear_optional();
+                        } else {
+                            let _ = current.trim();
+                        }
+                    }
+                    thread::sleep(Duration::from_millis(250));
+                }
+            })
+        };
         Ok(Self {
             current: Mutex::new(None),
             root,
-            workers: Mutex::new(vec![cleanup]),
-            closing: AtomicBool::new(false),
+            workers: Mutex::new(vec![cleanup, maintenance]),
+            closing,
             requests: AtomicU64::new(0),
             tile_slots: Arc::new(tokio::sync::Semaphore::new(2)),
             notifier: None,
             cache_access: Arc::new(Mutex::new(())),
             open_lock: Mutex::new(()),
+            memory,
+            acquisition,
+            browser_memory: Mutex::new(None),
         })
     }
 
@@ -224,6 +284,200 @@ impl Backend {
         if self.closing.load(Ordering::Relaxed) {
             return Err("Viewer shutting down.".into());
         }
+        {
+            let mut browser = self.browser_memory.lock().unwrap();
+            if browser.is_none() {
+                // Two 32-channel overview sets during replacement and a 32 MiB
+                // tile-cache allowance. Browser/runtime overhead and GPU differ.
+                let amount = 96 * 1024 * 1024;
+                let mut reservation = self.memory.try_reserve(amount, false)?;
+                if reservation.is_none() {
+                    self.memory.request_reclaim()?;
+                    for _ in 0..80 {
+                        thread::sleep(Duration::from_millis(25));
+                        reservation = self.memory.try_reserve(amount, false)?;
+                        if reservation.is_some() {
+                            break;
+                        }
+                    }
+                }
+                *browser = Some(reservation.ok_or("Image display does not fit the shared memory budget. Close another image window or increase the limit in Settings.")?);
+            }
+        }
+        let is_nd2 = path
+            .extension()
+            .is_some_and(|extension| extension.eq_ignore_ascii_case("nd2"));
+        let acquisition = if is_nd2 {
+            let identity =
+                crate::instances::fingerprint(&source).map_err(|error| error.to_string())?;
+            let mut current = self.acquisition.lock().unwrap();
+            if current
+                .as_ref()
+                .is_none_or(|item| !item.matches(&source, &identity))
+            {
+                if let Some(old) = current.take() {
+                    old.stop();
+                }
+                *current = Some(crate::preload::Acquisition::new(
+                    source.clone(),
+                    identity,
+                    self.memory.clone(),
+                ));
+            }
+            current.clone()
+        } else {
+            if let Some(old) = self.acquisition.lock().unwrap().take() {
+                old.stop();
+            }
+            None
+        };
+        if let Some(acquisition) = &acquisition {
+            acquisition.foreground();
+        }
+        let context = LoadContext {
+            root: self.root.clone(),
+            memory: self.memory.clone(),
+            cache_access: self.cache_access.clone(),
+        };
+        let job = context.create_job(
+            path,
+            source,
+            frame,
+            acquisition,
+            LoadMode::Foreground,
+            self.notifier.clone(),
+        )?;
+        let initial = job.state.lock().unwrap().clone();
+        let old = self.current.lock().unwrap().replace(job.clone());
+        if let Some(old) = old {
+            old.cancel();
+        }
+        let mut workers = self.workers.lock().unwrap();
+        workers.retain(|worker| !worker.is_finished());
+        workers.push(thread::spawn(move || {
+            if let Err(error) = load(&job) {
+                job.update(|state| {
+                    state.phase = "error".into();
+                    state.error = Some(error);
+                    state.detail = "Image loading failed.".into();
+                });
+            }
+            finish_decoder(&job);
+            if !job.cancel.load(Ordering::Relaxed) && job.state.lock().unwrap().phase == "ready" {
+                crate::preload::run(&context, &job);
+            }
+            // Generated pyramids need no decoder once complete; native tiles do.
+            if job.native.lock().unwrap().is_empty() {
+                let decoder = job.decoder.lock().unwrap().take();
+                if let Some(decoder) = decoder {
+                    decoder.stop();
+                }
+            }
+            if job.cancel.load(Ordering::Relaxed) || job.state.lock().unwrap().phase == "error" {
+                let decoder = job.decoder.lock().unwrap().clone();
+                if let Some(decoder) = decoder {
+                    decoder.stop();
+                }
+                let dir = job.dir.lock().unwrap().clone();
+                if dir
+                    .file_name()
+                    .unwrap()
+                    .to_string_lossy()
+                    .starts_with("work-")
+                {
+                    let _ = fs::remove_dir_all(dir);
+                }
+            }
+        }));
+        Ok(initial)
+    }
+
+    pub fn navigation_hint(&self, axis: Option<&str>, direction: Option<i8>) {
+        if let Some(acquisition) = self.acquisition.lock().unwrap().as_ref() {
+            acquisition.hint(axis, direction);
+        }
+    }
+
+    pub fn preload_status(&self) -> crate::preload::PreloadStatus {
+        self.acquisition
+            .lock()
+            .unwrap()
+            .as_ref()
+            .map(|item| item.status())
+            .unwrap_or_default()
+    }
+
+    pub fn set_memory_budget(&self, bytes: u64) -> Result<crate::memory::MemoryStatus, String> {
+        self.memory.set_limit(bytes)?;
+        if let Some(acquisition) = self.acquisition.lock().unwrap().as_ref() {
+            acquisition.trim()?;
+        }
+        self.memory.status()
+    }
+
+    pub fn snapshot(&self) -> Option<ImageState> {
+        self.current
+            .lock()
+            .unwrap()
+            .as_ref()
+            .map(|job| job.state.lock().unwrap().clone())
+    }
+    pub fn cancel(&self) {
+        if let Some(acquisition) = self.acquisition.lock().unwrap().as_ref() {
+            acquisition.foreground();
+        }
+        let job = self.current.lock().unwrap().clone();
+        if let Some(job) = job {
+            job.cancel();
+        }
+    }
+    pub fn shutdown(&self) {
+        self.closing.store(true, Ordering::Relaxed);
+        if let Some(acquisition) = self.acquisition.lock().unwrap().take() {
+            acquisition.stop();
+        }
+        self.cancel();
+        for worker in self.workers.lock().unwrap().drain(..) {
+            let _ = worker.join();
+        }
+        while self.requests.load(Ordering::Relaxed) != 0 {
+            thread::sleep(Duration::from_millis(20));
+        }
+    }
+}
+
+impl LoadContext {
+    pub(crate) fn background_job(
+        &self,
+        path: &Path,
+        source: PathBuf,
+        frame: (crate::nd2::Selection, crate::nd2::Dimensions, Vec<Channel>),
+        acquisition: Arc<crate::preload::Acquisition>,
+        preview_only: bool,
+    ) -> Result<Arc<Job>, String> {
+        self.create_job(
+            path,
+            source,
+            Some(frame),
+            Some(acquisition),
+            if preview_only {
+                LoadMode::Preview
+            } else {
+                LoadMode::Detail
+            },
+            None,
+        )
+    }
+
+    fn create_job(
+        &self,
+        path: &Path,
+        source: PathBuf,
+        frame: Option<(crate::nd2::Selection, crate::nd2::Dimensions, Vec<Channel>)>,
+        acquisition: Option<Arc<crate::preload::Acquisition>>,
+        mode: LoadMode,
+        notifier: Option<Notifier>,
+    ) -> Result<Arc<Job>, String> {
         #[cfg(windows)]
         let source_file = File::open(&source).map_err(|e| e.to_string())?;
         #[cfg(windows)]
@@ -335,6 +589,10 @@ impl Backend {
             input,
             source,
             nd2,
+            acquisition,
+            preview_only: matches!(mode, LoadMode::Preview),
+            background: !matches!(mode, LoadMode::Foreground),
+            memory: self.memory.clone(),
             annotations: Mutex::new(None),
             work: dir,
             native: Mutex::new(Vec::new()),
@@ -343,74 +601,23 @@ impl Backend {
             cache_key,
             process_number: AtomicU64::new(0),
             decoder: Mutex::new(None),
+            decoder_memory: Mutex::new(None),
             processes: Mutex::new(HashMap::new()),
-            notifier: self.notifier.clone(),
+            notifier,
             budget_check: Mutex::new(Instant::now()),
             housekeeping: AtomicBool::new(false),
             cache_access: self.cache_access.clone(),
         });
-        let old = self.current.lock().unwrap().replace(job.clone());
-        if let Some(old) = old {
-            old.cancel();
-        }
-        let mut workers = self.workers.lock().unwrap();
-        workers.retain(|worker| !worker.is_finished());
-        workers.push(thread::spawn(move || {
-            if let Err(error) = load(&job) {
-                job.update(|state| {
-                    state.phase = "error".into();
-                    state.error = Some(error);
-                    state.detail = "Image loading failed.".into();
-                });
-            }
-            // Generated pyramids need no decoder once complete; native tiles do.
-            if job.native.lock().unwrap().is_empty() {
-                let decoder = job.decoder.lock().unwrap().take();
-                if let Some(decoder) = decoder {
-                    decoder.stop();
-                }
-            }
-            if job.cancel.load(Ordering::Relaxed) || job.state.lock().unwrap().phase == "error" {
-                let decoder = job.decoder.lock().unwrap().clone();
-                if let Some(decoder) = decoder {
-                    decoder.stop();
-                }
-                let dir = job.dir.lock().unwrap().clone();
-                if dir
-                    .file_name()
-                    .unwrap()
-                    .to_string_lossy()
-                    .starts_with("work-")
-                {
-                    let _ = fs::remove_dir_all(dir);
-                }
-            }
-        }));
-        Ok(initial)
+        Ok(job)
     }
+}
 
-    pub fn snapshot(&self) -> Option<ImageState> {
-        self.current
-            .lock()
-            .unwrap()
-            .as_ref()
-            .map(|job| job.state.lock().unwrap().clone())
-    }
-    pub fn cancel(&self) {
-        let job = self.current.lock().unwrap().clone();
-        if let Some(job) = job {
-            job.cancel();
+pub(crate) fn finish_decoder(job: &Job) {
+    if job.native.lock().unwrap().is_empty() {
+        if let Some(decoder) = job.decoder.lock().unwrap().take() {
+            decoder.stop();
         }
-    }
-    pub fn shutdown(&self) {
-        self.closing.store(true, Ordering::Relaxed);
-        self.cancel();
-        for worker in self.workers.lock().unwrap().drain(..) {
-            let _ = worker.join();
-        }
-        while self.requests.load(Ordering::Relaxed) != 0 {
-            thread::sleep(Duration::from_millis(20));
-        }
+        job.decoder_memory.lock().unwrap().take();
     }
 }
 
@@ -439,7 +646,7 @@ impl Job {
         .await
     }
 
-    fn cancel(&self) {
+    pub(crate) fn cancel(&self) {
         let snapshot = {
             let mut state = self.state.lock().unwrap();
             if self.cancel.swap(true, Ordering::Relaxed) {
@@ -457,6 +664,7 @@ impl Job {
         if let Some(decoder) = decoder {
             decoder.stop();
         }
+        self.decoder_memory.lock().unwrap().take();
         for (_, process) in self.processes.lock().unwrap().drain() {
             let mut child = process.lock().unwrap();
             let _ = child.kill();
@@ -711,7 +919,8 @@ fn write_manifest(job: &Job, dir: &Path) -> Result<(), String> {
 }
 
 fn cached_manifest(job: &Job, dir: &Path) -> Option<CacheManifest> {
-    if !dir.join("complete").is_file() {
+    let complete = dir.join("complete").is_file();
+    if !complete && (job.nd2.is_none() || !dir.join("previews").is_file()) {
         return None;
     }
     let file = File::open(dir.join("manifest.json")).ok()?;
@@ -753,12 +962,24 @@ fn cached_manifest(job: &Job, dir: &Path) -> Option<CacheManifest> {
     {
         return None;
     }
-    if !valid_cache_assets(
-        dir,
-        manifest.channels.len(),
-        manifest.channel_mode,
-        !manifest.native.is_empty(),
-    ) {
+    let valid = if complete {
+        valid_cache_assets(
+            dir,
+            manifest.channels.len(),
+            manifest.channel_mode,
+            !manifest.native.is_empty(),
+        )
+    } else {
+        manifest.channel_mode
+            && manifest.native.is_empty()
+            && (0..manifest.channels.len()).all(|i| {
+                valid_preview(
+                    &dir.join("channels").join(i.to_string()).join("preview.png"),
+                    true,
+                )
+            })
+    };
+    if !valid {
         return None;
     }
     Some(manifest)
@@ -809,7 +1030,9 @@ fn housekeeping(job: &Job) -> Result<(), String> {
         return Err("Loading cancelled.".into());
     }
     let active = job.dir.lock().unwrap().clone();
-    prune_except(&job.root, CACHE_LIMIT / 2, Some(&active))?;
+    if !job.background {
+        prune_except(&job.root, CACHE_LIMIT / 2, Some(&active))?;
+    }
     job.housekeeping.store(true, Ordering::Relaxed);
     if tree_size(&job.root) > CACHE_LIMIT {
         return Err("Display cache limit reached.".into());
@@ -817,7 +1040,7 @@ fn housekeeping(job: &Job) -> Result<(), String> {
     Ok(())
 }
 
-fn load(job: &Arc<Job>) -> Result<(), String> {
+pub(crate) fn load(job: &Arc<Job>) -> Result<(), String> {
     let complete = job.root.join(&job.cache_key);
     let manifest = {
         let _access = job.cache_access.lock().unwrap();
@@ -828,11 +1051,27 @@ fn load(job: &Arc<Job>) -> Result<(), String> {
         if let Some(manifest) = &manifest {
             *job.native.lock().unwrap() = manifest.native.clone();
             *job.planes.lock().unwrap() = manifest.planes.clone();
-            *job.dir.lock().unwrap() = complete.clone();
+            if complete.join("complete").is_file() || job.preview_only {
+                *job.dir.lock().unwrap() = complete.clone();
+            } else {
+                for index in 0..manifest.channels.len() {
+                    let target = job.work.join("channels").join(index.to_string());
+                    fs::create_dir_all(&target).map_err(|e| e.to_string())?;
+                    fs::copy(
+                        complete
+                            .join("channels")
+                            .join(index.to_string())
+                            .join("preview.png"),
+                        target.join("preview.png"),
+                    )
+                    .map_err(|e| e.to_string())?;
+                }
+            }
         }
         manifest
     };
     if let Some(manifest) = manifest {
+        let fully_ready = complete.join("complete").is_file();
         job.update(|state| {
             state.width = manifest.width;
             state.height = manifest.height;
@@ -843,42 +1082,29 @@ fn load(job: &Arc<Job>) -> Result<(), String> {
             state.calibration = manifest.calibration;
             state.display_ranges = manifest.display_ranges;
             state.preview_ready = true;
-            state.tiles_ready = true;
-            state.phase = "ready".into();
-            state.progress = Some(1.0);
-            state.detail = "Reused display cache. Source pixels unchanged.".into();
+            state.tiles_ready = fully_ready;
+            state.phase = if fully_ready || job.preview_only {
+                "ready"
+            } else {
+                "loading"
+            }
+            .into();
+            state.progress = Some(if fully_ready { 1.0 } else { 0.2 });
+            state.detail = "Reused display preview. Source pixels unchanged.".into();
         });
         fs::write(complete.join("access"), b"").map_err(|e| e.to_string())?;
-        return housekeeping(job);
+        if fully_ready || job.preview_only {
+            return housekeeping(job);
+        }
     }
     let nd2_channels = if let Some(selection) = job.nd2 {
-        let request = crate::vips_worker::Request::Nd2Extract {
-            input: job
-                .work
-                .join("source.nd2")
-                .to_str()
-                .ok_or("Invalid ND2 path")?
-                .into(),
-            output: job.input.to_str().ok_or("Invalid ND2 cache path")?.into(),
-            selection,
-        };
-        #[cfg(test)]
-        let output = if uses_worker(job) {
-            worker_call(job, &request, None)?
-        } else {
-            serde_json::to_string(&crate::nd2::extract_display(
-                &job.source,
-                &job.input,
-                selection,
-            ))
-            .map_err(|error| error.to_string())?
-        };
-        #[cfg(not(test))]
-        let output = worker_call(job, &request, None)?;
-        let extracted: Result<crate::nd2::ExtractedNd2, String> = serde_json::from_str(&output)
-            .map_err(|error| format!("Invalid ND2 reader response: {error}"))?;
-        let extracted = extracted?;
+        let acquisition = job.acquisition.as_ref().ok_or("Missing ND2 acquisition")?;
+        let extracted =
+            acquisition.extract_display(&job.input, selection, job.background, &job.cancel)?;
+        let geometry = acquisition.geometry(selection)?;
         job.update(|state| {
+            state.width = geometry.width;
+            state.height = geometry.height;
             state.dimensions = Some(extracted.dimensions);
             state.channels = extracted.channels.clone();
             state.calibration = extracted.calibration;
@@ -1241,79 +1467,89 @@ fn load_channels(job: &Arc<Job>, width: u32, height: u32, ushort: bool) -> Resul
             .or_else(|| levels.last())
             .cloned()
     };
-    if uses_worker(job) {
-        let (options, scale): (Vec<_>, Vec<_>) = planes
-            .iter()
-            .map(|plane| match &level {
-                Some(level) => (
-                    level.options.clone(),
-                    (1024.0 / level.width.max(level.height) as f64).min(1.0),
-                ),
-                None => (
-                    format!("[page={},n=1,access=sequential]", plane.page),
-                    (1024.0 / width.max(height) as f64).min(1.0),
-                ),
-            })
-            .unzip();
-        worker_call(
-            job,
-            &crate::vips_worker::Request::ChannelPreviews {
-                input: job
-                    .input
-                    .to_str()
-                    .ok_or("Image decoder path is not UTF-8")?
-                    .into(),
-                options,
-                scale,
-                planes: planes.clone(),
-                ushort,
-                directory: dir
-                    .to_str()
-                    .ok_or("Image decoder path is not UTF-8")?
-                    .into(),
-            },
-            Some((0.0, 0.2)),
-        )?;
-    } else {
-        for (index, plane) in planes.iter().enumerate() {
-            let channel = dir.join("channels").join(index.to_string());
-            fs::create_dir_all(&channel).map_err(|e| e.to_string())?;
-            let (options, scale) = match &level {
-                Some(level) => (
-                    level.options.clone(),
-                    (1024.0 / level.width.max(level.height) as f64).min(1.0),
-                ),
-                None => (
-                    format!("[page={},n=1,access=sequential]", plane.page),
-                    (1024.0 / width.max(height) as f64).min(1.0),
-                ),
-            };
-            let resized = job.work.join(format!("preview-{index}.v"));
-            run(
+    let previews_ready = (0..planes.len()).all(|index| {
+        valid_preview(
+            &dir.join("channels")
+                .join(index.to_string())
+                .join("preview.png"),
+            true,
+        )
+    });
+    if !previews_ready {
+        if uses_worker(job) {
+            let (options, scale): (Vec<_>, Vec<_>) = planes
+                .iter()
+                .map(|plane| match &level {
+                    Some(level) => (
+                        level.options.clone(),
+                        (1024.0 / level.width.max(level.height) as f64).min(1.0),
+                    ),
+                    None => (
+                        format!("[page={},n=1,access=sequential]", plane.page),
+                        (1024.0 / width.max(height) as f64).min(1.0),
+                    ),
+                })
+                .unzip();
+            worker_call(
                 job,
-                "vips",
-                &[
-                    "resize".into(),
-                    input(job, &options),
+                &crate::vips_worker::Request::ChannelPreviews {
+                    input: job
+                        .input
+                        .to_str()
+                        .ok_or("Image decoder path is not UTF-8")?
+                        .into(),
+                    options,
+                    scale,
+                    planes: planes.clone(),
+                    ushort,
+                    directory: dir
+                        .to_str()
+                        .ok_or("Image decoder path is not UTF-8")?
+                        .into(),
+                },
+                Some((0.0, 0.2)),
+            )?;
+        } else {
+            for (index, plane) in planes.iter().enumerate() {
+                let channel = dir.join("channels").join(index.to_string());
+                fs::create_dir_all(&channel).map_err(|e| e.to_string())?;
+                let (options, scale) = match &level {
+                    Some(level) => (
+                        level.options.clone(),
+                        (1024.0 / level.width.max(level.height) as f64).min(1.0),
+                    ),
+                    None => (
+                        format!("[page={},n=1,access=sequential]", plane.page),
+                        (1024.0 / width.max(height) as f64).min(1.0),
+                    ),
+                };
+                let resized = job.work.join(format!("preview-{index}.v"));
+                run(
+                    job,
+                    "vips",
+                    &[
+                        "resize".into(),
+                        input(job, &options),
+                        resized.clone().into_os_string(),
+                        scale.to_string().into(),
+                    ],
+                )?;
+                let partial = channel.join("preview.partial.png");
+                extract_plane(
+                    job,
                     resized.clone().into_os_string(),
-                    scale.to_string().into(),
-                ],
-            )?;
-            let partial = channel.join("preview.partial.png");
-            extract_plane(
-                job,
-                resized.clone().into_os_string(),
-                plane.band,
-                &partial,
-                ushort,
-            )?;
-            let _ = fs::remove_file(resized);
-            fs::rename(partial, channel.join("preview.png")).map_err(|e| e.to_string())?;
+                    plane.band,
+                    &partial,
+                    ushort,
+                )?;
+                let _ = fs::remove_file(resized);
+                fs::rename(partial, channel.join("preview.png")).map_err(|e| e.to_string())?;
+            }
         }
     }
     job.update(|state| {
         state.preview_ready = true;
-        state.tiles_ready = !native;
+        state.tiles_ready = false;
         state.progress = Some(0.2);
         state.detail = format!(
             "{} channel previews available. {} Sharper tiles are loading…",
@@ -1326,7 +1562,7 @@ fn load_channels(job: &Arc<Job>, width: u32, height: u32, ushort: bool) -> Resul
         );
     });
     housekeeping(job)?;
-    if !native {
+    if !native && !job.preview_only {
         for (index, plane) in planes.iter().enumerate() {
             let start = 0.2 + 0.79 * index as f64 / planes.len() as f64;
             let end = 0.2 + 0.79 * (index + 1) as f64 / planes.len() as f64;
@@ -1366,7 +1602,12 @@ fn load_channels(job: &Arc<Job>, width: u32, height: u32, ushort: bool) -> Resul
         }
     }
     write_manifest(job, &dir)?;
-    fs::write(dir.join("complete"), b"channels-v1").map_err(|e| e.to_string())?;
+    let marker = if job.preview_only {
+        "previews"
+    } else {
+        "complete"
+    };
+    fs::write(dir.join(marker), b"channels-v1").map_err(|e| e.to_string())?;
     fs::write(dir.join("access"), b"").map_err(|e| e.to_string())?;
     let access = job.cache_access.lock().unwrap();
     if job.cancel.load(Ordering::Relaxed) {
@@ -1377,7 +1618,7 @@ fn load_channels(job: &Arc<Job>, width: u32, height: u32, ushort: bool) -> Resul
         .root
         .join(format!("promote-{}", job.state.lock().unwrap().id));
     fs::create_dir(&staging).map_err(|e| e.to_string())?;
-    for name in ["channels", "manifest.json", "complete", "access"] {
+    for name in ["channels", "manifest.json", marker, "access"] {
         fs::rename(dir.join(name), staging.join(name)).map_err(|e| e.to_string())?;
     }
     if complete.exists() {
@@ -1389,7 +1630,7 @@ fn load_channels(job: &Arc<Job>, width: u32, height: u32, ushort: bool) -> Resul
     drop(access);
     job.update(|state| {
         state.phase = "ready".into();
-        state.tiles_ready = true;
+        state.tiles_ready = !job.preview_only;
         state.progress = Some(1.0);
         state.detail = format!(
             "{} channels ready. {} Source pixels unchanged.",
@@ -1772,7 +2013,29 @@ fn worker_call(
             return Err("Loading cancelled.".into());
         }
         if slot.is_none() {
-            *slot = Some(Arc::new(crate::decoder::Decoder::start(&job.work)?));
+            let state = job.state.lock().unwrap().clone();
+            // Reserve the native workspace while its process/retained image handles live.
+            // ND2 display TIFFs have one whole-image strip, so include its full decode.
+            let preview = state.channels.len().max(1) as u64 * 1024 * 1024 * 4;
+            let frame = if job.nd2.is_some() {
+                u64::from(state.width) * u64::from(state.height) * state.channels.len() as u64 * 4
+            } else {
+                64 * 1024 * 1024
+            };
+            let amount = 128 * 1024 * 1024 + frame + preview;
+            let reservation = if let Some(acquisition) = &job.acquisition {
+                acquisition.reserve_workspace(amount, job.background)?
+            } else {
+                job.memory.try_reserve(amount, job.background)?
+            }.ok_or("Image decoding does not fit the memory limit. Increase it in Settings or close another image window.")?;
+            *job.decoder_memory.lock().unwrap() = Some(reservation);
+            *slot = match crate::decoder::Decoder::start(&job.work) {
+                Ok(decoder) => Some(Arc::new(decoder)),
+                Err(error) => {
+                    job.decoder_memory.lock().unwrap().take();
+                    return Err(error);
+                }
+            };
         }
         slot.as_ref().unwrap().clone()
     };
@@ -1994,7 +2257,7 @@ fn native_tile(job: &Job, level: u32, x: u32, y: u32) -> Result<Vec<u8>, String>
     fs::read(destination).map_err(|e| e.to_string())
 }
 
-fn tree_size(path: &Path) -> u64 {
+pub(crate) fn tree_size(path: &Path) -> u64 {
     let Ok(entries) = fs::read_dir(path) else {
         return 0;
     };
@@ -2020,7 +2283,8 @@ fn prune_except(root: &Path, limit: u64, protected: Option<&Path>) -> Result<(),
         .flatten()
         .filter(|entry| {
             protected != Some(entry.path().as_path())
-                && entry.path().join("complete").is_file()
+                && (entry.path().join("complete").is_file()
+                    || entry.path().join("previews").is_file())
                 && !entry.file_name().to_string_lossy().starts_with("work-")
         })
         .collect();

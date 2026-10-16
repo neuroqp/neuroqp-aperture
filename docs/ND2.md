@@ -2,7 +2,8 @@
 
 Aperture reads Nikon ND2 through the pinned `openreadout-nd2` and
 `openreadout-core` 0.3.0 crates. Format parsing and pixel decoding run in Rust
-inside the existing image worker. There is no Python, Java, TypeScript reader,
+on a loader thread. Native preview and pyramid operations remain in isolated
+image workers. There is no Python, Java, TypeScript reader,
 vendor SDK, or whole Bio-Formats checkout in the application.
 
 ## Browsing
@@ -28,10 +29,15 @@ metadata, not a substitute for per-frame timestamps.
 
 ## Display and limits
 
-The worker decodes only the selected position/Z/time frame, including its channels,
-and writes a temporary display TIFF for the existing preview/pyramid pipeline.
+The loader decodes whole position/Z/time frames, including their channels,
+and writes temporary display TIFFs for the existing preview/pyramid pipeline.
+Original unsigned samples remain in a shared-budget LRU, so revisiting a frame
+can avoid ND2 decoding. The current preview and detail finish first. Idle loading
+prioritizes nearby frames in the last navigation direction, then remaining
+previews, then remaining detail pyramids. Native optional work is cancelled on
+navigation; a single Rust frame decode finishes before yielding.
 Cache identity includes the source fingerprint and selected coordinates. Completed
-display caches are reused within the existing bounded disk cache. Changing the
+display caches and preloaded previews are reused within the existing bounded disk cache. Changing the
 displayed channel does not reread ND2 or regenerate tiles.
 
 For 16-bit data, taking only the high byte would erase low-valued fluorescence.
@@ -43,12 +49,25 @@ normalization; it does not modify the ND2 source or provide a scientific export.
 Brightness across frames or channels is not quantitatively comparable after this
 automatic normalization.
 
-A decoded selected frame is limited to 256 MiB. This is not a total resident-memory
-limit: decoder, channel and assembly buffers can coexist. Encoded frames are
+Settings > General sets the image cache and decoding budget, default 4 GiB,
+shared across all Aperture windows. Retained raw frames, parser/codec workspaces,
+native worker allowances and a fixed browser-image allowance are admitted before
+allocation. Source handles stay pinned; changed sources invalidate retained data.
+Optional caches are reclaimed before foreground work, including across windows.
+Lower limits block new admission while existing operations settle. Under system
+memory pressure, optional raw frames are dropped and preloading pauses until a
+larger free-memory margin returns. Display resolution and source pixels do not
+change with this setting.
+
+This is an upper limit for accounted image data and conservative workspace
+allowances, not an OS-enforced total RSS cap. WebView/runtime overhead and GPU
+memory are separate. OSD's channel-aware tile-cache target remains soft because
+visible tiles must stay available. The disk cache has its own 2 GiB limit.
+A decoded selected frame is additionally limited to 256 MiB. Encoded frames are
 limited to 257 MiB, positions to 4096, and the serialized position/channel summary
 to 48 KiB. The integration validates storage geometry and actual chunk headers
 before pixel decoding. Whole-frame decoding remains the principal scaling limit;
-region decoding, acquisition-wide conversion and time playback are not implemented.
+region decoding and time playback are not implemented.
 
 ND2 is read-only in this iteration. Annotation loading, editing and saving are
 disabled in the UI and rejected by the backend. Vendor ROIs, acquisition events,
@@ -61,7 +80,11 @@ application association was added.
 Mandatory Rust tests generate small ND2 containers in memory. They check exact
 P/Z/T/channel addressing, unsigned 8/16-bit values, RGB sample order, display
 normalization, malformed actual chunk lengths, unchanged source bytes, backend
-navigation, invalid selections and coordinate-specific cache reuse. Frontend
+navigation, invalid selections and coordinate-specific cache reuse. Budget tests
+cover shared admission, shrinking/lowering, crash cleanup, pressure hysteresis,
+raw-cache eviction, source replacement and chunk-map validation. Native memory
+checks exercise Settings persistence, preload completion, plane hashes, visible
+continuity and injected preview failure recovery. Frontend
 tests cover axis indexing, channel display filtering, compatible color layouts,
 stale replies, cancellation, request coalescing and source replacement.
 
@@ -80,6 +103,7 @@ cargo build --manifest-path src-tauri/Cargo.toml --locked --features custom-prot
 # Start tauri-driver with owned XDG_CACHE_HOME and TMPDIR, then:
 python3 scripts/native-nd2.py src-tauri/target/debug/aperture
 python3 scripts/native-nd2.py src-tauri/target/debug/aperture --renderer cpu
+python3 scripts/native-memory.py src-tauri/target/debug/aperture
 ```
 
 Public acquisitions and generated evidence stay in ignored `test-data/nd2/` and

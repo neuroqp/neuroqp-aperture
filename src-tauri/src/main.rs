@@ -4,9 +4,12 @@ mod backend;
 mod channels;
 mod decoder;
 mod instances;
+mod memory;
 mod native;
 mod nd2;
+mod nd2_cache;
 mod platform;
+mod preload;
 mod raw_tiff;
 mod roi;
 mod tiff_annotations;
@@ -36,7 +39,7 @@ struct LoadedImage {
 }
 
 #[tauri::command]
-fn open_image(
+async fn open_image(
     path: String,
     backend: State<'_, Backend>,
     session: State<'_, Arc<Session>>,
@@ -153,15 +156,34 @@ fn image_state(backend: State<'_, Backend>) -> Option<ImageState> {
     backend.snapshot()
 }
 #[tauri::command]
-fn select_plane(
+async fn memory_status(backend: State<'_, Backend>) -> Result<memory::MemoryStatus, String> {
+    backend.memory.status()
+}
+#[tauri::command]
+async fn set_memory_budget(
+    limit_bytes: u64,
+    backend: State<'_, Backend>,
+) -> Result<memory::MemoryStatus, String> {
+    backend.set_memory_budget(limit_bytes)
+}
+#[tauri::command]
+fn nd2_preload_status(backend: State<'_, Backend>) -> preload::PreloadStatus {
+    backend.preload_status()
+}
+#[tauri::command]
+#[allow(clippy::too_many_arguments)] // Named IPC fields keep navigation hints optional.
+async fn select_plane(
     id: String,
     position: u32,
     z: u32,
     time: u32,
+    navigation_axis: Option<String>,
+    navigation_direction: Option<i8>,
     backend: State<'_, Backend>,
     session: State<'_, Arc<Session>>,
 ) -> Result<ImageState, String> {
     let _opening = session.opening.lock().unwrap();
+    backend.navigation_hint(navigation_axis.as_deref(), navigation_direction);
     let state = backend.select_plane(&id, nd2::Selection { position, z, time })?;
     if let Some(loaded) = session.loaded.lock().unwrap().as_mut() {
         loaded.id = state.id.clone();
@@ -533,7 +555,8 @@ fn main() {
             if app.path().app_cache_dir()? != cache_root {
                 return Err(std::io::Error::other("The configured Aperture cache directory differs from the startup coordinator directory.").into());
             }
-            let mut backend = Backend::new(instances.cache_root().to_path_buf())
+            let memory = memory::Budget::new(cache_root.clone()).map_err(std::io::Error::other)?;
+            let mut backend = Backend::with_memory(instances.cache_root().to_path_buf(), memory)
                 .map_err(std::io::Error::other)?;
             let handle = app.handle().clone();
             backend.set_notifier(move |state| {
@@ -556,6 +579,9 @@ fn main() {
             image_extensions,
             folder_images,
             image_state,
+            memory_status,
+            set_memory_budget,
+            nd2_preload_status,
             cancel_load,
             load_annotations,
             annotation_target,

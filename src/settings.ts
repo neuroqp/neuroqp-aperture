@@ -1,3 +1,4 @@
+import { invoke, isTauri } from "@tauri-apps/api/core";
 import { icon } from "./icons";
 import "./settings.css";
 
@@ -23,6 +24,19 @@ export const settingsPanel = `
         <button id="settings-close" class="tool" type="button" title="Close settings" aria-label="Close settings">${icon("cancel")}</button>
       </header>
       <section id="settings-general" aria-labelledby="update-title">
+        <h2>Image memory</h2>
+        <form id="memory-form" class="settings-field memory-settings">
+          <div>
+            <label for="memory-limit">Image cache and decoding budget across all windows</label>
+            <p id="memory-description">Covers image caches and decoding. App overhead and GPU memory are separate. More memory keeps more planes ready. Image quality stays the same.</p>
+            <p id="memory-usage">Default limit: 4 GiB.</p>
+            <p id="memory-error" role="alert" hidden></p>
+          </div>
+          <div class="memory-controls">
+            <label class="memory-value"><input id="memory-limit" type="number" min="0.25" max="256" step="any" value="4" required aria-describedby="memory-description memory-usage memory-error"> GiB</label>
+            <button id="memory-apply" class="file-button" type="submit">Apply</button>
+          </div>
+        </form>
         <h2 id="update-title">Updates</h2>
         <div class="settings-update-overview settings-field">
           <div>
@@ -75,6 +89,83 @@ export function bindSettings() {
   const general = document.getElementById("settings-general-button")!;
   const appearance = document.getElementById("settings-appearance-button")!;
   let busy = false;
+  const memoryLimit = document.getElementById(
+    "memory-limit",
+  ) as HTMLInputElement;
+  const memoryError = document.getElementById("memory-error")!;
+  const memoryUsage = document.getElementById("memory-usage")!;
+  const memoryApply = document.getElementById(
+    "memory-apply",
+  ) as HTMLButtonElement;
+  let memoryTimer: ReturnType<typeof setTimeout> | undefined;
+  let memorySaving = false;
+  let memoryEdited = false;
+  let memoryGeneration = 0;
+  memoryLimit.addEventListener("input", () => {
+    memoryEdited = true;
+  });
+  type MemoryStatus = {
+    limitBytes: number;
+    usedBytes: number;
+    pressure: boolean;
+    preloadingPaused: boolean;
+  };
+  const renderMemory = (status: MemoryStatus) => {
+    if (
+      !memoryEdited &&
+      document.activeElement !== memoryLimit &&
+      !memorySaving
+    )
+      memoryLimit.value = String(status.limitBytes / 1024 ** 3);
+    const used = (status.usedBytes / 1024 ** 3).toLocaleString(undefined, {
+      maximumFractionDigits: 2,
+    });
+    memoryUsage.textContent = `${used} GiB reserved across Aperture windows${status.preloadingPaused ? " · Preloading paused" : status.pressure ? " · Memory pressure" : ""}`;
+  };
+  const refreshMemory = async () => {
+    clearTimeout(memoryTimer);
+    if (!isTauri() || !dialog.open) return;
+    const generation = ++memoryGeneration;
+    try {
+      const status = await invoke<MemoryStatus>("memory_status");
+      if (!memorySaving && generation === memoryGeneration)
+        renderMemory(status);
+    } catch (error) {
+      if (generation !== memoryGeneration) return;
+      memoryError.textContent = `Memory usage unavailable: ${String(error)}`;
+      memoryError.hidden = false;
+    }
+    if (dialog.open) memoryTimer = setTimeout(() => void refreshMemory(), 2000);
+  };
+  document
+    .getElementById("memory-form")!
+    .addEventListener("submit", (event) => {
+      event.preventDefault();
+      if (!memoryLimit.reportValidity() || memorySaving || !isTauri()) return;
+      const limitBytes = Math.round(Number(memoryLimit.value) * 1024 ** 3);
+      if (!Number.isSafeInteger(limitBytes)) return;
+      memorySaving = true;
+      memoryGeneration++;
+      memoryApply.disabled = true;
+      memoryError.hidden = true;
+      void invoke<MemoryStatus>("set_memory_budget", { limitBytes })
+        .then(
+          (status) => {
+            memorySaving = false;
+            memoryEdited = false;
+            memoryLimit.value = String(status.limitBytes / 1024 ** 3);
+            renderMemory(status);
+          },
+          (error) => {
+            memoryError.textContent = `Could not save memory limit: ${String(error)}`;
+            memoryError.hidden = false;
+          },
+        )
+        .finally(() => {
+          memorySaving = false;
+          memoryApply.disabled = false;
+        });
+    });
 
   const select = (section: "general" | "appearance") => {
     for (const name of ["general", "appearance"]) {
@@ -89,8 +180,12 @@ export function bindSettings() {
   };
   const showGeneral = () => {
     select("general");
-    if (!dialog.open) dialog.showModal();
+    if (!dialog.open) {
+      memoryEdited = false;
+      dialog.showModal();
+    }
     trigger.setAttribute("aria-expanded", "true");
+    void refreshMemory();
   };
   const close = () => dialog.close();
   trigger.addEventListener("click", showGeneral);
@@ -104,6 +199,7 @@ export function bindSettings() {
   });
   dialog.addEventListener("close", () => {
     if (dialog.open) return;
+    clearTimeout(memoryTimer);
     trigger.setAttribute("aria-expanded", "false");
     if (!document.querySelector("dialog[open]")) trigger.focus();
   });
