@@ -69,7 +69,9 @@ preview as soon as possible, and stays responsive while loading large images.
 
 Two thin horizontal header bars sit above the image viewer.
 
-1. **Image bar:** identify the currently loaded image by filename. Place Open
+1. **Image bar:** place the full NeuroQP logo at the far left, followed by
+   Aperture as text, then identify the currently loaded image by filename. Use
+   the Aperture symbol only as the app icon, outside the in-app header. Place Open
    and Save buttons on the right, alongside window controls including Close.
    Integrate window controls into this bar so the design does not need a third
    title bar. Fixed-position left/right chevrons surround the flexible,
