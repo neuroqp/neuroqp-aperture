@@ -17,7 +17,7 @@ import sys
 import time
 
 REPO = Path(__file__).resolve().parents[2]
-DEFAULT_ROOT = REPO.parent / "neuroqp-aperture-release/artifacts/first-release"
+DEFAULT_ROOT = REPO / "artifacts/first-release"
 GIB = 1024**3
 DISK = "environments/windows11/windows11.qcow2"
 OBSOLETE = ("environments/windows10/windows10.qcow2", "environments/windows10/windows10-eval.iso",

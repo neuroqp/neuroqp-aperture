@@ -7,8 +7,7 @@ check the actual desktop before smoke. Ubuntu needs a native Wayland session. Ar
 and Fedora are periodic compatibility checks and required for relevant runtime or
 desktop changes. Lab maintenance does not establish application acceptance.
 
-The existing host lab is
-`/home/pascal/src/neuroqp-aperture-release/artifacts/first-release`. Use `lab.py`
+The host lab is `artifacts/first-release` in this checkout. Use `lab.py`
 from this Linux host. It downloads nothing and saves no guest RAM. Every mutation
 requires owned QEMU and swtpm processes to have stopped. Launchers hold
 `environments/bounded-lab/operation.lock` for the whole VM lifetime.
