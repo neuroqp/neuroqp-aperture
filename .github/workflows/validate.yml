@@ -1,50 +1,33 @@
-name: Stage A development validation
+name: Validate
 
 on:
   workflow_dispatch:
     inputs:
       mode:
-        description: Native validation or packaging preparation using an already-passed native run
+        description: Build/test first; seal after native functional validation
         type: choice
-        options: [validation, packaging-readiness]
-        default: validation
+        options: [build, seal]
+        default: build
       source_sha:
-        description: Exact application source commit, defaults to dispatched ref
-        required: false
-      validation_run_id:
-        description: Successful exact-source native-validation run to reuse for packaging readiness
-      linux_runtime_url:
-        description: Sealed tested Debian runtime and static packaging tools archive URL
-      linux_runtime_sha256:
-        description: SHA256 of sealed Linux runtime archive
-      source_review_url:
-        description: Existing reviewed corresponding-source plan URL
-      source_review_sha256:
-        description: SHA256 of reviewed source plan
-  workflow_call:
-    inputs:
-      source_sha:
-        type: string
+        description: Exact reviewed source commit contained in main
         required: true
+      build_run_id:
+        description: Successful build-mode run (seal only)
+      linux_runtime_url:
+        description: Tested sealed Linux AppDir archive HTTPS URL (seal only)
+      linux_runtime_sha256:
+        description: SHA256 of tested Linux runtime archive (seal only)
+      native_json:
+        description: Windows11, Debian12 and Ubuntu24 Wayland functional reports JSON (seal only)
 
 permissions:
   contents: read
   actions: read
 
 jobs:
-  packaging-readiness:
-    if: inputs.mode == 'packaging-readiness'
-    uses: ./.github/workflows/package-readiness.yml
-    with:
-      source_sha: ${{ inputs.source_sha }}
-      validation_run_id: ${{ inputs.validation_run_id }}
-      linux_runtime_url: ${{ inputs.linux_runtime_url }}
-      linux_runtime_sha256: ${{ inputs.linux_runtime_sha256 }}
-      source_review_url: ${{ inputs.source_review_url }}
-      source_review_sha256: ${{ inputs.source_review_sha256 }}
-
   linux:
-    if: inputs.mode != 'packaging-readiness'
+    needs: source
+    if: inputs.mode == 'build'
     runs-on: ubuntu-24.04
     timeout-minutes: 45
     container:
@@ -58,7 +41,7 @@ jobs:
       - run: apt-get update && apt-get install -y --no-install-recommends git ca-certificates curl gstreamer1.0-plugins-good=1.22.0-5+deb12u3
       - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
         with:
-          ref: ${{ inputs.source_sha || github.sha }}
+          ref: ${{ inputs.source_sha }}
           persist-credentials: false
       - run: bash scripts/release/prepare-linux.sh
       - uses: pnpm/action-setup@f40ffcd9367d9f12939873eb1018b921a783ffaa # v4
@@ -78,7 +61,7 @@ jobs:
           cache-on-failure: true
           key: debian12-vips8.18-signed
       - run: pnpm install --frozen-lockfile
-      - run: python3 scripts/release/release.py check && python3 scripts/release/test_release.py && python3 scripts/release/test_bounded.py && python3 scripts/release/test_smoke_desktop.py && python3 scripts/release/test-source-windows.py
+      - run: python3 scripts/release/release.py check && python3 scripts/release/test_release.py && python3 scripts/release/test_smoke_desktop.py && python3 scripts/release/test-source-windows.py
       - run: pnpm format:check && pnpm test && pnpm build
       - run: cargo fmt --manifest-path src-tauri/Cargo.toml --all -- --check
       - run: cargo build --manifest-path src-tauri/Cargo.toml --release --features custom-protocol --locked
@@ -86,10 +69,10 @@ jobs:
         env:
           APERTURE_WORKER_EXECUTABLE: ${{ github.workspace }}/src-tauri/target/release/aperture
       - run: cargo clippy --manifest-path src-tauri/Cargo.toml --all-targets --locked -- -D warnings
-      - uses: actions/cache@0057852bfaa89a56745cba8c7296529d2fc39830 # v4
+      - uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4
         with:
+          name: corresponding-source
           path: build/source-baseline
-          key: development-source-${{ runner.os }}-${{ hashFiles('scripts/release/corresponding-source.json') }}
       - name: Stage native development runtime
         run: |
           mkdir -p build/evidence build/development/linux/bin build/development/linux/lib
@@ -102,23 +85,24 @@ jobs:
           python3 scripts/release/notices.py linux build/linux/native-notices.txt build/development/linux/THIRD-PARTY-NOTICES-linux.txt
           # Reuse reviewed native/vendor bytes and current public Git source.
           # Baseline sources stay outside the development artifact; no new archive assembly.
-          python3 scripts/release/release.py development-source --platform linux --source-sha "${{ inputs.source_sha || github.sha }}" --directory build/development/linux --baseline-directory build/source-baseline --fetch
+          python3 scripts/release/release.py development-source --platform linux --source-sha "${{ inputs.source_sha }}" --directory build/development/linux --baseline-directory build/source-baseline
           tar -czf build/evidence/development-linux.tar.gz -C build/development linux
       - name: Record successful development validation
-        run: python3 scripts/release/bounded.py automated linux src-tauri/target/release/aperture build/evidence/stage-a-linux.json
+        run: python3 scripts/release/release-state.py build linux src-tauri/target/release/aperture build/development/linux/BUILDINFO-linux.json build/evidence/build-linux.json --source-sha "${{ inputs.source_sha }}"
       - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
         with:
-          name: stage-a-linux
+          name: development-linux
           path: |
             build/evidence/development-linux.tar.gz
             build/linux/dependencies.json
-            build/evidence/stage-a-linux.json
+            build/evidence/build-linux.json
             dist/
           if-no-files-found: error
-          retention-days: 30
+          retention-days: 90
 
   windows:
-    if: inputs.mode != 'packaging-readiness'
+    needs: source
+    if: inputs.mode == 'build'
     runs-on: windows-2022
     timeout-minutes: 45
     env:
@@ -128,7 +112,7 @@ jobs:
     steps:
       - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
         with:
-          ref: ${{ inputs.source_sha || github.sha }}
+          ref: ${{ inputs.source_sha }}
           persist-credentials: false
       - uses: ilammy/msvc-dev-cmd@0b201ec74fa43914dc39ae48a89fd1d8cb592756 # v1
         with:
@@ -153,7 +137,7 @@ jobs:
           targets: x86_64-pc-windows-msvc
           components: rustfmt, clippy
       - run: pnpm install --frozen-lockfile
-      - run: python scripts/release/release.py check; if ($LASTEXITCODE) { exit $LASTEXITCODE }; python scripts/release/test_release.py; if ($LASTEXITCODE) { exit $LASTEXITCODE }; python scripts/release/test_bounded.py; if ($LASTEXITCODE) { exit $LASTEXITCODE }; python scripts/release/test_smoke_desktop.py; if ($LASTEXITCODE) { exit $LASTEXITCODE }; python scripts/release/test-source-windows.py
+      - run: python scripts/release/release.py check; if ($LASTEXITCODE) { exit $LASTEXITCODE }; python scripts/release/test_release.py; if ($LASTEXITCODE) { exit $LASTEXITCODE }; python scripts/release/test_smoke_desktop.py; if ($LASTEXITCODE) { exit $LASTEXITCODE }; python scripts/release/test-source-windows.py
       - run: pwsh scripts/release/prepare-windows.ps1
       - name: Configure native tools
         run: |
@@ -173,32 +157,109 @@ jobs:
         env:
           APERTURE_WORKER_EXECUTABLE: ${{ github.workspace }}\src-tauri\target\x86_64-pc-windows-msvc\release\aperture.exe
       - run: cargo clippy --manifest-path src-tauri/Cargo.toml --target x86_64-pc-windows-msvc --all-targets --locked -- -D warnings
-      - uses: actions/cache@0057852bfaa89a56745cba8c7296529d2fc39830 # v4
+      - uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4
         with:
+          name: corresponding-source
           path: build/source-baseline
-          key: development-source-${{ runner.os }}-${{ hashFiles('scripts/release/corresponding-source.json') }}
       - name: Stage native development runtime
         run: |
+          New-Item -ItemType Directory -Force build/evidence | Out-Null
           Copy-Item src-tauri/target/x86_64-pc-windows-msvc/release/aperture.exe build/windows/payload/aperture.exe
           python scripts/release/release.py buildinfo windows build/windows/payload build/windows/dependencies.json
           if ($LASTEXITCODE) { exit $LASTEXITCODE }
           python scripts/release/notices.py windows build/windows/native-notices.txt build/windows/payload/THIRD-PARTY-NOTICES-windows.txt
           if ($LASTEXITCODE) { exit $LASTEXITCODE }
           # The source baseline is verified once here and never enters this runtime ZIP.
-          python scripts/release/release.py development-source --platform windows --source-sha (git rev-parse HEAD) --directory build/windows/payload --baseline-directory build/source-baseline --fetch
+          python scripts/release/release.py development-source --platform windows --source-sha (git rev-parse HEAD) --directory build/windows/payload --baseline-directory build/source-baseline
           if ($LASTEXITCODE) { exit $LASTEXITCODE }
           # Runtime files, development executable and pinned dependency identities travel together.
           python -c "import shutil; shutil.make_archive('build/evidence/development-windows', 'zip', 'build/windows/payload')"
           if ($LASTEXITCODE) { exit $LASTEXITCODE }
       - name: Record successful development validation
-        run: python scripts/release/bounded.py automated windows src-tauri/target/x86_64-pc-windows-msvc/release/aperture.exe build/evidence/stage-a-windows.json
+        run: python scripts/release/release-state.py build windows src-tauri/target/x86_64-pc-windows-msvc/release/aperture.exe build/windows/payload/BUILDINFO-windows.json build/evidence/build-windows.json --source-sha "${{ inputs.source_sha }}"
       - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
         with:
-          name: stage-a-windows
+          name: development-windows
           path: |
             build/evidence/development-windows.zip
             build/windows/dependencies.json
-            build/evidence/stage-a-windows.json
+            build/evidence/build-windows.json
             dist/
           if-no-files-found: error
-          retention-days: 30
+          retention-days: 90
+
+  seal:
+    if: inputs.mode == 'seal' && github.ref == 'refs/heads/main'
+    runs-on: ubuntu-24.04
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+        with:
+          ref: ${{ inputs.source_sha }}
+          persist-credentials: false
+      - name: Verify successful exact-source build workflow
+        env:
+          GH_TOKEN: ${{ github.token }}
+          BUILD_RUN: ${{ inputs.build_run_id }}
+          SOURCE_SHA: ${{ inputs.source_sha }}
+        run: python3 scripts/release/release-state.py trusted-run "$BUILD_RUN" validate.yml --source-sha "$SOURCE_SHA"
+      - uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4
+        with:
+          pattern: development-*
+          run-id: ${{ inputs.build_run_id }}
+          github-token: ${{ github.token }}
+          path: build/development
+          merge-multiple: true
+      - uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4
+        with:
+          name: corresponding-source
+          run-id: ${{ inputs.build_run_id }}
+          github-token: ${{ github.token }}
+          path: build/validated/source
+      - name: Seal tested runtime and native validation identity
+        env:
+          RUNTIME_URL: ${{ inputs.linux_runtime_url }}
+          RUNTIME_SHA: ${{ inputs.linux_runtime_sha256 }}
+          NATIVE_JSON: ${{ inputs.native_json }}
+          SOURCE_SHA: ${{ inputs.source_sha }}
+          BUILD_RUN: ${{ inputs.build_run_id }}
+        run: |
+          cp build/development/build/evidence/build-*.json build/validated/
+          cp build/development/build/evidence/development-windows.zip build/validated/
+          cp -a build/development/dist build/validated/dist
+          curl --fail --location --proto '=https' --tlsv1.2 "$RUNTIME_URL" -o build/validated/linux-runtime.tar.gz
+          printf '%s  %s\n' "$RUNTIME_SHA" build/validated/linux-runtime.tar.gz | sha256sum --check
+          python3 -c 'import os; from pathlib import Path; Path("build/validated/native.json").write_text(os.environ["NATIVE_JSON"])'
+          python3 scripts/release/release-state.py validate build/validated --source-sha "$SOURCE_SHA" --build-run-id "$BUILD_RUN" --native-report build/validated/native.json --runtime build/validated/linux-runtime.tar.gz --output build/validated/validation.json
+          python3 -c 'import json,subprocess; p=json.load(open("build/validated/validation.json")); l=p["platforms"]["linux"]; subprocess.run(["python3","scripts/release/linux-runtime.py","stage","build/validated/linux-runtime.tar.gz","build/runtime-check","--archive-sha256",p["linux_runtime_sha256"],"--source-sha",p["source_sha"],"--binary-sha256",l["binary_sha256"],"--native-sha256",l["native_dependencies_sha256"]],check=True)'
+      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
+        with:
+          name: validated-inputs
+          path: build/validated/
+          if-no-files-found: error
+          retention-days: 90
+          compression-level: 0
+
+  source:
+    if: inputs.mode == 'build'
+    runs-on: ubuntu-24.04
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+        with:
+          ref: ${{ inputs.source_sha }}
+          persist-credentials: false
+      - uses: actions/cache@0057852bfaa89a56745cba8c7296529d2fc39830 # v4
+        with:
+          path: build/source-cache
+          key: corresponding-source-${{ hashFiles('scripts/release/corresponding-source.json') }}
+      - name: Complete corresponding source before packaging
+        env:
+          SOURCE_SHA: ${{ inputs.source_sha }}
+        run: python3 scripts/release/release.py source-material build/source --source-sha "$SOURCE_SHA" --fetch --cache build/source-cache
+      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
+        with:
+          name: corresponding-source
+          path: build/source/*
+          if-no-files-found: error
+          retention-days: 90

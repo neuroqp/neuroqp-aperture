@@ -5,6 +5,10 @@
   },
   "application_source_inventory_sha256": "e52b8cb47e8bc84c0d395143b3a6ec312d63ded7d703d7ecc3448e2c47f6b3e9",
   "asset": "Aperture-Corresponding-Source.tar.xz",
+  "dependency_inventories_sha256": {
+    "application/cargo-vendor-inventory.json": "566ab54a1f094b4ed5ee30a5d571f55271e562e82016388857e223716ea84310",
+    "application/npm-inventory.json": "f6b68b3c9c5ff6f3fb44db88c2e2cbac97b298e527a51d83cb1b53d681e54d64"
+  },
   "native_dependencies_sha256": {
     "linux": "1b13443ba7fcea076e5b8b9c0b2c38c890a025a24a70e98098ef84576d6ee461",
     "windows": "a0c0dd5352e715e83696a73ca66444e5d60a045bd1a045d38fe1daee96f84a19"

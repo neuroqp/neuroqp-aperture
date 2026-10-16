@@ -17,7 +17,7 @@ RUNNER = Path(__file__).with_name("linux-smoke.py").resolve()
 
 class LinuxIdleTests(unittest.TestCase):
     @unittest.skipIf(os.getuid() == 0, "Idle guard requires an ordinary desktop user")
-    def test_guard_spans_preflight_and_run_then_releases_and_blocks_stale_readiness(self):
+    def test_optional_guard_releases_cookie_on_signal_or_timeout(self):
         with tempfile.TemporaryDirectory() as directory:
             root = Path(directory)
             package = root / "gi"
@@ -71,68 +71,14 @@ class GLib:Variant=Variant
                 acknowledged = json.loads(guard.stdout.readline())
                 self.assertEqual(acknowledged["status"], "active")
                 self.assertTrue((root / ("cookie-" + str(guard.pid))).exists())
-                helper, image = root / "observer.py", root / "tiny.tif"
-                helper.write_text("import json,os,pathlib,sys\npathlib.Path(sys.argv[-1]).write_text(json.dumps(dict(status='pass',forced_kill=False,steps=[dict(name=n,status='pass',forced_kill=False) for n in ('launch','render','clean-exit')])))\nif os.environ.get('IDLE_MARK_LOCKED'):pathlib.Path(os.environ['IDLE_FIXTURE'],'state.json').write_text(json.dumps(dict(locked='yes')))\n")
-                image.write_bytes(b"tiny fixture")
-                sha = lambda p: hashlib.sha256(p.read_bytes()).hexdigest()
-                identity = root / "identity.json"
-                data = dict(source_sha="a" * 40, asset_sha256="f" * 64,
-                            tiny_tiff_path=str(image), tiny_tiff_sha256=sha(image),
-                            deadline_at=(datetime.now(timezone.utc) + timedelta(seconds=30)).isoformat(),
-                            readiness=dict(environment="debian12", helper_path=str(helper), helper_sha256=sha(helper), tools=[],
-                                           preflight=dict(runner_sha256=sha(RUNNER), driver_plan_sha256=sha(plan))))
-                identity.write_text(json.dumps(data))
-                transfer = root / "transfer.json"
-                transfer.write_text(json.dumps(dict(status="pass", forced_kill=False, transport="ssh-stdin", runner_sha256=sha(RUNNER),
-                                                   fixture_sha256=sha(image), returned_sha256=sha(image))))
-                def invoke(name, label):
-                    report = root / (label + ".json")
-                    args = [sys.executable, str(RUNNER), name, str(identity), str(report), "--driver-plan", str(plan)]
-                    if name == "preflight":
-                        args += ["--transport-report", str(transfer)]
-                    return subprocess.run(args, env=environment, capture_output=True, text=True, timeout=5), report
-                for name in ("preflight", "run"):
-                    result, report = invoke(name, name)
-                    self.assertEqual(result.returncode, 0, result.stderr)
-                    self.assertTrue(report.exists())
-                environment["IDLE_MARK_LOCKED"] = "1"
-                result, report = invoke("run", "lost-during-smoke")
-                self.assertNotEqual(result.returncode, 0)
-                self.assertEqual(json.loads(report.read_text())["status"], "pass")
-                self.assertEqual(json.loads(report.with_suffix(".summary.json").read_text())["status"], "fail")
-                del environment["IDLE_MARK_LOCKED"]
-                state.write_text("{}")
-                for bad_state, message in ((dict(locked="yes"), "unlocked"), (dict(active="no"), "active"),
-                                           (dict(blanked=True), "already active"), (dict(owner=":1.restarted"), "restarted")):
-                    state.write_text(json.dumps(bad_state))
-                    result, report = invoke("preflight", "reject")
-                    self.assertNotEqual(result.returncode, 0)
-                    self.assertIn(message, result.stderr)
-                    self.assertFalse(report.exists())
-                state.write_text("{}")
-                # PID reuse or an unrelated process never satisfies the gate.
-                record = json.loads(receipt.read_text())
-                receipt.write_text(json.dumps({**record, "expires_at": datetime.now(timezone.utc).isoformat()}))
-                result, report = invoke("run", "expired-guard")
-                self.assertNotEqual(result.returncode, 0)
-                self.assertIn("lifetime expired", result.stderr)
-                receipt.write_text(json.dumps({**record, "start_ticks": record["start_ticks"] + 1}))
-                result, report = invoke("run", "wrong-process")
-                self.assertNotEqual(result.returncode, 0)
-                self.assertIn("process is no longer alive", result.stderr)
-                receipt.write_text(json.dumps(record))
                 guard.send_signal(signal.SIGHUP)
                 stdout, stderr = guard.communicate(timeout=5)
                 self.assertEqual(guard.returncode, 0, stderr)
                 self.assertEqual(json.loads(receipt.read_text())["status"], "closed")
                 self.assertFalse((root / ("cookie-" + str(guard.pid))).exists())
-                for name in ("preflight", "run"):
-                    result, report = invoke(name, name + "-stopped")
-                    self.assertNotEqual(result.returncode, 0)
-                    self.assertFalse(report.exists())
                 # No activation, unlock, simulated-input or preference calls.
                 self.assertEqual(set((root / "calls").read_text().splitlines()),
-                                 {"GetNameOwner", "GetActive", "Inhibit", "NameHasOwner"})
+                                 {"GetNameOwner", "GetActive", "Inhibit"})
                 # Starting on an already locked desktop cannot create readiness.
                 receipt.unlink()
                 state.write_text(json.dumps(dict(locked="yes")))

@@ -1,0 +1,62 @@
+name: Publish
+
+on:
+  workflow_dispatch:
+    inputs:
+      source_sha:
+        description: Exact tested source commit
+        required: true
+      package_run_id:
+        description: Successful Package run containing release-files
+        required: true
+      smoke_json:
+        description: Fixed four-environment native package smoke reports JSON
+        required: true
+
+permissions:
+  contents: read
+  actions: read
+
+concurrency:
+  group: publish-release
+  cancel-in-progress: false
+
+jobs:
+  publish:
+    if: github.ref == 'refs/heads/main'
+    runs-on: ubuntu-24.04
+    timeout-minutes: 25
+    permissions:
+      contents: write
+      actions: read
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+        with:
+          ref: ${{ inputs.source_sha }}
+          persist-credentials: false
+      - name: Require successful package workflow
+        env:
+          GH_TOKEN: ${{ github.token }}
+          PACKAGE_RUN: ${{ inputs.package_run_id }}
+          SOURCE_SHA: ${{ inputs.source_sha }}
+        run: python3 scripts/release/release-state.py trusted-run "$PACKAGE_RUN" package.yml --source-sha "$SOURCE_SHA"
+      - uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4
+        with:
+          name: release-files
+          run-id: ${{ inputs.package_run_id }}
+          github-token: ${{ github.token }}
+          path: build/release
+      - uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4
+        with:
+          name: package-manifest
+          run-id: ${{ inputs.package_run_id }}
+          github-token: ${{ github.token }}
+          path: build
+      - run: sudo apt-get update && sudo apt-get install -y --no-install-recommends minisign
+      - name: Publish exact tested bytes, reusing matching existing uploads
+        env:
+          GH_TOKEN: ${{ github.token }}
+          NATIVE_JSON: ${{ inputs.smoke_json }}
+        run: |
+          python3 -c 'import os; from pathlib import Path; Path("build/smoke.json").write_text(os.environ["NATIVE_JSON"])'
+          python3 scripts/release/release-state.py publish build/release build/package.json build/smoke.json

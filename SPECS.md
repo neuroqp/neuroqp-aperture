@@ -280,17 +280,22 @@ using representative Linux files, including tiled and strip-based TIFFs.
 - Download and verify before asking to restart. Preserve unsaved-work warnings;
   cancellation and save failure leave edits intact. Stop background image work
   before replacement. Failed installation must leave a recoverable application.
-- Complete automated source regressions and meaningful changed-area native
-  functional validation before freezing source and building final optimized packages.
-  Prepare test helpers and desktop environments during that development stage.
-  Build each final package once on native Windows runners and the Linux baseline
-  container. After packaging, run only the fixed launch, one-small-TIFF rendering
-  and normal-exit smoke checks on the supported desktop matrix. Functional,
-  save/pixel-preservation, concurrency and detailed upgrade testing belongs before
-  packaging. Record results tied to the source commit and asset hashes; required
-  failures, inconclusive checks or the overall release timeout block promotion.
-  Promote tested bytes without rebuilding or moving tags, then verify public
-  download routes and the production updater. Follow [RELEASING.md](RELEASING.md).
+- Use three durable release operations: validate, package and publish. Finish
+  automated regressions, changed-area native functional tests, source coverage
+  and prepared desktop checks before final packaging. Retain source commit,
+  executable and runtime dependency hashes so unchanged results remain reusable.
+- Package the validated Windows and Linux executables without recompiling or
+  resolving dependencies. After packaging, verify identity, updater signatures
+  and source coverage, then run only launch, one-small-TIFF visible rendering and
+  normal-close smoke checks. Windows 11 Setup and portable under a standard user,
+  Debian 12 and Ubuntu 24 native Wayland form the routine matrix. Arch/Omarchy and
+  Fedora are periodic compatibility targets and required when runtime dependencies
+  or desktop integration change. Windows 10 remains unverified.
+- Per-step timeouts preserve completed artifacts. Repair a failed operation and
+  repeat affected checks; unchanged hash-bound results do not expire. Publish the
+  tested bytes without rebuilding, moving published tags or replacing public
+  assets. Verify public downloads and the production updater afterward. Follow
+  [RELEASING.md](RELEASING.md).
 - Keep PR checks fast. Full native builds and package validation are separate from
   ordinary PR checks. Record source identity, dependency versions, checksums,
   third-party notices, and release notes with each candidate.

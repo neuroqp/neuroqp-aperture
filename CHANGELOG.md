@@ -4,6 +4,11 @@
 
 ## [0.2.1] - 2026-10-15
 
+Includes the 0.2.0 candidate features for users upgrading from 0.1.1.
+
+- Open images in separate Aperture windows, including from your file manager.
+- Warn before overwriting images open elsewhere or changed on disk.
+- Keep concurrent image caches and application updates coordinated.
 - Fit newly opened images after the viewer's initial layout and resize complete.
 
 ## [0.2.0] - 2026-10-14

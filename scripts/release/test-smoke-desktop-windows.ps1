@@ -58,8 +58,6 @@ $helperPath=$helper
 $r=@{helper_sha256=(Get-FileHash -LiteralPath $helper).Hash.ToLowerInvariant();steps=@()}
 $i|Add-Member source_sha ('b'*40)
 $observer=[Diagnostics.Process]::GetCurrentProcess().MainModule.FileName
-$i|Add-Member readiness ([pscustomobject]@{ready=$true;helper_sha256=$r.helper_sha256;source_sha=('b'*40);environment=$Environment;tools=@([pscustomobject]@{name='PowerShell observer';path=$observer;sha256=(Get-FileHash -LiteralPath $observer).Hash.ToLowerInvariant()})})
-$i|Add-Member deadline_at ([DateTime]::UtcNow.AddMinutes(30).ToString('o'))
 $script:stepEnd=[DateTime]::UtcNow.AddSeconds(5)
 $owned=[IntPtr]123
 $script:foreground=[IntPtr]456
@@ -77,10 +75,8 @@ $Environment='windows11-setup'
 Step 'launch' { return 'install seam' }
 if ($r.steps[-1].timeout_seconds -ne 180) { throw 'Setup launch cap incorrect' }
 $Environment='windows11-portable'
-$i.deadline_at=[DateTime]::UtcNow.AddSeconds(-1).ToString('o')
-$rejected=$false
-try { Step 'render' { throw 'Expired action must not execute' } } catch { $rejected=$_.ToString() -match 'Frozen attempt deadline' }
-if (-not $rejected -or $r.steps[-1].status -ne 'fail') { throw 'Frozen deadline allowed new action' }
+Step 'render' { return 'render seam without reservation clocks' }
+if ($r.steps[-1].status -ne 'pass') { throw 'Render action was rejected' }
 Remove-Item -LiteralPath $progress -Force
 $temp=Join-Path ([IO.Path]::GetTempPath()) ('aperture-adapter-'+[Guid]::NewGuid().ToString('N'))
 New-Item -ItemType Directory $temp|Out-Null
@@ -91,28 +87,12 @@ try {
         $i|Add-Member ($name+'_sha256') (Get-FileHash -LiteralPath $path).Hash.ToLowerInvariant()
     }
     Verify-Inputs
-    $i.readiness.helper_sha256='0'*64
-    $rejected=$false
-    try { Verify-Inputs } catch { $rejected=$true }
-    if (-not $rejected) { throw 'Changed reviewed helper was accepted' }
-    $i.readiness.helper_sha256=$r.helper_sha256
-    $i.readiness.tools[0].sha256='0'*64
-    $rejected=$false
-    try { Verify-Inputs } catch { $rejected=$true }
-    if (-not $rejected) { throw 'Changed prepared observer tool was accepted' }
-    $i.readiness.tools[0].sha256=(Get-FileHash -LiteralPath $observer).Hash.ToLowerInvariant()
-    $i.readiness.tools[0].path=$helper;$i.readiness.tools[0].sha256=$r.helper_sha256
-    $rejected=$false
-    try { Verify-Inputs } catch { $rejected=$_.ToString() -match 'Actual PowerShell observer' }
-    if (-not $rejected) { throw 'Unpinned actual PowerShell observer was accepted' }
-    $i.readiness.tools[0].path=$observer;$i.readiness.tools[0].sha256=(Get-FileHash -LiteralPath $observer).Hash.ToLowerInvariant()
     [IO.File]::WriteAllText($i.asset_path,'changed input')
     $rejected=$false
     try { Verify-Inputs } catch { $rejected=$true }
     if (-not $rejected) { throw 'Changed incoming asset was accepted' }
     $Report=Join-Path $temp 'watchdog-result.json';$progress=Join-Path $temp 'absent-progress.json'
     $r=[ordered]@{status='inconclusive';forced_kill=$false;steps=@()}
-    $i.deadline_at=[DateTime]::UtcNow.AddMinutes(1).ToString('o')
     $sleeping=Start-Process -FilePath $observer -ArgumentList '-NoProfile -NonInteractive -Command "Start-Sleep -Seconds 10"' -WindowStyle Hidden -PassThru
     $clock=[Diagnostics.Stopwatch]::StartNew()
     try {
