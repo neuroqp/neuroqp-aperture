@@ -1,5 +1,6 @@
 import { icon } from "./icons";
 import { colorPanelMarkup } from "./color-panel";
+import { dimensionPanelMarkup } from "./dimension-navigation";
 import type { AnnotationSettings } from "./annotations";
 import {
   defaultPointSettings,
@@ -12,6 +13,7 @@ const closeButton = `<button class="tool panel-close" type="button" aria-label="
 export const toolPanels = `
   <aside id="tool-panels" aria-label="Tool options" hidden>
     ${colorPanelMarkup}
+    ${dimensionPanelMarkup}
     <section id="points-panel" class="tool-panel" aria-labelledby="points-title" hidden>
       <header class="panel-heading">
         <div class="panel-title"><h2 id="points-title">Multi-point</h2>
@@ -213,7 +215,7 @@ export function bindTools(
     for (const help of helps)
       if (!help.wrapper.contains(target)) help.show(false);
   });
-  const names = ["color", "points"] as const;
+  const names = ["color", "navigator", "points"] as const;
   type PanelName = (typeof names)[number];
   const openPanels = new Set<PanelName>();
   const setOpen = (name: PanelName, open: boolean) => {

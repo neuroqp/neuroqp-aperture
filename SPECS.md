@@ -26,8 +26,9 @@ preview as soon as possible, and stays responsive while loading large images.
 - Start with standard image formats, including JPEG/JPG, PNG, BMP, and TIFF/TIF.
 - Support ordinary images and large TIFFs, including BigTIFF. Exact compression,
   pixel-type, and multi-page coverage must be documented as support is added.
-- Keep the interface and implementation small. Destructive image editing, analysis,
-  and specialist microscopy formats are outside the current scope. Channel brightness, range and coloring are display-only. Multi-point
+- Keep the interface and implementation small. Destructive image editing and analysis
+  are outside the current scope. Nikon ND2 has an initial browsing implementation
+  described below. Channel brightness, range and coloring are display-only. Multi-point
   annotations are editable metadata, kept separate from source image pixels.
 
 ## Technology decisions
@@ -213,6 +214,35 @@ on Open, folder navigation or Close. Cancellation or save failure must retain un
   sliders, and quiet compact panels. Use purple and orange accents in light and
   dark modes. Follow system appearance initially; Settings > Appearance selects
   System, Light or Dark and remembers the choice.
+
+## Initial Nikon ND2 browsing
+
+- Decode ND2 in Rust with pinned `openreadout-nd2` and `openreadout-core` libraries.
+  Do not require Python, Java, a vendor SDK, or a TypeScript format reader.
+- Decode the selected position, Z and time frame in the existing cancellable image
+  worker, then write a temporary display TIFF for the existing channel preview and
+  pyramid pipeline. Normalize 16-bit scalar channels per selected frame into 8-bit
+  display samples. RGB uses one shared range. Keep the original ranges in metadata;
+  displayed brightness across frames is not quantitative. Cache keys include the source identity and selected coordinates.
+  This first implementation decodes a whole selected frame, not arbitrary regions.
+- Support unsigned 8/16-bit scalar acquisition channels, up to 32 samples, and
+  one RGB acquisition channel. Preserve channel names/colors and available physical
+  pixel sizes, Z spacing and nominal time interval. Keep source pixels unchanged.
+- One toggleable Dimensions panel selects Position, Z, Time or Channel. A shared
+  range, previous/next buttons and mouse-wheel scrolling browse the selected axis.
+  Channel offers Composite followed by individual named channels. Channel selection
+  changes only the display; spatial/time selection loads the corresponding frame.
+  Retain the viewport and compatible Color settings between selected frames.
+- ND2 is browsing-only in this iteration. Disable annotation editing and saving in
+  the UI and reject their backend commands. ND2 writing, scientific export and
+  dimension-aware annotation persistence require separate work.
+- Reject unsupported pixel types, mixed RGB acquisition channels, ambiguous
+  experiment loops and oversized frames explicitly. Limit a decoded selected frame
+  to 256 MiB; this is not a total process-memory limit. Reader/codec buffers can
+  coexist with the assembled frame. Bound encoded frames and metadata too.
+- Validate pixel values, dimension mapping and RGB sample order with synthetic
+  fixtures; check real public acquisitions and native UI separately. Keep real
+  acquisitions and generated evidence outside Git.
 
 ## ImageJ annotation interchange
 

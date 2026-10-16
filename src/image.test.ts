@@ -3,6 +3,7 @@ import { test } from "node:test";
 import { setTimeout as delay } from "node:timers/promises";
 import {
   ImageLoader,
+  PlaneNavigation,
   orientation,
   preview,
   pyramid,
@@ -393,4 +394,260 @@ test("fallback polling continues after unchanged snapshots and accepts readiness
   } finally {
     loader.dispose();
   }
+});
+
+test("plane selection restores current frame after rejection and ignores stale replies", async () => {
+  const oldPlane = deferred<ImageState>();
+  const failures: string[] = [];
+  const seen: string[] = [];
+  const dimensions = {
+    positions: ["Field A", "Field B"],
+    z: 3,
+    time: 2,
+    position: 0,
+    zIndex: 0,
+    timeIndex: 0,
+  };
+  const calls: unknown[] = [];
+  const loader = new ImageLoader(
+    {
+      open: async (path) => ({ ...state(path), dimensions }),
+      state: async () => null,
+      cancel: async () => {},
+      selectPlane: async (...args) => {
+        calls.push(args);
+        if (args[2] === 1) throw new Error("Plane unavailable");
+        return oldPlane.promise;
+      },
+    },
+    (image) => seen.push(image.id),
+    (error) => failures.push(error),
+  );
+  await loader.open("nd2");
+  await loader.selectPlane(0, 1, 0);
+  assert.deepEqual(failures, ["Error: Plane unavailable"]);
+  const navigating = loader.selectPlane(1, 2, 1);
+  await delay(0);
+  await loader.open("replacement");
+  oldPlane.resolve({ ...state("stale-plane"), dimensions });
+  await navigating;
+  assert.deepEqual(calls, [
+    ["nd2", 0, 1, 0],
+    ["nd2", 1, 2, 1],
+  ]);
+  assert.deepEqual(seen, ["nd2", "nd2", "replacement"]);
+  loader.dispose();
+});
+
+test("cancellation during plane selection keeps the previous frame navigable", async () => {
+  const plane = deferred<ImageState>();
+  const dimensions = {
+    positions: ["Field A"],
+    z: 3,
+    time: 1,
+    position: 0,
+    zIndex: 0,
+    timeIndex: 0,
+  };
+  const seen: string[] = [];
+  let selections = 0;
+  const loader = new ImageLoader(
+    {
+      open: async () => ({ ...state("nd2"), dimensions }),
+      state: async () => null,
+      cancel: async () => {},
+      selectPlane: async () => {
+        selections++;
+        return plane.promise;
+      },
+    },
+    (image) => seen.push(`${image.id}:${image.phase}`),
+    assert.fail,
+  );
+  await loader.open("nd2");
+  const navigating = loader.selectPlane(0, 1, 0);
+  await delay(0);
+  await loader.cancel();
+  plane.resolve({ ...state("new-plane"), dimensions });
+  await navigating;
+  await loader.selectPlane(0, 2, 0);
+  assert.equal(selections, 2);
+  assert.deepEqual(seen, ["nd2:ready", "nd2:cancelled", "new-plane:ready"]);
+  loader.dispose();
+});
+
+test("dimension axes use zero-based backend positions and include local composite channels", async () => {
+  const { dimensionAxis } = await import("./image.ts");
+  const image = {
+    ...state("nd2"),
+    dimensions: {
+      positions: ["Well A", "Well B"],
+      z: 4,
+      time: 7,
+      position: 1,
+      zIndex: 2,
+      timeIndex: 5,
+    },
+    channels: [
+      { name: "DAPI", color: "blue" },
+      { name: "FITC", color: "green" },
+    ],
+  };
+  assert.deepEqual(dimensionAxis(image, "position", -1), {
+    index: 1,
+    count: 2,
+    name: "Well B",
+  });
+  assert.deepEqual(dimensionAxis(image, "z", -1), {
+    index: 2,
+    count: 4,
+    name: "Z plane",
+  });
+  assert.deepEqual(dimensionAxis(image, "time", -1), {
+    index: 5,
+    count: 7,
+    name: "Time point",
+  });
+  assert.deepEqual(dimensionAxis(image, "channel", -1), {
+    index: 0,
+    count: 3,
+    name: "Composite",
+  });
+  assert.deepEqual(dimensionAxis(image, "channel", 1), {
+    index: 2,
+    count: 3,
+    name: "FITC",
+  });
+});
+
+test("cancelling a pending plane reconciles a native id assigned before its command reply", async () => {
+  const plane = deferred<ImageState>();
+  const dimensions = {
+    positions: ["Field A"],
+    z: 3,
+    time: 1,
+    position: 0,
+    zIndex: 0,
+    timeIndex: 0,
+  };
+  const calls: string[] = [];
+  const seen: string[] = [];
+  const loader = new ImageLoader(
+    {
+      open: async () => ({ ...state("old"), dimensions }),
+      state: async () => ({ ...state("assigned", "cancelled"), dimensions }),
+      cancel: async () => {},
+      selectPlane: async (id) => {
+        calls.push(id);
+        return plane.promise;
+      },
+    },
+    (image) => seen.push(image.id),
+    assert.fail,
+  );
+  await loader.open("nd2");
+  const navigating = loader.selectPlane(0, 1, 0);
+  await delay(0);
+  await loader.cancel();
+  plane.resolve({ ...state("assigned", "loading"), dimensions });
+  await navigating;
+  await loader.selectPlane(0, 2, 0);
+  assert.deepEqual(calls, ["old", "assigned"]);
+  assert.deepEqual(seen, ["old", "assigned"]);
+  loader.dispose();
+});
+
+test("continuous dimension input coalesces coordinates and waits for each new native id", async () => {
+  const first = deferred<ImageState>();
+  const last = deferred<ImageState>();
+  const calls: unknown[] = [];
+  const dimensions = {
+    positions: ["A", "B"],
+    z: 5,
+    time: 3,
+    position: 0,
+    zIndex: 0,
+    timeIndex: 0,
+  };
+  const navigation = new PlaneNavigation(
+    (...plane) => loader.selectPlane(...plane),
+    () => {},
+  );
+  const loader = new ImageLoader(
+    {
+      open: async () => ({ ...state("initial"), dimensions }),
+      state: async () => null,
+      cancel: async () => {},
+      selectPlane: (...args) => {
+        calls.push(args);
+        return calls.length === 1 ? first.promise : last.promise;
+      },
+    },
+    (image) => {
+      const selected = image.dimensions!;
+      navigation.setPlane(
+        {
+          position: selected.position,
+          z: selected.zIndex,
+          time: selected.timeIndex,
+        },
+        true,
+      );
+    },
+    assert.fail,
+  );
+  await loader.open("nd2");
+  navigation.select("z", 1);
+  await delay(0);
+  navigation.select("z", 2);
+  navigation.select("z", 3);
+  navigation.select("position", 1);
+  navigation.select("time", 2);
+  assert.deepEqual(navigation.selection, { position: 1, z: 3, time: 2 });
+  assert.deepEqual(calls, [["initial", 0, 1, 0]]);
+  first.resolve({
+    ...state("first"),
+    dimensions: { ...dimensions, zIndex: 1 },
+  });
+  await delay(0);
+  assert.deepEqual(calls, [
+    ["initial", 0, 1, 0],
+    ["first", 1, 3, 2],
+  ]);
+  last.resolve({
+    ...state("last"),
+    dimensions: { ...dimensions, position: 1, zIndex: 3, timeIndex: 2 },
+  });
+  await delay(0);
+  assert.deepEqual(navigation.selection, { position: 1, z: 3, time: 2 });
+  assert.equal(calls.length, 2);
+  loader.dispose();
+});
+
+test("dimension queue restores confirmed coordinates on failure and clears intent on replacement", async () => {
+  const pending = deferred<boolean>();
+  const calls: unknown[] = [];
+  const navigation = new PlaneNavigation(
+    async (...plane) => {
+      calls.push(plane);
+      return calls.length === 1 ? pending.promise : false;
+    },
+    () => {},
+  );
+  navigation.setPlane({ position: 0, z: 0, time: 0 });
+  navigation.select("z", 1);
+  navigation.select("time", 2);
+  navigation.setPlane({ position: 0, z: 0, time: 0 });
+  pending.resolve(true);
+  await delay(0);
+  assert.deepEqual(calls, [[0, 1, 0]]);
+  assert.deepEqual(navigation.selection, { position: 0, z: 0, time: 0 });
+  navigation.select("z", 3);
+  navigation.select("time", 1);
+  await delay(0);
+  assert.deepEqual(navigation.selection, { position: 0, z: 0, time: 0 });
+  assert.deepEqual(calls, [
+    [0, 1, 0],
+    [0, 3, 0],
+  ]);
 });

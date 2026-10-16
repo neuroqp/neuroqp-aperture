@@ -5,6 +5,7 @@ mod channels;
 mod decoder;
 mod instances;
 mod native;
+mod nd2;
 mod platform;
 mod raw_tiff;
 mod roi;
@@ -152,6 +153,22 @@ fn image_state(backend: State<'_, Backend>) -> Option<ImageState> {
     backend.snapshot()
 }
 #[tauri::command]
+fn select_plane(
+    id: String,
+    position: u32,
+    z: u32,
+    time: u32,
+    backend: State<'_, Backend>,
+    session: State<'_, Arc<Session>>,
+) -> Result<ImageState, String> {
+    let _opening = session.opening.lock().unwrap();
+    let state = backend.select_plane(&id, nd2::Selection { position, z, time })?;
+    if let Some(loaded) = session.loaded.lock().unwrap().as_mut() {
+        loaded.id = state.id.clone();
+    }
+    Ok(state)
+}
+#[tauri::command]
 fn cancel_load(backend: State<'_, Backend>) {
     backend.cancel();
 }
@@ -163,9 +180,17 @@ fn annotation_job(backend: &Backend, id: &str) -> Result<std::sync::Arc<backend:
         .unwrap()
         .clone()
         .ok_or("No image open")?;
-    if job.state.lock().unwrap().id != id {
+    let state = job.state.lock().unwrap();
+    if state.id != id {
         return Err("The image has changed".into());
     }
+    if state.read_only {
+        return Err(
+            "ND2 browsing is read-only. Annotation editing and export are not supported yet."
+                .into(),
+        );
+    }
+    drop(state);
     Ok(job)
 }
 
@@ -525,6 +550,7 @@ fn main() {
         })
         .invoke_handler(tauri::generate_handler![
             open_image,
+            select_plane,
             startup_image,
             new_window,
             image_extensions,

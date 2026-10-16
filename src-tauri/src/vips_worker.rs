@@ -17,6 +17,11 @@ pub const MAX_MESSAGE: usize = 64 * 1024;
 
 #[derive(Debug, Serialize, Deserialize)]
 pub enum Request {
+    Nd2Extract {
+        input: String,
+        output: String,
+        selection: crate::nd2::Selection,
+    },
     TiffChannelInfo {
         input: String,
     },
@@ -247,6 +252,20 @@ impl Worker {
         progress: &Progress,
     ) -> Result<String, String> {
         match request {
+            Request::Nd2Extract {
+                input,
+                output,
+                selection,
+            } => {
+                // Keep explicit unsupported-variant errors in a typed payload;
+                // native decoder failures continue using the shared worker error.
+                let result = crate::platform::source_path(Path::new(&input))
+                    .map_err(|error| error.to_string())
+                    .and_then(|source| {
+                        crate::nd2::extract_display(&source, Path::new(&output), selection)
+                    });
+                serde_json::to_string(&result).map_err(|error| error.to_string())
+            }
             Request::TiffChannelInfo { input } => {
                 let path =
                     crate::platform::source_path(Path::new(&input)).map_err(|e| e.to_string())?;

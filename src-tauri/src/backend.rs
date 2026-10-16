@@ -25,7 +25,7 @@ use std::{
 };
 
 pub const CACHE_LIMIT: u64 = 2 * 1024 * 1024 * 1024;
-pub const IMAGE_EXTENSIONS: &[&str] = &["jpg", "jpeg", "png", "bmp", "tif", "tiff", "webp"];
+pub const IMAGE_EXTENSIONS: &[&str] = &["jpg", "jpeg", "png", "bmp", "tif", "tiff", "webp", "nd2"];
 const TILE_SIZE: u32 = 256;
 static NEXT_ID: AtomicU64 = AtomicU64::new(1);
 
@@ -77,6 +77,10 @@ pub struct ImageState {
     pub detail: String,
     pub channels: Vec<Channel>,
     pub channel_mode: bool,
+    pub read_only: bool,
+    pub dimensions: Option<crate::nd2::Dimensions>,
+    pub calibration: Option<crate::nd2::Calibration>,
+    pub display_ranges: Vec<[u16; 2]>,
 }
 
 type Notifier = Arc<dyn Fn(&ImageState) + Send + Sync>;
@@ -88,6 +92,7 @@ pub struct Job {
     pub dir: Mutex<PathBuf>,
     pub input: PathBuf,
     pub source: PathBuf,
+    nd2: Option<crate::nd2::Selection>,
     /// Initial metadata remains the sourceIndex basis through repeated saves.
     pub annotations: Mutex<Option<crate::annotation_io::AnnotationBasis>>,
     work: PathBuf,
@@ -160,7 +165,7 @@ impl Backend {
             return Err("Viewer shutting down.".into());
         }
         let source = fs::canonicalize(path).map_err(|e| format!("Cannot open image: {e}"))?;
-        self.open_source(path, source)
+        self.open_source(path, source, None)
     }
 
     /// Keep the selected filename for display/format detection while loading the
@@ -168,10 +173,54 @@ impl Backend {
     pub fn open_resolved(&self, path: &Path, source: &Path) -> Result<ImageState, String> {
         let _opening = self.open_lock.lock().unwrap();
         self.cancel();
-        self.open_source(path, source.to_path_buf())
+        self.open_source(path, source.to_path_buf(), None)
     }
 
-    fn open_source(&self, path: &Path, source: PathBuf) -> Result<ImageState, String> {
+    /// Select a frame without changing the pinned source or the folder selection.
+    pub fn select_plane(
+        &self,
+        id: &str,
+        selection: crate::nd2::Selection,
+    ) -> Result<ImageState, String> {
+        let _opening = self.open_lock.lock().unwrap();
+        let job = self
+            .current
+            .lock()
+            .unwrap()
+            .clone()
+            .ok_or("No image open")?;
+        let state = job.state.lock().unwrap().clone();
+        if state.id != id {
+            return Err("The image has changed".into());
+        }
+        let dimensions = state
+            .dimensions
+            .as_ref()
+            .ok_or("This image has no dimension navigation")?;
+        if selection.position as usize >= dimensions.positions.len()
+            || selection.z >= dimensions.z
+            || selection.time >= dimensions.time
+        {
+            return Err("The selected ND2 position, Z or time is out of range.".into());
+        }
+        // Seed navigation immediately; the worker independently validates the file metadata.
+        let mut dimensions = dimensions.clone();
+        dimensions.position = selection.position;
+        dimensions.z_index = selection.z;
+        dimensions.time_index = selection.time;
+        self.open_source(
+            Path::new(&state.path),
+            job.source.clone(),
+            Some((selection, dimensions, state.channels)),
+        )
+    }
+
+    fn open_source(
+        &self,
+        path: &Path,
+        source: PathBuf,
+        frame: Option<(crate::nd2::Selection, crate::nd2::Dimensions, Vec<Channel>)>,
+    ) -> Result<ImageState, String> {
         if self.closing.load(Ordering::Relaxed) {
             return Err("Viewer shutting down.".into());
         }
@@ -190,8 +239,12 @@ impl Backend {
             .unwrap_or("")
             .to_ascii_lowercase();
         if !supported_image(path) {
-            return Err("Supported formats: JPEG, PNG, BMP, WebP, TIFF and BigTIFF.".into());
+            return Err(
+                "Supported formats: JPEG, PNG, BMP, WebP, TIFF, BigTIFF and Nikon ND2.".into(),
+            );
         }
+        let nd2 =
+            (extension == "nd2").then(|| frame.as_ref().map(|frame| frame.0).unwrap_or_default());
         let id = format!(
             "{}-{}",
             SystemTime::now()
@@ -226,13 +279,25 @@ impl Backend {
             .modified()
             .map_err(|e| e.to_string())?
             .hash(&mut hasher);
+        if let Some(selection) = &nd2 {
+            "nd2-openreadout-0.3.0-v2-normalized".hash(&mut hasher);
+            (selection.position, selection.z, selection.time).hash(&mut hasher);
+        }
         let cache_key = format!("{:016x}", hasher.finish());
         let dir = self.root.join(format!("work-{id}"));
         fs::create_dir(&dir).map_err(|e| e.to_string())?;
         fs::create_dir(dir.join("tmp")).map_err(|e| e.to_string())?;
-        let input = dir.join(format!("source.{extension}"));
+        let alias = dir.join(format!("source.{extension}"));
         // Loader options use brackets, so never pass a user filename to libvips.
-        crate::platform::source_alias(&source, &input).map_err(|e| e.to_string())?;
+        crate::platform::source_alias(&source, &alias).map_err(|e| e.to_string())?;
+        let input = if nd2.is_some() {
+            dir.join("selected.tif")
+        } else {
+            alias
+        };
+        let (dimensions, initial_channels) = frame
+            .map(|(_, dimensions, channels)| (Some(dimensions), channels))
+            .unwrap_or_default();
         let initial = ImageState {
             id,
             revision: 0,
@@ -255,8 +320,12 @@ impl Backend {
             progress: None,
             error: None,
             detail: "Reading image metadata…".into(),
-            channels: Vec::new(),
-            channel_mode: false,
+            channels: initial_channels,
+            channel_mode: nd2.is_some(),
+            read_only: nd2.is_some(),
+            dimensions,
+            calibration: None,
+            display_ranges: Vec::new(),
         };
         let job = Arc::new(Job {
             state: Mutex::new(initial.clone()),
@@ -265,6 +334,7 @@ impl Backend {
             dir: Mutex::new(dir.clone()),
             input,
             source,
+            nd2,
             annotations: Mutex::new(None),
             work: dir,
             native: Mutex::new(Vec::new()),
@@ -508,6 +578,12 @@ struct CacheManifest {
     channel_mode: bool,
     planes: Vec<Plane>,
     native: Vec<NativeLevel>,
+    #[serde(default)]
+    dimensions: Option<crate::nd2::Dimensions>,
+    #[serde(default)]
+    calibration: Option<crate::nd2::Calibration>,
+    #[serde(default)]
+    display_ranges: Vec<[u16; 2]>,
 }
 
 // AppImage readers live under a different mount path after each launch. The
@@ -626,6 +702,9 @@ fn write_manifest(job: &Job, dir: &Path) -> Result<(), String> {
         channel_mode: state.channel_mode,
         planes: job.planes.lock().unwrap().clone(),
         native: job.native.lock().unwrap().clone(),
+        dimensions: state.dimensions,
+        calibration: state.calibration,
+        display_ranges: state.display_ranges,
     };
     let bytes = serde_json::to_vec(&manifest).map_err(|error| error.to_string())?;
     fs::write(dir.join("manifest.json"), bytes).map_err(|error| error.to_string())
@@ -654,6 +733,18 @@ fn cached_manifest(job: &Job, dir: &Path) -> Option<CacheManifest> {
             .iter()
             .any(|plane| plane.page >= 256 || plane.band >= channels::MAX_CHANNELS)
         || manifest.native.len() > 29
+        || (job.nd2.is_some() != manifest.dimensions.is_some())
+        || manifest.dimensions.as_ref().is_some_and(|dimensions| {
+            dimensions.positions.is_empty()
+                || dimensions.position as usize >= dimensions.positions.len()
+                || dimensions.z_index >= dimensions.z
+                || dimensions.time_index >= dimensions.time
+                || job.nd2.is_none_or(|selected| {
+                    selected.position != dimensions.position
+                        || selected.z != dimensions.z_index
+                        || selected.time != dimensions.time_index
+                })
+        })
         || (!manifest.native.is_empty()
             && !native::valid_cached_levels(&manifest.native, manifest.width, manifest.height))
         || (manifest.channel_mode
@@ -748,6 +839,9 @@ fn load(job: &Arc<Job>) -> Result<(), String> {
             state.orientation = manifest.orientation;
             state.channels = manifest.channels;
             state.channel_mode = manifest.channel_mode;
+            state.dimensions = manifest.dimensions;
+            state.calibration = manifest.calibration;
+            state.display_ranges = manifest.display_ranges;
             state.preview_ready = true;
             state.tiles_ready = true;
             state.phase = "ready".into();
@@ -757,6 +851,44 @@ fn load(job: &Arc<Job>) -> Result<(), String> {
         fs::write(complete.join("access"), b"").map_err(|e| e.to_string())?;
         return housekeeping(job);
     }
+    let nd2_channels = if let Some(selection) = job.nd2 {
+        let request = crate::vips_worker::Request::Nd2Extract {
+            input: job
+                .work
+                .join("source.nd2")
+                .to_str()
+                .ok_or("Invalid ND2 path")?
+                .into(),
+            output: job.input.to_str().ok_or("Invalid ND2 cache path")?.into(),
+            selection,
+        };
+        #[cfg(test)]
+        let output = if uses_worker(job) {
+            worker_call(job, &request, None)?
+        } else {
+            serde_json::to_string(&crate::nd2::extract_display(
+                &job.source,
+                &job.input,
+                selection,
+            ))
+            .map_err(|error| error.to_string())?
+        };
+        #[cfg(not(test))]
+        let output = worker_call(job, &request, None)?;
+        let extracted: Result<crate::nd2::ExtractedNd2, String> = serde_json::from_str(&output)
+            .map_err(|error| format!("Invalid ND2 reader response: {error}"))?;
+        let extracted = extracted?;
+        job.update(|state| {
+            state.dimensions = Some(extracted.dimensions);
+            state.channels = extracted.channels.clone();
+            state.calibration = extracted.calibration;
+            state.display_ranges = extracted.display_ranges;
+            state.detail = "Selected ND2 frame decoded. Building display preview…".into();
+        });
+        Some(extracted.channels)
+    } else {
+        None
+    };
     let header = run(job, "vipsheader", &["-a".into(), input(job, "")])?;
     let (width, height) = validate_header(&header)?;
     let tiffinfo = if field(&header, "vips-loader") == Some("tiffload") {
@@ -778,11 +910,21 @@ fn load(job: &Arc<Job>) -> Result<(), String> {
     } else {
         None
     };
-    let layout = channels::discover(
-        &header,
-        &|options| run(job, "vipsheader", &["-a".into(), input(job, options)]),
-        tiffinfo.as_deref(),
-    )?;
+    let layout = if let Some(channels) = nd2_channels {
+        channels::Layout {
+            planes: (0..channels.len() as u32)
+                .map(|band| Plane { page: 0, band })
+                .collect(),
+            channels,
+            channel_mode: true,
+        }
+    } else {
+        channels::discover(
+            &header,
+            &|options| run(job, "vipsheader", &["-a".into(), input(job, options)]),
+            tiffinfo.as_deref(),
+        )?
+    };
     *job.planes.lock().unwrap() = layout.planes;
     let pages = field(&header, "n-pages").unwrap_or("1");
     let pixel = field(&header, "format").unwrap_or("uchar");
@@ -1174,8 +1316,13 @@ fn load_channels(job: &Arc<Job>, width: u32, height: u32, ushort: bool) -> Resul
         state.tiles_ready = !native;
         state.progress = Some(0.2);
         state.detail = format!(
-            "{} channel previews available. First Z/T plane; sharper tiles are loading…",
-            planes.len()
+            "{} channel previews available. {} Sharper tiles are loading…",
+            planes.len(),
+            if state.read_only {
+                "Selected ND2 frame; browsing only."
+            } else {
+                "First Z/T plane."
+            }
         );
     });
     housekeeping(job)?;
@@ -1245,8 +1392,13 @@ fn load_channels(job: &Arc<Job>, width: u32, height: u32, ushort: bool) -> Resul
         state.tiles_ready = true;
         state.progress = Some(1.0);
         state.detail = format!(
-            "{} channels ready. First Z/T plane. Source pixels unchanged.",
-            planes.len()
+            "{} channels ready. {} Source pixels unchanged.",
+            planes.len(),
+            if state.read_only {
+                "Selected ND2 frame; browsing only."
+            } else {
+                "First Z/T plane."
+            }
         );
     });
     Ok(())
