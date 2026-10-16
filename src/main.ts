@@ -25,6 +25,7 @@ import appIcon from "../src-tauri/icons/icon.png";
 import { icon, type IconName } from "./icons";
 import { bindTools, toolPanels } from "./tools";
 import { bindTheme } from "./theme";
+import { bindSettings, settingsPanel } from "./settings";
 import { bindUpdates, updatePanel } from "./updates";
 import { loadChannelHistograms } from "./display";
 import { channelHistograms } from "./display-settings";
@@ -62,8 +63,7 @@ document.querySelector<HTMLDivElement>("#app")!.innerHTML = `
       <button id="open-button" class="file-button" type="button" title="Open image (Ctrl+O)">${icon("open")}<span>Open</span></button>
       <button id="save-button" class="file-button" type="button" title="Save annotated TIFF (Ctrl+S)" disabled>${icon("save")}<span>Save</span></button>
     </div>
-    <button id="update-button" class="tool" type="button" title="Aperture updates" aria-label="Aperture updates">${icon("update")}</button>
-    <button id="theme-button" class="tool theme-button" type="button" aria-label="Switch theme"></button>
+    <button id="settings-button" class="tool" type="button" title="Settings" aria-label="Settings" aria-haspopup="dialog" aria-controls="settings-dialog">${icon("settings")}</button>
     <div class="window-actions">
       <button id="minimize-button" class="window-button" type="button" title="Minimize" aria-label="Minimize">${icon("minimize")}</button>
       <button id="maximize-button" class="window-button" type="button" title="Maximize" aria-label="Maximize">${icon("maximize")}</button>
@@ -91,6 +91,7 @@ document.querySelector<HTMLDivElement>("#app")!.innerHTML = `
     <section id="viewer" aria-label="Image viewer"></section>
     ${toolPanels}
   </div>
+  ${settingsPanel}
   ${updatePanel}
   <dialog id="save-dialog" aria-labelledby="save-dialog-title" aria-describedby="save-dialog-description save-dialog-path">
     <form method="dialog">
@@ -115,6 +116,7 @@ const tools = bindTools(updatePointTool, {
   },
   handleEscape: () => colorPanel.handleEscape(),
 });
+const settings = bindSettings();
 bindTheme();
 const native = isTauri();
 const windowHandle = native ? getCurrentWindow() : null;
@@ -244,7 +246,7 @@ function updatePointTool(key?: keyof AnnotationSettings) {
 }
 
 async function discardChanges() {
-  if (saving || dialogOpen || $<HTMLDialogElement>("update-dialog").open)
+  if (saving || dialogOpen || $<HTMLDialogElement>("settings-dialog").open)
     return false;
   if (!dirty) return true;
   dialogOpen = true;
@@ -297,7 +299,7 @@ async function saveAnnotations() {
     !native ||
     saving ||
     dialogOpen ||
-    $<HTMLDialogElement>("update-dialog").open ||
+    $<HTMLDialogElement>("settings-dialog").open ||
     !currentId ||
     $<HTMLButtonElement>("save-button").disabled
   )
@@ -776,7 +778,7 @@ $("zoom-out-button").addEventListener("click", () => {
   viewer.viewport.applyConstraints();
 });
 document.addEventListener("keydown", (event) => {
-  if (dialogOpen || saving || $<HTMLDialogElement>("update-dialog").open)
+  if (dialogOpen || saving || $<HTMLDialogElement>("settings-dialog").open)
     return;
   if ((event.ctrlKey || event.metaKey) && event.key.toLowerCase() === "n") {
     event.preventDefault();
@@ -823,6 +825,13 @@ document.addEventListener("keydown", (event) => {
 if (windowHandle) {
   void windowHandle
     .onCloseRequested(async (event) => {
+      if ($<HTMLDialogElement>("settings-dialog").open) {
+        if ($<HTMLButtonElement>("settings-close").disabled) {
+          event.preventDefault();
+          return;
+        }
+        settings.close();
+      }
       if (dirty || saving || dialogOpen) {
         event.preventDefault();
         if (await discardChanges()) {
@@ -832,24 +841,30 @@ if (windowHandle) {
       }
     })
     .catch(showError);
-  $("minimize-button").addEventListener(
-    "click",
-    () => void windowHandle.minimize().catch(showError),
-  );
-  $("maximize-button").addEventListener(
-    "click",
-    () => void windowHandle.toggleMaximize().catch(showError),
-  );
-  $("close-button").addEventListener(
-    "click",
-    () => void windowHandle.close().catch(showError),
-  );
+  for (const prefix of ["", "settings-"]) {
+    $(`${prefix}minimize-button`).addEventListener(
+      "click",
+      () => void windowHandle.minimize().catch(showError),
+    );
+    $(`${prefix}maximize-button`).addEventListener(
+      "click",
+      () => void windowHandle.toggleMaximize().catch(showError),
+    );
+    $(
+      prefix ? "settings-window-close-button" : "close-button",
+    ).addEventListener(
+      "click",
+      () => void windowHandle.close().catch(showError),
+    );
+  }
   const syncMaximize = async () => {
     const maximized = await windowHandle.isMaximized();
-    const button = $("maximize-button");
-    button.innerHTML = icon(maximized ? "restore" : "maximize");
-    button.title = maximized ? "Restore" : "Maximize";
-    button.setAttribute("aria-label", button.title);
+    for (const id of ["maximize-button", "settings-maximize-button"]) {
+      const button = $(id);
+      button.innerHTML = icon(maximized ? "restore" : "maximize");
+      button.title = maximized ? "Restore" : "Maximize";
+      button.setAttribute("aria-label", button.title);
+    }
   };
   void syncMaximize().catch(showError);
   void windowHandle.onResized(() => void syncMaximize().catch(showError));
@@ -875,11 +890,15 @@ if (windowHandle) {
     .forEach((button) => (button.disabled = true));
 }
 
-bindUpdates(prepareUpdate, () => {
-  saving = false;
-  dialogOpen = false;
-  updatePointTool();
-});
+bindUpdates(
+  prepareUpdate,
+  () => {
+    saving = false;
+    dialogOpen = false;
+    updatePointTool();
+  },
+  settings,
+);
 
 window.addEventListener("beforeunload", () => {
   loader.dispose();

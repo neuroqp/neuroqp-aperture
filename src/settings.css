@@ -1,0 +1,227 @@
+#settings-dialog {
+  position: fixed;
+  inset: 0;
+  width: 100%;
+  max-width: none;
+  height: 100%;
+  max-height: none;
+  margin: 0;
+  padding: 0;
+  border: 0;
+  color: var(--ink);
+  background: var(--panel);
+  font: inherit;
+  line-height: 1.5;
+  overflow: hidden;
+}
+#settings-dialog[open] {
+  display: grid;
+  grid-template-columns: 168px minmax(0, 1fr);
+  grid-template-rows: 36px minmax(0, 1fr);
+}
+#settings-dialog::backdrop {
+  background: transparent;
+}
+.settings-titlebar {
+  display: flex;
+  grid-column: 1 / -1;
+  align-items: center;
+  border-bottom: 1px solid var(--line);
+  background: var(--paper);
+  user-select: none;
+}
+.settings-titlebar > span {
+  display: flex;
+  align-items: center;
+  flex: 1;
+  height: 100%;
+  padding-left: 14px;
+  color: var(--muted);
+}
+.settings-sidebar {
+  padding: 25px 12px;
+  border-right: 1px solid var(--line);
+  background: var(--paper);
+  overflow-y: auto;
+}
+.settings-sidebar nav {
+  display: grid;
+  gap: 4px;
+}
+.settings-navigation {
+  display: flex;
+  align-items: center;
+  gap: 9px;
+  min-height: 34px;
+  padding: 7px 10px;
+  border: 1px solid transparent;
+  border-radius: 4px;
+  text-align: left;
+}
+.settings-navigation svg {
+  width: 16px;
+  height: 16px;
+}
+#settings-dialog .settings-navigation[aria-current="page"] {
+  border-color: var(--well-border);
+  color: var(--accent-ink);
+  background: var(--well);
+  box-shadow:
+    inset 0 1px 2px var(--well-shadow),
+    inset 0 -1px var(--well-highlight);
+}
+.settings-content {
+  min-width: 0;
+  padding: 25px 36px 36px;
+  overflow-y: auto;
+  overscroll-behavior: contain;
+}
+.settings-heading {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 20px;
+  margin-bottom: 36px;
+}
+.settings-heading h1 {
+  margin: 0;
+  color: var(--accent-ink);
+  font-size: 18px;
+  font-weight: 600;
+  line-height: 1.3;
+}
+#settings-close {
+  flex-shrink: 0;
+  margin: -8px -21px -8px 0;
+  color: var(--muted);
+}
+.settings-content > section {
+  max-width: 620px;
+}
+#settings-general h2 {
+  margin: 0 0 8px;
+  color: var(--accent-ink);
+  font-size: 13px;
+  font-weight: 600;
+}
+#update-edition {
+  color: var(--muted);
+}
+#settings-dialog .settings-update-overview p {
+  margin: 0;
+}
+#settings-dialog #update-status {
+  margin-top: 5px;
+  color: var(--ink);
+}
+#update-check {
+  flex-shrink: 0;
+  height: 30px;
+  padding: 0 12px;
+}
+#update-notes {
+  max-height: 220px;
+  overflow: auto;
+  white-space: pre-wrap;
+  overflow-wrap: anywhere;
+  padding: 10px;
+  border: 1px solid var(--line);
+  border-radius: 4px;
+  background: var(--paper);
+  font: inherit;
+}
+#update-download-progress {
+  width: 100%;
+  margin-bottom: 12px;
+  accent-color: var(--solid);
+}
+#update-auto {
+  flex-shrink: 0;
+  width: 16px;
+  height: 16px;
+  margin: 0;
+  accent-color: var(--solid);
+}
+#settings-button {
+  position: relative;
+  margin-right: 9px;
+  color: var(--accent);
+}
+#settings-button.update-available::after {
+  position: absolute;
+  top: 2px;
+  right: 2px;
+  width: 6px;
+  height: 6px;
+  border-radius: 50%;
+  background: var(--focus);
+  content: "";
+}
+.settings-update-actions {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px;
+  margin-top: 20px;
+}
+.settings-update-actions .file-button {
+  height: 30px;
+  padding: 0 12px;
+}
+.settings-field {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 24px;
+  padding: 20px 0;
+  border-bottom: 1px solid var(--line);
+}
+.settings-field label {
+  color: var(--accent-ink);
+  font-size: 13px;
+  font-weight: 600;
+}
+.settings-field p {
+  margin: 5px 0 0;
+  color: var(--muted);
+}
+#theme-select {
+  min-width: 120px;
+  height: 30px;
+  padding: 0 9px;
+  border: 1px solid var(--field-border);
+  border-radius: 4px;
+  color: var(--ink);
+  background: linear-gradient(var(--field-top), var(--field-bottom));
+  box-shadow: 0 1px 1px var(--shadow);
+  font: inherit;
+}
+#theme-select option {
+  color: var(--ink);
+  background: var(--panel);
+}
+@media (max-width: 560px) {
+  #settings-dialog[open] {
+    grid-template-columns: 132px minmax(0, 1fr);
+  }
+  .settings-sidebar {
+    padding-right: 8px;
+    padding-left: 8px;
+  }
+  .settings-navigation {
+    gap: 6px;
+    padding-right: 7px;
+    padding-left: 7px;
+  }
+  .settings-content {
+    padding-right: 22px;
+    padding-left: 22px;
+  }
+  #settings-close {
+    margin-right: -10px;
+  }
+  .settings-field:not(.settings-auto) {
+    align-items: flex-start;
+    flex-direction: column;
+    gap: 14px;
+  }
+}
