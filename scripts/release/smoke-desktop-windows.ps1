@@ -1,57 +1,17 @@
 param(
     [Parameter(Mandatory)][string]$Identity,
     [Parameter(Mandatory)][ValidateSet('windows11','windows11-setup','windows11-portable')][string]$Environment,
-    [Parameter(Mandatory)][string]$Report,
-    [switch]$Worker
+    [Parameter(Mandatory)][string]$Report
 )
 # Install or launch the exact package on a standard-user desktop, render one TIFF, close.
 $ErrorActionPreference = 'Stop'
 Set-StrictMode -Version Latest
 $i = Get-Content -LiteralPath $Identity -Raw | ConvertFrom-Json
-$helperPath=$PSCommandPath
 $Report = [IO.Path]::GetFullPath($Report)
 if ((Test-Path -LiteralPath $Report) -or -not (Test-Path -LiteralPath (Split-Path $Report))) { throw 'Fresh evidence destination required' }
 $r = [ordered]@{schema=1;operation='smoke';environment=$Environment;status='inconclusive';attempts=1;forced_kill=$false;started_at=[DateTime]::UtcNow.ToString('o');steps=@();helper_sha256=(Get-FileHash -LiteralPath $PSCommandPath).Hash.ToLowerInvariant();helper_revision=$i.source_sha;asset_sha256=$i.asset_sha256;tiny_tiff_sha256=$i.tiny_tiff_sha256}
 foreach ($key in @('source_sha','checksums_sha256','binary_sha256')) { if ($i.PSObject.Properties[$key]) { $r[$key] = $i.$key } }
 if ($Environment -eq 'windows11') { $r.operation='validate' }
-$progress=$Report+'.watch.json'
-function Supervise-Observer($observer,$StartupSeconds=180) {
-    $clock=[Diagnostics.Stopwatch]::StartNew()
-    $stepIndex=-1;$stepEnd=$StartupSeconds
-    while (-not $observer.WaitForExit(150)) {
-        if (Test-Path -LiteralPath $progress) {
-            try { $snapshot=Get-Content -LiteralPath $progress -Raw|ConvertFrom-Json;$r=[ordered]@{};foreach ($property in $snapshot.PSObject.Properties) {$r[$property.Name]=$property.Value} } catch {}
-        }
-        if ($r.steps.Count -and $r.steps.Count-1 -ne $stepIndex) {
-            $stepIndex=$r.steps.Count-1;$step=$r.steps[-1]
-            $elapsed=[Math]::Max(0,([DateTime]::UtcNow-[DateTime]::Parse($step.started_at).ToUniversalTime()).TotalSeconds)
-            $stepEnd=$clock.Elapsed.TotalSeconds+[Math]::Max(0,$step.timeout_seconds-$elapsed)
-        }
-        if ($clock.Elapsed.TotalSeconds -ge $stepEnd) {
-            try { $observer.Kill() } catch {}
-            $stopped=$observer.WaitForExit(5000)
-            $r.status='fail';$r.forced_kill=$true;$r.error='Observer exceeded smoke step timeout; application state preserved';$r.helper_forced_termination=$true;$r.timed_out=$true;$r.observer_stopped=$stopped
-            $r.finished_at=[DateTime]::UtcNow.ToString('o')
-            if ($r.steps.Count) { $step=$r.steps[-1];$step.status='fail';$step.forced_kill=$true;$step|Add-Member timed_out $true -Force;$step.finished_at=$r.finished_at }
-            [IO.File]::WriteAllText($Report,($r|ConvertTo-Json -Depth 15),[Text.UTF8Encoding]::new($false))
-            return 1
-        }
-    }
-    if (-not (Test-Path -LiteralPath $Report)) { $r.status='fail';$r.error='Observer exited without a final report';$r.finished_at=[DateTime]::UtcNow.ToString('o');[IO.File]::WriteAllText($Report,($r|ConvertTo-Json -Depth 15),[Text.UTF8Encoding]::new($false));return 1 }
-    return $observer.ExitCode
-}
-if (-not $Worker) {
-    if (Test-Path -LiteralPath $progress) { throw 'Fresh watchdog evidence destination required' }
-    $arguments='-NoProfile -STA -ExecutionPolicy Bypass -File "'+$PSCommandPath+'" -Worker -Identity "'+[IO.Path]::GetFullPath($Identity)+'" -Environment "'+$Environment+'" -Report "'+$Report+'"'
-    $observer=Start-Process -FilePath ([Diagnostics.Process]::GetCurrentProcess().MainModule.FileName) -ArgumentList $arguments -WindowStyle Hidden -PassThru
-    exit (Supervise-Observer $observer)
-}
-function Save-Progress {
-    $temporary=$progress+'.tmp'
-    [IO.File]::WriteAllText($temporary,($r|ConvertTo-Json -Depth 15),[Text.UTF8Encoding]::new($false))
-    Move-Item -LiteralPath $temporary -Destination $progress -Force
-}
-Save-Progress
 $script:app=$null; $script:held=[IntPtr]::Zero; $script:target=$null
 $priorArguments=$env:WEBVIEW2_ADDITIONAL_BROWSER_ARGUMENTS
 $priorPath=$env:PATH
@@ -67,8 +27,7 @@ function Step($Name,[scriptblock]$Action) {
     $script:stepEnd=[DateTime]::UtcNow.AddSeconds($seconds)
     $row=[ordered]@{name=$Name;status='fail';started_at=[DateTime]::UtcNow.ToString('o');timeout_seconds=$seconds;forced_kill=$false}
     $r.steps+=,$row
-    Save-Progress
-    try { if ((Remaining) -le 0) { throw 'Smoke step timed out' };$row.detail=& $Action;if ((Remaining) -le 0) { throw 'Smoke step timed out' };$row.status='pass' } catch { if ($_.ToString() -match 'deadline') {$row.timed_out=$true;$r.timed_out=$true};throw } finally { $row.finished_at=[DateTime]::UtcNow.ToString('o');Save-Progress }
+    try { if ((Remaining) -le 0) { throw 'Smoke step timed out' };$row.detail=& $Action;if ((Remaining) -le 0) { throw 'Smoke step timed out' };$row.status='pass' } catch { if ($_.ToString() -match 'deadline') {$row.timed_out=$true;$r.timed_out=$true};throw } finally { $row.finished_at=[DateTime]::UtcNow.ToString('o') }
 }
 function Verify-Inputs {
     foreach ($name in @('asset','tiny_tiff')) {
