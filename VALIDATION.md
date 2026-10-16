@@ -1102,3 +1102,25 @@ base channel metadata and disable partial native reuse. Tests cover existing
 levels without rebuilt tiles, classic/BigTIFF byte orders, offsets, cycles and
 budgets. All 62 Linux Rust tests, strict Clippy, rustfmt and independent review
 passed. The final Windows package workflow will verify the worker path.
+
+## Per-connection brightness and unified Color controls
+
+On October 16, 2026, the embedded Linux debug app passed native Tauri/WebDriver
+checks for RGB PNG, 16-bit grayscale TIFF and a five-channel ImageJ TIFF in both
+WebGL2 and forced CPU modes. Framebuffer samples verified that 50% brightness
+halves the selected RGB contribution, leaves the other components unchanged,
+and restores the original pixels at 100%. Zero brightness silences that
+connection. Both renderers passed graph-ramp/plateau, keyboard, percentile
+preservation, selected Reset and close/reopen retention checks. Light and dark
+native screenshots were inspected. Only the file-picker response was supplied
+by the harness; display, loading and rendering used the real frontend/backend.
+Source SHA-256 hashes stayed unchanged.
+
+The separate Display range panel, button and composite CSS filter are removed.
+The final native rebuild passed the same six renderer/image checks with a fresh
+isolated cache, including loading and reopening channel previews without the
+obsolete JPEG. All 76 frontend tests and 76 Rust tests, the frontend/native
+builds, Prettier and rustfmt passed. Rust checks cover ordinary JPEG validation,
+channel PNG validation, channel-cache reuse and both preview-generation paths.
+Ignored evidence is under `artifacts/connection-brightness/`; fixtures and
+screenshots are not committed. Windows packages were not exercised here.

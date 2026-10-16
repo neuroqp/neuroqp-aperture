@@ -1,21 +1,8 @@
-import {
-  displayFilter,
-  histogram,
-  channelHistograms,
-  type DisplaySettings,
-} from "./display-settings";
+import { channelHistograms } from "./display-settings";
 
-export function applyDisplay(settings: DisplaySettings) {
-  const viewer = document.getElementById("viewer")!;
-  viewer.style.setProperty("--display-filter", displayFilter(settings));
-  // Filter only OSD's image canvas. Identity avoids extra compositing work.
-  const identity = settings.minimum === 0 && settings.maximum === 255;
-  viewer.classList.toggle("display-adjusted", !identity);
-}
-
-export async function loadHistogram(
+export async function loadChannelHistograms(
   url: string,
-  channels = 0,
+  channels: number,
   signal?: AbortSignal,
 ) {
   const image = new Image();
@@ -43,15 +30,12 @@ export async function loadHistogram(
   context.drawImage(image, 0, 0, canvas.width, canvas.height);
   const rgba = context.getImageData(0, 0, canvas.width, canvas.height).data;
   const pixels = canvas.width * canvas.height;
-  return {
-    display: histogram(rgba),
-    channels: channelHistograms(
-      Array.from({ length: channels }, (_, channel) =>
-        Uint8Array.from({ length: pixels }, (_, i) => rgba[i * 4 + channel]),
-      ),
-      canvas.width,
-      canvas.height,
-      Uint8Array.from({ length: pixels }, (_, i) => rgba[i * 4 + 3]),
+  return channelHistograms(
+    Array.from({ length: channels }, (_, channel) =>
+      Uint8Array.from({ length: pixels }, (_, i) => rgba[i * 4 + channel]),
     ),
-  };
+    canvas.width,
+    canvas.height,
+    Uint8Array.from({ length: pixels }, (_, i) => rgba[i * 4 + 3]),
+  );
 }

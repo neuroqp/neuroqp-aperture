@@ -14,7 +14,8 @@ const route = (
   color: string,
   minimum = 0,
   maximum = 255,
-): ColorConnection => ({ id: 1, source, color, minimum, maximum });
+  brightness = 100,
+): ColorConnection => ({ id: 1, source, color, minimum, maximum, brightness });
 
 test("GPU lookup keeps clipped route sums above one until final composition", () => {
   const settings: ColorSettings = {
@@ -46,6 +47,7 @@ test("GPU float lookup agrees with CPU for all intensities and 32-channel routes
         ["Red", "Green", "Blue", "custom"][channel % 4],
         (channel * 5) % 128,
         128 + ((channel * 17) % 128),
+        (channel * 19) % 101,
       ),
     ),
   };
@@ -323,4 +325,36 @@ test("destroy cancels a queued color replay", async () => {
   await Promise.resolve();
   assert.equal(calls.draws, 0);
   assert.equal(calls.forceRedraws, 0);
+});
+
+test("GPU lookup scales clipped brightness before summing routes", () => {
+  const lookup = gpuColorLookup({
+    colors: { ...colorPresets },
+    connections: [
+      route("0", "Red", 50, 150, 50),
+      route("0", "Green", 0, 255, 0),
+      route("1", "Red", 0, 255, 25),
+    ],
+  });
+  assert.equal(lookup[0], 0);
+  assert.equal(lookup[100 * 4], 0.25);
+  assert.equal(lookup[150 * 4], 0.5);
+  assert.equal(lookup[255 * 4], 0.5);
+  assert.equal(lookup[255 * 4 + 1], 0);
+  assert.equal(lookup[(256 + 255) * 4], 0.25);
+});
+
+test("brightness refresh updates the GPU lookup without uploading source textures", async () => {
+  const { drawer, calls, settings } = replayHarness();
+  settings({
+    colors: { ...colorPresets },
+    connections: [route("0", "Gray", 0, 255, 50)],
+  });
+  drawer.refreshColors();
+  await Promise.resolve();
+  assert.equal(calls.draws, 1);
+  assert.equal(calls.lookups[0][255 * 4], 0.5);
+  assert.equal(calls.sourceUploads, 0);
+  assert.equal(calls.selections, 0);
+  drawer.destroy();
 });

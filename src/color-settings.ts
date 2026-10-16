@@ -1,6 +1,7 @@
 import {
   adjustDisplay,
   defaultDisplaySettings,
+  displayValue,
   type DisplaySettings,
 } from "./display-settings.ts";
 
@@ -14,6 +15,18 @@ export interface ColorConnection extends DisplaySettings {
   id: number;
   source: string;
   color: string;
+  brightness: number;
+}
+
+export type ColorAdjustment = DisplaySettings & { brightness: number };
+
+const defaultColorAdjustment: ColorAdjustment = {
+  ...defaultDisplaySettings,
+  brightness: 100,
+};
+
+export function colorConnectionValue(value: number, settings: ColorAdjustment) {
+  return displayValue(value, settings) * (settings.brightness / 100);
 }
 
 export interface ColorSettings {
@@ -106,7 +119,7 @@ export function defaultColorSettings(
       id: index + 1,
       source: channel.id,
       color,
-      ...defaultDisplaySettings,
+      ...defaultColorAdjustment,
     };
   });
   return { colors, connections };
@@ -149,7 +162,7 @@ export function connectColor(
             id: Math.max(0, ...settings.connections.map((item) => item.id)) + 1,
             source,
             color,
-            ...defaultDisplaySettings,
+            ...defaultColorAdjustment,
           },
         ],
   };
@@ -168,14 +181,21 @@ export function removeColorConnection(
 export function adjustColorConnection(
   settings: ColorSettings,
   id: number,
-  field: keyof DisplaySettings,
+  field: keyof ColorAdjustment,
   value: number,
 ): ColorSettings {
   if (!Number.isFinite(value)) return settings;
   return {
     ...settings,
     connections: settings.connections.map((edge) =>
-      edge.id === id ? { ...edge, ...adjustDisplay(edge, field, value) } : edge,
+      edge.id === id
+        ? {
+            ...edge,
+            ...(field === "brightness"
+              ? { brightness: Math.max(0, Math.min(100, Math.round(value))) }
+              : adjustDisplay(edge, field, value)),
+          }
+        : edge,
     ),
   };
 }
@@ -196,6 +216,18 @@ export function setColorConnectionRange(
     ...settings,
     connections: settings.connections.map((edge) =>
       edge.id === id ? { ...edge, ...bounded } : edge,
+    ),
+  };
+}
+
+export function resetColorConnection(
+  settings: ColorSettings,
+  id: number,
+): ColorSettings {
+  return {
+    ...settings,
+    connections: settings.connections.map((edge) =>
+      edge.id === id ? { ...edge, ...defaultColorAdjustment } : edge,
     ),
   };
 }

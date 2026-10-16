@@ -3,11 +3,13 @@ import { test } from "node:test";
 import {
   adjustColorConnection,
   colorName,
+  colorConnectionValue,
   connectColor,
   copyColorSettings,
   defaultColorSettings,
   normalizeHex,
   removeColorConnection,
+  resetColorConnection,
   setColorConnectionRange,
   setOutputColor,
   toHex,
@@ -33,6 +35,7 @@ test("default connections retain RGB and grayscale identity with metadata channe
   for (const connection of settings.connections) {
     assert.equal(connection.minimum, 0);
     assert.equal(connection.maximum, 255);
+    assert.equal(connection.brightness, 100);
   }
   assert.deepEqual(defaultColorSettings([]).connections, []);
   const custom = defaultColorSettings([
@@ -50,13 +53,15 @@ test("many-to-many connections move only the output and preserve other edges", (
   assert.equal(extra.connections.length, 4);
   assert.equal(extra.connections[2].minimum, 0);
   assert.equal(extra.connections[2].maximum, 255);
+  assert.equal(extra.connections[2].brightness, 100);
   const adjusted = setColorConnectionRange(extra, 1, {
     minimum: 50,
     maximum: 150,
   });
-  const moved = connectColor(adjusted, "a", "Blue", 1);
+  const dimmed = adjustColorConnection(adjusted, 1, "brightness", 35);
+  const moved = connectColor(dimmed, "a", "Blue", 1);
   assert.deepEqual(moved.connections[0], {
-    ...adjusted.connections[0],
+    ...dimmed.connections[0],
     color: "Blue",
   });
   assert.deepEqual(moved.connections.slice(1), extra.connections.slice(1));
@@ -107,13 +112,14 @@ test("connection adjustments and snapshots cannot mutate the original state", ()
   assert.equal(original.colors.Gray, "#ffffff");
 });
 
-test("presets and reset replace only the selected connection's range", () => {
+test("presets preserve brightness and reset restores only the selected connection", () => {
   const original = connectColor(
     defaultColorSettings([{ id: "a", name: "A" }]),
     "a",
     "Red",
   );
-  const first = setColorConnectionRange(original, 1, {
+  const dimmed = adjustColorConnection(original, 1, "brightness", 35);
+  const first = setColorConnectionRange(dimmed, 1, {
     minimum: 200,
     maximum: 210,
   });
@@ -122,14 +128,19 @@ test("presets and reset replace only the selected connection's range", () => {
     maximum: 80,
   });
   assert.deepEqual(preset.connections[0], {
-    ...original.connections[0],
+    ...dimmed.connections[0],
     minimum: 20,
     maximum: 80,
   });
   assert.equal(preset.connections[1], original.connections[1]);
   assert.deepEqual(
     setColorConnectionRange(preset, 1, defaultDisplaySettings),
-    original,
+    dimmed,
+  );
+  assert.deepEqual(resetColorConnection(preset, 1), original);
+  assert.equal(
+    resetColorConnection(preset, 1).connections[1],
+    original.connections[1],
   );
   assert.equal(first.connections[0].minimum, 200);
   for (const range of [
@@ -168,4 +179,49 @@ test("picker accepts hex, names by hue, and round trips colors", () => {
   assert.equal(setOutputColor(settings, "Red", "bad color"), settings);
   assert.equal(setOutputColor(settings, "Red", "#abc").colors.Red, "#aabbcc");
   assert.equal(settings.colors.Red, "#ff0000");
+});
+
+test("brightness is bounded, independent and copied with the connection", () => {
+  const original = connectColor(
+    defaultColorSettings([{ id: "a", name: "A" }]),
+    "a",
+    "Red",
+  );
+  const changed = adjustColorConnection(original, 1, "brightness", 35.6);
+  assert.equal(changed.connections[0].brightness, 36);
+  assert.equal(original.connections[0].brightness, 100);
+  assert.equal(changed.connections[1], original.connections[1]);
+  assert.equal(
+    adjustColorConnection(changed, 1, "brightness", -1).connections[0]
+      .brightness,
+    0,
+  );
+  assert.equal(
+    adjustColorConnection(changed, 1, "brightness", 101).connections[0]
+      .brightness,
+    100,
+  );
+  assert.equal(adjustColorConnection(changed, 1, "brightness", NaN), changed);
+  assert.equal(
+    adjustColorConnection(changed, 1, "brightness", Infinity),
+    changed,
+  );
+  const copy = copyColorSettings(changed);
+  assert.equal(copy.connections[0].brightness, 36);
+  copy.connections[0].brightness = 0;
+  assert.equal(changed.connections[0].brightness, 36);
+});
+
+test("the connection transfer function scales its ramp and clamped plateau", () => {
+  const range = { minimum: 50, maximum: 150, brightness: 50 };
+  assert.deepEqual(
+    [0, 50, 100, 150, 255].map((value) => colorConnectionValue(value, range)),
+    [0, 0, 0.25, 0.5, 0.5],
+  );
+  assert.deepEqual(
+    [0, 100, 255].map((value) =>
+      colorConnectionValue(value, { ...range, brightness: 0 }),
+    ),
+    [0, 0, 0],
+  );
 });

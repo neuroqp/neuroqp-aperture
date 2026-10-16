@@ -2,23 +2,21 @@ import { icon } from "./icons";
 import {
   adjustColorConnection,
   colorName,
+  colorConnectionValue,
   connectColor,
   copyColorSettings,
   defaultColorSettings,
   removeColorConnection,
+  resetColorConnection,
   setOutputColor,
   setColorConnectionRange,
   toHex,
   toHSV,
+  type ColorAdjustment,
   type ColorChannel,
   type ColorSettings,
 } from "./color-settings";
-import {
-  defaultDisplaySettings,
-  displayValue,
-  percentileRange,
-  type DisplaySettings,
-} from "./display-settings";
+import { percentileRange } from "./display-settings";
 import "./color-panel.css";
 
 const trash = icon("trash");
@@ -31,7 +29,7 @@ export const colorPanelMarkup = `
           <strong>Color connections</strong><ul>
             <li>Drag a channel to a color, or click them in order. Channels and colors can have several connections.</li>
             <li>Click a color to change its shade or hex value.</li>
-            <li>Click a wire to adjust its display range using the source channel histogram. These adjustments change the display only.</li>
+            <li>Click a wire to adjust its range and brightness using the source channel histogram. Brightness scales the full ramp and plateau. These adjustments change the display only.</li>
             <li>Drag a wire to another color to move it. Drop in empty space to remove it. Escape cancels.</li>
             <li>The trash button removes the selected wire.</li>
             <li>With a wire focused, Enter selects, R starts moving, and Delete removes. Then choose a color with Tab and Enter.</li>
@@ -157,7 +155,7 @@ export function bindColorPanel(onChange: (settings: ColorSettings) => void) {
   function refreshInspectorRange() {
     const edge = edgeById(selected);
     if (!edge) return;
-    for (const field of ["minimum", "maximum"] as const) {
+    for (const field of ["minimum", "maximum", "brightness"] as const) {
       const input = get<HTMLInputElement>(`range-${field}`);
       if (!input) continue;
       input.value = String(edge[field]);
@@ -165,7 +163,13 @@ export function bindColorPanel(onChange: (settings: ColorSettings) => void) {
         "--fill",
         `${((edge[field] - Number(input.min)) / (Number(input.max) - Number(input.min))) * 100}%`,
       );
-      get(`value-${field}`).textContent = String(edge[field]);
+      get(`value-${field}`).textContent =
+        `${edge[field]}${field === "brightness" ? "%" : ""}`;
+      input.setAttribute(
+        "aria-valuetext",
+        `${edge[field]}${field === "brightness" ? "%" : ""}`,
+      );
+      if (field === "brightness") continue;
       const cutoff = document.getElementById(`color-cutoff-${field}`)!;
       cutoff.setAttribute("x1", String(edge[field]));
       cutoff.setAttribute("x2", String(edge[field]));
@@ -177,7 +181,7 @@ export function bindColorPanel(onChange: (settings: ColorSettings) => void) {
         Array.from(
           { length: 256 },
           (_, x) =>
-            `${x === 0 ? "M" : "L"}${x} ${64 * (1 - displayValue(x, edge))}`,
+            `${x === 0 ? "M" : "L"}${x} ${64 * (1 - colorConnectionValue(x, edge))}`,
         ).join(""),
       );
   }
@@ -235,6 +239,7 @@ export function bindColorPanel(onChange: (settings: ColorSettings) => void) {
     </div>
     <div class="range-labels"><span>0</span><span>255</span></div>
     ${(["minimum", "maximum"] as const).map((field) => `<label class="adjustment" for="color-range-${field}"><span>${field === "minimum" ? "Minimum" : "Maximum"}</span><input id="color-range-${field}" type="range" data-color-field="${field}" min="${field === "minimum" ? 0 : 1}" max="${field === "minimum" ? 254 : 255}" aria-label="${escape(label(edge))} ${field}" ${enabled ? "" : "disabled"}><output id="color-value-${field}" for="color-range-${field}"></output></label>`).join("")}
+    <label class="adjustment" for="color-range-brightness"><span>Brightness</span><input id="color-range-brightness" type="range" data-color-field="brightness" min="0" max="100" step="1" aria-label="${escape(label(edge))} brightness" ${enabled ? "" : "disabled"}><output id="color-value-brightness" for="color-range-brightness"></output></label>
     <footer class="panel-footer display-presets">${[0, 0.1, 0.5, 1].map((tail) => `<button class="text-button" type="button" data-color-percentile="${tail}" title="${tail === 0 ? "Set display range to the sampled source channel minimum and maximum" : `Set display range to the ${tail}–${100 - tail} percentiles`}">${tail}–${100 - tail}</button>`).join("")}<button id="color-reset-range" class="text-button" type="button" ${enabled ? "" : "disabled"}>${icon("reset")}Reset</button></footer>`;
     refreshInspectorRange();
     refreshInspectorHistogram();
@@ -479,24 +484,23 @@ export function bindColorPanel(onChange: (settings: ColorSettings) => void) {
       return;
     }
     const preset = target.closest<HTMLButtonElement>("[data-color-percentile]");
-    let range: DisplaySettings;
     if (preset) {
       const bins = selectedHistogram();
       if (!bins) return;
-      range = percentileRange(
+      const range = percentileRange(
         Array.from(bins),
         Number(preset.dataset.colorPercentile),
       );
+      settings = setColorConnectionRange(settings, selected, range);
     } else if (target.closest("#color-reset-range"))
-      range = defaultDisplaySettings;
+      settings = resetColorConnection(settings, selected);
     else return;
-    settings = setColorConnectionRange(settings, selected, range);
     refreshInspectorRange();
     publish();
   });
   get("inspector").addEventListener("input", (event) => {
     const input = event.target as HTMLInputElement,
-      field = input.dataset.colorField as keyof DisplaySettings | undefined;
+      field = input.dataset.colorField as keyof ColorAdjustment | undefined;
     if (!enabled || !field || selected === null) return;
     settings = adjustColorConnection(
       settings,

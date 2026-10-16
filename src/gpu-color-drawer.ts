@@ -42,7 +42,7 @@ void main() {
       sum += texelFetch(lookup, ivec2(value, channel), 0).rgb;
     }
   }
-  // Match the 8-bit CPU composite before display range (a CSS filter).
+  // Match the 8-bit CPU composite.
   vec3 color = roundEven(clamp(sum, 0.0, 1.0) * 255.0) / 255.0;
   pixel = vec4(color * alpha, alpha);
 }`;

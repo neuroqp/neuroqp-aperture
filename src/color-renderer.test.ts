@@ -17,6 +17,7 @@ const route = (
   color,
   minimum: 0,
   maximum: 255,
+  brightness: 100,
   ...adjustment,
 });
 const settings = (...connections: ColorConnection[]): ColorSettings => ({
@@ -149,5 +150,43 @@ test("mismatched channel dimensions fail instead of silently misaligning channel
     () =>
       composeColorPixels([new Uint8Array(1), new Uint8Array(2)], settings()),
     /dimensions differ/,
+  );
+});
+
+test("connection brightness scales the clipped ramp before tinting and independently of other wires", () => {
+  const plane = new Uint8Array([0, 50, 100, 150, 255]);
+  const display = settings(
+    route("0", "Red", { minimum: 50, maximum: 150, brightness: 50 }),
+    route("0", "Green", { brightness: 0 }),
+    route("0", "Blue"),
+  );
+  assert.deepEqual(
+    [...composeColorPixels([plane], display)],
+    [
+      0, 0, 0, 255, 0, 0, 50, 255, 64, 0, 100, 255, 128, 0, 150, 255, 128, 0,
+      255, 255,
+    ],
+  );
+  display.colors.Red = "#204060";
+  display.connections = display.connections.slice(0, 1);
+  assert.deepEqual(
+    [...composeColorPixels([plane], display)],
+    [
+      0, 0, 0, 255, 0, 0, 0, 255, 8, 16, 24, 255, 16, 32, 48, 255, 16, 32, 48,
+      255,
+    ],
+  );
+  const sharedOutput = settings(
+    route("0", "Red", { brightness: 25 }),
+    route("1", "Red", { brightness: 50 }),
+  );
+  assert.deepEqual(
+    [
+      ...composeColorPixels(
+        [new Uint8Array([255]), new Uint8Array([255])],
+        sharedOutput,
+      ),
+    ],
+    [191, 0, 0, 255],
   );
 });

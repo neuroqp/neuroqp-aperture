@@ -1,7 +1,6 @@
 import type OpenSeadragon from "openseadragon";
 import type { ColorSettings } from "./color-settings";
-import { copyColorSettings } from "./color-settings.ts";
-import { displayValue } from "./display-settings.ts";
+import { colorConnectionValue, copyColorSettings } from "./color-settings.ts";
 import type { ImageState } from "./image";
 
 export const planeType = "aperturePlanes";
@@ -54,7 +53,7 @@ export function colorLookup(count: number, settings: ColorSettings) {
       parseInt(hex.slice(start, start + 2), 16),
     );
     for (let value = 0; value < 256; value++) {
-      const intensity = displayValue(value, route);
+      const intensity = colorConnectionValue(value, route);
       for (let component = 0; component < 3; component++)
         table[value * 3 + component] += intensity * color[component];
     }
@@ -92,7 +91,8 @@ function identity(settings: ColorSettings, count: number) {
         routes.length === 1 &&
         settings.colors[routes[0].color]?.toLowerCase() === color &&
         routes[0].minimum === 0 &&
-        routes[0].maximum === 255
+        routes[0].maximum === 255 &&
+        routes[0].brightness === 100
       );
     })
   );

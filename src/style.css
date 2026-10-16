@@ -823,19 +823,6 @@ select:focus-visible {
   font-variant-numeric: tabular-nums;
 }
 
-/* Filter only the image canvas, never the panels or source data. */
-#viewer.display-adjusted canvas {
-  filter: var(--display-filter);
-}
-#histogram-bars {
-  fill: var(--accent);
-  fill-opacity: 0.3;
-  stroke: none;
-}
-#range-line {
-  stroke-width: 1;
-  opacity: 0.8;
-}
 .histogram-cutoff {
   stroke: var(--focus);
   stroke-width: 1.5;

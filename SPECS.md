@@ -26,7 +26,7 @@ preview as soon as possible, and stays responsive while loading large images.
 - Support ordinary images and large TIFFs, including BigTIFF. Exact compression,
   pixel-type, and multi-page coverage must be documented as support is added.
 - Keep the interface and implementation small. Destructive image editing, analysis,
-  and specialist microscopy formats are outside the current scope. Display range and channel coloring are display-only. Multi-point
+  and specialist microscopy formats are outside the current scope. Channel brightness, range and coloring are display-only. Multi-point
   annotations are editable metadata, kept separate from source image pixels.
 
 ## Technology decisions
@@ -81,8 +81,7 @@ Two thin horizontal header bars sit above the image viewer.
    Repeated clicks advance from the latest selected file, even before its preview
    arrives, cancelling the previous worker and outstanding image downloads.
 2. **Quick toolbar:** a compact row of icon buttons inspired by ImageJ. These
-   use Lucide icons, with a matching custom multi-point icon. Display range and
-   Color and multi-point toggles sit on the left; pan, zoom, and fit controls sit on the
+   use Lucide icons, with a matching custom multi-point icon. Color and multi-point toggles sit on the left; pan, zoom, and fit controls sit on the
    right. Remove unused placeholder tools.
 3. **Image viewer:** fill all remaining window space. Show the image against a
    neutral background, preserve its aspect ratio, and support smooth pan and
@@ -106,17 +105,6 @@ on Open, folder navigation or Close. Cancellation or save failure must retain un
   Keep open panels adjacent; wrap when the window cannot fit another panel.
   Each toggle and close button controls only its own panel. Escape closes the
   focused panel, or the most recently opened panel if neither has focus.
-- Display range: an approximate histogram sampled from the image preview,
-  Minimum and Maximum sliders with labels on the left and values on the right.
-  Adjust the displayed image live without modifying source pixels or cached tiles.
-  Show vertical cutoff lines at the selected minimum and maximum.
-  Provide percentile presets 0–100, 0.1–99.9, 0.5–99.5, and 1–99 beside Reset.
-  The 0–100 preset uses the sampled histogram's occupied minimum and maximum;
-  Reset restores the full 0–255 display range.
-  The histogram defaults to linear counts. A Linear/Log toggle overlays its
-  upper-right corner on hover or keyboard focus and changes only histogram heights.
-  Use the current 8-bit display preview domain, not original high-bit-depth values.
-  Reset the display range when opening another image.
 - Multi-point: icon toggle rows for Cross/Dot/Circle, color, and size. Each row
   previews its choices using the other two current selections. Include Label
   points, Show on all slices, Counter, and the selected counter's point count.
@@ -149,10 +137,19 @@ on Open, folder navigation or Close. Cancellation or save failure must retain un
 - Color: a compact connection diagram maps source channels to seven editable
   output colors. Several inputs can feed one output, and one input can feed
   several outputs. Click or drag from an input to an output to connect them.
-  Select a wire to adjust its display range independently, using the same
-  histogram, Minimum/Maximum, percentile presets, Linear/Log and Reset controls
-  as Display range. Its histogram samples the original input channel, before
-  tinting or mixing. Range presets and Reset affect only the selected connection.
+  Select a wire to adjust its Minimum/Maximum input range and Brightness
+  independently. Brightness ranges from 0 to 100%, defaults to 100%, and scales
+  the entire clamped intensity ramp before tinting and mixing. Zero contributes
+  no light; 50% halves the contribution, including the white-point plateau.
+  Plot this scaled ramp with vertical input cutoff lines over an approximate
+  histogram of the original source channel's 8-bit display samples.
+  Provide percentile presets 0–100, 0.1–99.9, 0.5–99.5, and 1–99 beside Reset.
+  The 0–100 preset uses the sampled occupied minimum and maximum. Presets change
+  only the selected connection's input range and retain its brightness.
+  Reset restores that connection's full 0–255 range and 100% brightness.
+  The histogram defaults to linear counts; its upper-right Linear/Log toggle
+  appears on hover or keyboard focus and changes only histogram heights.
+  Input ranges use the 8-bit display domain, not original high-bit-depth values.
   Selection and keyboard focus follow the curved wire with a glow in its current
   line color, without a
   rectangular outline. Keep the panel compact and center the arrow between
@@ -169,11 +166,12 @@ on Open, folder navigation or Close. Cancellation or save failure must retain un
   interactions. Support both app themes and keyboard access.
 - Color settings update the GPU view live, without decoding the source
   again, rebuilding pyramids, or modifying source pixels or annotations. Each
-  connection adjusts its source intensity, tints it with its output color, and
-  contributes additively to a clamped RGB composite. Display range then adjusts
-  this composite; its approximate histogram continues to describe the original
-  display preview. Closing Color retains its settings; opening another image
-  resets them. Saving annotations never bakes Color or Display range into pixels.
+  connection maps its source through its input range, scales it by brightness,
+  tints it with its output color, and contributes additively to a clamped RGB
+  composite. Color contains all image display adjustments; there is no separate
+  Display range panel or composite filter. Closing Color retains its settings;
+  opening another image resets them. Saving annotations never bakes display
+  adjustments into pixels.
   Initially support unsigned 8/16-bit grayscale/RGB, interleaved multiband TIFF,
   and explicit ImageJ channel pages at first Z/time, up to 32 channels. Reject
   unsupported OME mapping and ambiguous alpha layouts with an explicit error.
