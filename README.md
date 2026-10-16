@@ -69,7 +69,8 @@ Available packages are:
 | Windows x64  | `Aperture-Portable-x64.exe` | Run the downloaded file; it extracts its bundled runtime into your local application-data directory. Download and replace the executable for updates. |
 | Linux x86_64 | `Aperture-x86_64.AppImage`  | Mark executable and run from a writable folder; updates from the app.                                                                                 |
 
-Release validation targets Windows 11. Windows 10 compatibility is unverified.
+Routine release validation covers Windows 11 under a standard user. Windows 10
+compatibility is unverified.
 
 Both Windows editions include their image libraries and a fixed WebView2 runtime.
 No separate runtime download is needed. Publisher signing is pending, so Windows
@@ -85,8 +86,10 @@ chmod +x Aperture-x86_64.AppImage
 ```
 
 If FUSE is unavailable, use `./Aperture-x86_64.AppImage --appimage-extract-and-run`.
-Packages target a Debian 12 baseline. Desktop compatibility is checked separately
-on Ubuntu, Arch/Omarchy, and Fedora before promoting a release. macOS, ARM, distro
+Packages target a Debian 12 baseline. Every release is checked on Debian 12 and
+Ubuntu 24 with a native Wayland session. Arch/Omarchy and Fedora receive periodic
+checks and checks when runtime dependencies or desktop integration change; they
+are compatibility targets, without a per-release guarantee. macOS, ARM, distro
 packages, and app stores are outside the current release scope.
 
 The header's update button shows the installed version, release notes, and a

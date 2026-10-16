@@ -1,23 +1,22 @@
 param(
     [Parameter(Mandatory)][string]$Identity,
-    [Parameter(Mandatory)][ValidateSet('windows11-setup','windows11-portable')][string]$Environment,
+    [Parameter(Mandatory)][ValidateSet('windows11','windows11-setup','windows11-portable')][string]$Environment,
     [Parameter(Mandatory)][string]$Report,
     [switch]$Worker
 )
-# Stage A prepares a standard interactive desktop and fixed inputs. Stage C only
-# installs/launches the exact incoming package, opens one TIFF, observes and closes.
+# Install or launch the exact package on a standard-user desktop, render one TIFF, close.
 $ErrorActionPreference = 'Stop'
 Set-StrictMode -Version Latest
 $i = Get-Content -LiteralPath $Identity -Raw | ConvertFrom-Json
 $helperPath=$PSCommandPath
 $Report = [IO.Path]::GetFullPath($Report)
-if ((Test-Path -LiteralPath $Report) -or -not (Test-Path -LiteralPath (Split-Path $Report))) { throw 'Fresh Stage A evidence destination required' }
-$r = [ordered]@{schema=1;stage='C';environment=$Environment;status='inconclusive';attempts=1;forced_kill=$false;started_at=[DateTime]::UtcNow.ToString('o');steps=@();helper_sha256=(Get-FileHash -LiteralPath $PSCommandPath).Hash.ToLowerInvariant();helper_revision=$i.source_sha;asset_sha256=$i.asset_sha256;tiny_tiff_sha256=$i.tiny_tiff_sha256}
-foreach ($key in @('source_sha','build_inputs_sha256','checksums_sha256','freeze_started_at','deadline_at')) { $r[$key] = $i.$key }
+if ((Test-Path -LiteralPath $Report) -or -not (Test-Path -LiteralPath (Split-Path $Report))) { throw 'Fresh evidence destination required' }
+$r = [ordered]@{schema=1;operation='smoke';environment=$Environment;status='inconclusive';attempts=1;forced_kill=$false;started_at=[DateTime]::UtcNow.ToString('o');steps=@();helper_sha256=(Get-FileHash -LiteralPath $PSCommandPath).Hash.ToLowerInvariant();helper_revision=$i.source_sha;asset_sha256=$i.asset_sha256;tiny_tiff_sha256=$i.tiny_tiff_sha256}
+foreach ($key in @('source_sha','checksums_sha256','binary_sha256')) { if ($i.PSObject.Properties[$key]) { $r[$key] = $i.$key } }
+if ($Environment -eq 'windows11') { $r.operation='validate' }
 $progress=$Report+'.watch.json'
 function Supervise-Observer($observer,$StartupSeconds=180) {
     $clock=[Diagnostics.Stopwatch]::StartNew()
-    $overallEnd=([DateTime]::Parse($i.deadline_at).ToUniversalTime()-[DateTime]::UtcNow).TotalSeconds
     $stepIndex=-1;$stepEnd=$StartupSeconds
     while (-not $observer.WaitForExit(150)) {
         if (Test-Path -LiteralPath $progress) {
@@ -28,10 +27,10 @@ function Supervise-Observer($observer,$StartupSeconds=180) {
             $elapsed=[Math]::Max(0,([DateTime]::UtcNow-[DateTime]::Parse($step.started_at).ToUniversalTime()).TotalSeconds)
             $stepEnd=$clock.Elapsed.TotalSeconds+[Math]::Max(0,$step.timeout_seconds-$elapsed)
         }
-        if ($clock.Elapsed.TotalSeconds -ge $overallEnd -or $clock.Elapsed.TotalSeconds -ge $stepEnd) {
+        if ($clock.Elapsed.TotalSeconds -ge $stepEnd) {
             try { $observer.Kill() } catch {}
             $stopped=$observer.WaitForExit(5000)
-            $r.status='fail';$r.forced_kill=$true;$r.error='Observer exceeded hard step or frozen deadline; application state preserved';$r.helper_forced_termination=$true;$r.timed_out=$true;$r.observer_stopped=$stopped
+            $r.status='fail';$r.forced_kill=$true;$r.error='Observer exceeded smoke step timeout; application state preserved';$r.helper_forced_termination=$true;$r.timed_out=$true;$r.observer_stopped=$stopped
             $r.finished_at=[DateTime]::UtcNow.ToString('o')
             if ($r.steps.Count) { $step=$r.steps[-1];$step.status='fail';$step.forced_kill=$true;$step|Add-Member timed_out $true -Force;$step.finished_at=$r.finished_at }
             [IO.File]::WriteAllText($Report,($r|ConvertTo-Json -Depth 15),[Text.UTF8Encoding]::new($false))
@@ -57,7 +56,7 @@ $script:app=$null; $script:held=[IntPtr]::Zero; $script:target=$null
 $priorArguments=$env:WEBVIEW2_ADDITIONAL_BROWSER_ARGUMENTS
 $priorPath=$env:PATH
 function Remaining {
-    [Math]::Max(0,[Math]::Min(($script:stepEnd-[DateTime]::UtcNow).TotalSeconds,([DateTime]::Parse($i.deadline_at).ToUniversalTime()-[DateTime]::UtcNow).TotalSeconds))
+    [Math]::Max(0,($script:stepEnd-[DateTime]::UtcNow).TotalSeconds)
 }
 function Wait-Until([scriptblock]$Condition) {
     while ((Remaining) -gt 0) { $value=& $Condition; if ($value) { return $value }; Start-Sleep -Milliseconds 150 }
@@ -69,19 +68,13 @@ function Step($Name,[scriptblock]$Action) {
     $row=[ordered]@{name=$Name;status='fail';started_at=[DateTime]::UtcNow.ToString('o');timeout_seconds=$seconds;forced_kill=$false}
     $r.steps+=,$row
     Save-Progress
-    try { if ((Remaining) -le 0) { throw 'Frozen attempt deadline reached' };$row.detail=& $Action;if ((Remaining) -le 0) { throw 'Step or frozen attempt deadline reached' };$row.status='pass' } catch { if ($_.ToString() -match 'deadline') {$row.timed_out=$true;$r.timed_out=$true};throw } finally { $row.finished_at=[DateTime]::UtcNow.ToString('o');Save-Progress }
+    try { if ((Remaining) -le 0) { throw 'Smoke step timed out' };$row.detail=& $Action;if ((Remaining) -le 0) { throw 'Smoke step timed out' };$row.status='pass' } catch { if ($_.ToString() -match 'deadline') {$row.timed_out=$true;$r.timed_out=$true};throw } finally { $row.finished_at=[DateTime]::UtcNow.ToString('o');Save-Progress }
 }
 function Verify-Inputs {
     foreach ($name in @('asset','tiny_tiff')) {
         if ((Get-FileHash -LiteralPath $i.($name+'_path')).Hash.ToLowerInvariant() -ne $i.($name+'_sha256')) { throw "$name SHA256 mismatch before launch" }
     }
-    if (-not $i.readiness.ready -or $i.readiness.environment -ne $Environment -or $i.readiness.source_sha -ne $i.source_sha -or $i.readiness.helper_sha256 -ne $r.helper_sha256 -or (Get-FileHash -LiteralPath $helperPath).Hash.ToLowerInvariant() -ne $r.helper_sha256) { throw 'Stage A reviewed readiness does not match helper/source/environment' }
-    if (-not @($i.readiness.tools).Count) { throw 'Prepared observer tools required' }
-    foreach ($tool in $i.readiness.tools) {
-        if (-not [IO.Path]::IsPathRooted($tool.path) -or (Get-FileHash -LiteralPath $tool.path).Hash.ToLowerInvariant() -ne $tool.sha256) { throw ('Stage A observer tool changed: '+$tool.name) }
-    }
-    $observer=[Diagnostics.Process]::GetCurrentProcess().MainModule.FileName
-    if (-not @($i.readiness.tools|Where-Object {[IO.Path]::GetFullPath($_.path) -eq $observer}).Count) { throw 'Actual PowerShell observer executable is not Stage A pinned' }
+
 }
 function Find-Name($Name) {
     $h=[SmokeDesktop]::AppWindow([uint32]$script:app.Id)
@@ -201,7 +194,6 @@ public static class SmokeDesktop {
     [SmokeDesktop]::SetProcessDPIAware()|Out-Null
     Step 'launch' {
         Verify-Inputs
-        $r.observer_tools=$i.readiness.tools
         $user=[Security.Principal.WindowsIdentity]::GetCurrent()
         $isAdmin=([Security.Principal.WindowsPrincipal]::new($user)).IsInRole([Security.Principal.WindowsBuiltInRole]::Administrator)
         if ($isAdmin -or @($user.Groups|Where-Object {$_.Value -eq 'S-1-5-32-544'}).Count -or [Threading.Thread]::CurrentThread.ApartmentState -ne 'STA' -or [Diagnostics.Process]::GetCurrentProcess().SessionId -eq 0) { throw 'A standard-user interactive STA desktop is required' }
@@ -209,7 +201,7 @@ public static class SmokeDesktop {
         $r.os=Get-CimInstance Win32_OperatingSystem|Select-Object Caption,Version,BuildNumber
         if ([int]$r.os.BuildNumber -lt 22000 -or $r.os.Caption -notmatch 'Windows 11') { throw 'Actual Windows 11 desktop required' }
         $env:PATH="$env:SystemRoot\System32;$env:SystemRoot;$env:SystemRoot\System32\WindowsPowerShell\v1.0"
-        if (@(Get-Process aperture -ErrorAction SilentlyContinue).Count) { throw 'Stage A clean app baseline missing' }
+        if (@(Get-Process aperture -ErrorAction SilentlyContinue).Count) { throw 'Another Aperture process is already running' }
         $probe=[Net.Sockets.TcpClient]::new()
         try { if ($probe.ConnectAsync('127.0.0.1',[int]$i.devtools_port).Wait(300) -and $probe.Connected) { throw 'Prepared observer port already occupied' } } catch [AggregateException] {} finally { $probe.Dispose() }
         $env:WEBVIEW2_ADDITIONAL_BROWSER_ARGUMENTS='--remote-debugging-port='+$i.devtools_port
@@ -217,7 +209,7 @@ public static class SmokeDesktop {
         if ($Environment -eq 'windows11-setup') {
             $directory=[IO.Path]::GetFullPath($i.install_directory)
             if (-not $directory.StartsWith($local,[StringComparison]::OrdinalIgnoreCase) -or (Test-Path -LiteralPath $directory)) { throw 'Fresh per-user install destination required' }
-            if ((Remaining) -le 0) { throw 'Frozen attempt deadline reached before installer launch' }
+            if ((Remaining) -le 0) { throw 'Smoke step timed out before installer launch' }
             $installer=Start-Process -FilePath $i.asset_path -ArgumentList "/S /D=$directory" -PassThru
             $r.installer_pid=$installer.Id
             if (-not $installer.WaitForExit([int]((Remaining)*1000))) { throw 'Per-user installer deadline reached; state preserved' }
@@ -225,13 +217,16 @@ public static class SmokeDesktop {
             $r.installer_exit_code=$installer.ExitCode
             if (-not (Test-Path -LiteralPath "$directory\.aperture-installed")) { throw 'Per-user installed marker missing' }
             $launcher="$directory\aperture.exe"
+        } elseif ($Environment -eq 'windows11') {
+            $directory=[IO.Path]::GetFullPath($i.runtime_directory)
+            $launcher=$i.asset_path
         } else {
             $directory=[IO.Path]::GetFullPath($i.portable_payload_directory)
             $expected=Join-Path $local ("NeuroQP\Aperture\portable\"+$i.version+'-'+$i.portable_payload_id)
             if ($directory -ne $expected -or $i.portable_payload_id -notmatch '^[0-9a-f]{64}$' -or (Test-Path -LiteralPath $directory) -or (Test-Path -LiteralPath "$directory.incomplete") -or (Test-Path -LiteralPath "$directory.lock")) { throw 'Exact incoming portable payload needs the prepared clean baseline' }
             $launcher=$i.asset_path
         }
-        if ((Remaining) -le 0) { throw 'Frozen attempt deadline reached before app launch' }
+        if ((Remaining) -le 0) { throw 'Smoke step timed out before app launch' }
         $script:launcher=Start-Process -FilePath $launcher -ArgumentList ('"'+$i.tiny_tiff_path+'"') -PassThru
         $r.launcher_pid=$script:launcher.Id
         $script:app=Wait-Until {
@@ -239,10 +234,12 @@ public static class SmokeDesktop {
             $matches=@(Get-Process aperture -ErrorAction SilentlyContinue|Where-Object {$_.Path -eq "$directory\aperture.exe" -and [SmokeDesktop]::AppWindow([uint32]$_.Id) -ne [IntPtr]::Zero})
             if ($matches.Count -eq 1) { $matches[0] }
         }
+        if ($Environment -eq 'windows11' -and (Get-FileHash -LiteralPath $script:app.Path).Hash.ToLowerInvariant() -ne $i.binary_sha256) { throw 'Actual development executable SHA256 differs' }
         $script:held=[SmokeDesktop]::Hold([uint32]$script:app.Id)
         $script:appStarted=$script:app.StartTime.ToUniversalTime().Ticks
-        $info=Get-Content -LiteralPath "$directory\BUILDINFO.json" -Raw|ConvertFrom-Json
-        if ($info.source_sha -ne $i.source_sha -or $info.version -ne $i.version -or $info.platform -ne 'windows') { throw 'Embedded source/version/platform differs from frozen candidate' }
+        $buildinfo=if ($Environment -eq 'windows11') { 'BUILDINFO-windows.json' } else { 'BUILDINFO.json' }
+        $info=Get-Content -LiteralPath (Join-Path $directory $buildinfo) -Raw|ConvertFrom-Json
+        if ($info.source_sha -ne $i.source_sha -or $info.version -ne $i.version -or $info.platform -ne 'windows') { throw 'Embedded source/version/platform differs from candidate' }
         if ($Environment -eq 'windows11-portable' -and (-not (Test-Path -LiteralPath "$directory\.complete") -or (Get-Content -LiteralPath "$directory\.complete" -Raw).Trim() -ne $i.portable_payload_id -or (Test-Path -LiteralPath "$directory\.aperture-installed"))) { throw 'Actual launched payload is not completed exact incoming portable mode' }
         $runtime=Wait-Until {
             $matches=@(Get-CimInstance Win32_Process -Filter "Name='msedgewebview2.exe'"|Where-Object {$_.ParentProcessId -eq $script:app.Id -and $_.ExecutablePath -and $_.ExecutablePath.StartsWith("$directory\webview2\",[StringComparison]::OrdinalIgnoreCase)})
@@ -260,7 +257,7 @@ public static class SmokeDesktop {
             try { $pages=@(Invoke-RestMethod -Uri ('http://127.0.0.1:'+$i.devtools_port+'/json') -TimeoutSec 1|Where-Object {$_.type -eq 'page' -and $_.url -match '^https?://tauri\.localhost/'});if ($pages.Count -eq 1) {$pages[0]} } catch {}
         }
         $detail=@{pid=$script:app.Id;process_started_ticks=$script:appStarted;hwnd=$h.ToInt64();path=$script:app.Path;embedded_buildinfo=$info;page_id=$script:target.id;runtime=$runtime;exe_sha256=(Get-FileHash -LiteralPath $script:app.Path).Hash.ToLowerInvariant();backend='native-Windows-WebView2';image_argument=$i.tiny_tiff_path}
-        if ($Environment -eq 'windows11-setup') { $detail.installed_marker_verified=$true;$detail.installer_exit_code=$r.installer_exit_code } else { $detail.cold_baseline=$true;$detail.incoming_payload_id=$i.portable_payload_id }
+        if ($Environment -eq 'windows11-setup') { $detail.installed_marker_verified=$true;$detail.installer_exit_code=$r.installer_exit_code } elseif ($Environment -eq 'windows11-portable') { $detail.cold_baseline=$true;$detail.incoming_payload_id=$i.portable_payload_id }
         return $detail
     }
     Step 'render' {

@@ -41,13 +41,13 @@ class DesktopSmokeTests(unittest.TestCase):
     def test_step_guard_interrupts_blocking_action_and_restores_alarm(self):
         handler = smoke.signal.getsignal(smoke.signal.SIGALRM)
         started = time.monotonic()
-        with self.assertRaisesRegex(TimeoutError, "deadline"):
+        with self.assertRaisesRegex(TimeoutError, "timed out"):
             with smoke.bounded_action(.02):
                 time.sleep(2)
         self.assertLess(time.monotonic() - started, .5)
         self.assertEqual(smoke.signal.getsignal(smoke.signal.SIGALRM), handler)
         self.assertEqual(smoke.signal.getitimer(smoke.signal.ITIMER_REAL), (0, 0))
-        with self.assertRaisesRegex(TimeoutError, "deadline"):
+        with self.assertRaisesRegex(TimeoutError, "timed out"):
             with smoke.bounded_action(0):
                 self.fail("Expired action executed")
         smoke.signal.setitimer(smoke.signal.ITIMER_REAL, 2, 3)
@@ -137,35 +137,44 @@ class DesktopSmokeTests(unittest.TestCase):
             self.assertEqual(result["spread"], 0)
 
     @unittest.skipUnless(hasattr(smoke.os, "getuid"), "Linux executable and UID validation")
-    def test_asset_and_helper_identity_verified_before_launch(self):
+    def test_exact_inputs_and_standard_user_are_required(self):
         with tempfile.TemporaryDirectory() as folder:
             asset, image = Path(folder) / "incoming.AppImage", Path(folder) / "tiny.tif"
             asset.write_bytes(b"exact candidate")
             asset.chmod(0o700)
             image.write_bytes(b"source fixture")
-            tool = Path(folder) / "prepared-observer"
-            tool.write_bytes(b"fixed observer")
-            identity = dict(asset_path=str(asset), asset_sha256=smoke.sha(asset), tiny_tiff_path=str(image), tiny_tiff_sha256=smoke.sha(image), screenshot_command=[str(tool), "{output}"], readiness=dict(ready=True, helper_sha256=smoke.sha(smoke.__file__), tools=[dict(name="observer", path=str(tool), sha256=smoke.sha(tool))]))
-            with patch.object(smoke.os, "getuid", return_value=1000), patch.object(smoke.sys, "executable", str(tool)), patch.object(smoke.shutil, "which", return_value=str(tool)):
+            identity = dict(asset_path=str(asset), asset_sha256=smoke.sha(asset),
+                            tiny_tiff_path=str(image), tiny_tiff_sha256=smoke.sha(image))
+            with patch.object(smoke.os, "getuid", return_value=1000):
                 smoke.verify_inputs(identity)
                 asset.chmod(0o600)
-                with self.assertRaisesRegex(ValueError, "chmod \\+x"):
+                with self.assertRaisesRegex(ValueError, "chmod"):
                     smoke.verify_inputs(identity)
                 asset.chmod(0o700)
-                identity["screenshot_command"][0] = "/unpinned/screenshot"
-                with self.assertRaisesRegex(ValueError, "not Stage A pinned"):
+                image.write_bytes(b"changed bytes")
+                with self.assertRaisesRegex(ValueError, "tiny_tiff SHA256"):
                     smoke.verify_inputs(identity)
-                identity["screenshot_command"][0] = str(tool)
-                identity["readiness"]["helper_sha256"] = "0" * 64
-                with self.assertRaisesRegex(ValueError, "helper changed"):
-                    smoke.verify_inputs(identity)
-                identity["readiness"]["helper_sha256"] = smoke.sha(smoke.__file__)
-                tool.write_bytes(b"observer repaired after freeze")
-                with self.assertRaisesRegex(ValueError, "observer tool changed"):
-                    smoke.verify_inputs(identity)
-                tool.write_bytes(b"fixed observer")
-                asset.write_bytes(b"changed bytes")
-                with self.assertRaisesRegex(ValueError, "asset SHA256"):
+            identity["tiny_tiff_sha256"] = smoke.sha(image)
+            with patch.object(smoke.os, "getuid", return_value=0), self.assertRaisesRegex(ValueError, "standard-user"):
+                smoke.verify_inputs(identity)
+
+    def test_development_appdir_requires_exact_binary_bytes(self):
+        with tempfile.TemporaryDirectory() as folder:
+            root = Path(folder)
+            binary = root / "usr/bin/aperture"
+            binary.parent.mkdir(parents=True)
+            binary.write_bytes(b"native executable")
+            launcher, image = root / "AppRun", root / "tiny.tif"
+            launcher.write_bytes(b"launcher")
+            launcher.chmod(0o700)
+            image.write_bytes(b"tiny fixture")
+            identity = dict(appdir_path=str(root), binary_sha256=smoke.sha(binary),
+                asset_path=str(launcher), asset_sha256=smoke.sha(launcher),
+                tiny_tiff_path=str(image), tiny_tiff_sha256=smoke.sha(image))
+            with patch.object(smoke.os, "getuid", return_value=1000):
+                smoke.verify_inputs(identity)
+                binary.write_bytes(b"changed executable")
+                with self.assertRaisesRegex(ValueError, "Development executable SHA256"):
                     smoke.verify_inputs(identity)
 
     def test_launcher_os_error_records_failure_receipt_and_log(self):
@@ -233,7 +242,7 @@ class DesktopSmokeTests(unittest.TestCase):
                     self.assertEqual(command[-1], "/prepared/tiny.tif")
 
     @unittest.skipUnless(hasattr(smoke.os, "getuid"), "Linux native driver UID validation")
-    def test_driver_requires_owned_pinned_native_listener(self):
+    def test_driver_requires_owned_native_listener(self):
         identity = dict(driver_url="http://127.0.0.1:4445", readiness=dict(tools=[dict(path="/prepared/WebKitWebDriver")]))
         row = 'LISTEN 0 5 127.0.0.1:4445 0.0.0.0:* users:(("WebKitWebDrive",pid=42,fd=7))'
         executable = Path("/prepared/WebKitWebDriver")
@@ -241,8 +250,8 @@ class DesktopSmokeTests(unittest.TestCase):
         stat = SimpleNamespace(st_uid=1000)
         with patch.object(smoke.subprocess, "run", return_value=result), patch.object(smoke.Path, "resolve", autospec=True, side_effect=lambda path: executable if str(path) == "/proc/42/exe" else path), patch.object(smoke.Path, "stat", return_value=stat), patch.object(smoke.os, "getuid", return_value=1000):
             self.assertEqual(smoke.verify_driver(identity, 1)["pid"], 42)
-            for executable in (Path("/prepared/tauri-driver"), Path("/unpinned/WebKitWebDriver")):
-                with self.subTest(executable=executable), self.assertRaisesRegex(ValueError, "WebKitWebDriver listener directly"):
+            for executable in (Path("/prepared/tauri-driver"),):
+                with self.subTest(executable=executable), self.assertRaisesRegex(ValueError, "WebKitWebDriver listener"):
                     smoke.verify_driver(identity, 1)
             executable = Path("/prepared/WebKitWebDriver")
             stat.st_uid = 2000

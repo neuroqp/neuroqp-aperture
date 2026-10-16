@@ -1,10 +1,5 @@
 #!/usr/bin/env python3
-"""Stage C only: exact AppImage, one prepared TIFF, native pixels and normal close.
-
-Stage A supplies the active desktop, a direct WebKitWebDriver endpoint, GI/AT-SPI
-and screenshot command. See RELEASE-ACCEPTANCE.md for this prepared mode.
-No dependency installation, desktop repair or package rebuilding here.
-"""
+"""Smoke an exact AppImage on a real desktop: launch, render one TIFF, close."""
 
 import argparse
 from contextlib import contextmanager
@@ -40,12 +35,12 @@ def request_timeout(method, suffix, remaining):
 def bounded_action(seconds):
     """Interrupt blocking observer work without terminating the application."""
     if seconds <= 0:
-        raise TimeoutError("Step or frozen attempt deadline reached")
+        raise TimeoutError("Smoke step timed out")
     previous_handler = signal.getsignal(signal.SIGALRM)
     previous_timer = signal.getitimer(signal.ITIMER_REAL)
     started = time.monotonic()
     def expired(signum, frame):
-        raise TimeoutError("Step or frozen attempt deadline reached")
+        raise TimeoutError("Smoke step timed out")
     signal.signal(signal.SIGALRM, expired)
     signal.setitimer(signal.ITIMER_REAL, min(seconds, previous_timer[0]) if previous_timer[0] else seconds)
     try:
@@ -70,21 +65,11 @@ def verify_inputs(identity):
         if sha(identity[name + "_path"]) != identity[name + "_sha256"]:
             raise ValueError(name + " SHA256 mismatch before launch")
     if not os.access(identity["asset_path"], os.X_OK):
-        raise ValueError("AppImage is not executable. In Stage A prepare an owned copy with chmod +x; verify its unchanged SHA256 before launch")
-    if identity["readiness"]["helper_sha256"] != sha(__file__):
-        raise ValueError("Stage A reviewed helper changed")
-    if not identity["readiness"]["ready"] or os.getuid() == 0:
-        raise ValueError("Prepared standard-user desktop required")
-    tools = identity["readiness"]["tools"]
-    if not tools:
-        raise ValueError("Prepared observer tools required")
-    for tool in tools:
-        if not Path(tool["path"]).is_absolute() or sha(tool["path"]) != tool["sha256"]:
-            raise ValueError("Stage A observer tool changed: " + tool["name"])
-    pinned = {Path(tool["path"]).resolve() for tool in tools}
-    for path in (sys.executable, shutil.which("ss"), identity["screenshot_command"][0]):
-        if not path or not Path(path).is_absolute() or Path(path).resolve() not in pinned:
-            raise ValueError("Actual observer executable is not Stage A pinned: " + str(path))
+        raise ValueError("AppImage is not executable; chmod +x an owned copy and verify its SHA256 before launch")
+    if identity.get("appdir_path") and sha(Path(identity["appdir_path"]) / "usr/bin/aperture") != identity["binary_sha256"]:
+        raise ValueError("Development executable SHA256 mismatch")
+    if os.getuid() == 0:
+        raise ValueError("A standard-user desktop is required")
 
 
 def verify_driver(identity, timeout):
@@ -98,13 +83,13 @@ def verify_driver(identity, timeout):
         raise ValueError("Exactly one owned native driver listener required")
     proc = Path("/proc", str(pids.pop()))
     executable = (proc / "exe").resolve()
-    if proc.stat().st_uid != os.getuid() or executable.name != "WebKitWebDriver" or executable not in {Path(tool["path"]).resolve() for tool in identity["readiness"]["tools"]}:
-        raise ValueError("Stage C requires the owned Stage A pinned WebKitWebDriver listener directly; prepare its endpoint before freeze as described in RELEASE-ACCEPTANCE.md")
+    if proc.stat().st_uid != os.getuid() or executable.name != "WebKitWebDriver":
+        raise ValueError("The native driver must be an owned WebKitWebDriver listener")
     return {"pid": int(proc.name), "path": str(executable), "endpoint": identity["driver_url"]}
 
 
 def assert_os(environment, actual_os):
-    expected_id, expected_version = {"debian12": ("debian", "12"), "ubuntu24": ("ubuntu", "24.04"), "arch-omarchy": ("arch", None), "fedora-wayland": ("fedora", None)}[environment]
+    expected_id, expected_version = {"debian12": ("debian", "12"), "ubuntu24": ("ubuntu", "24.04"), "ubuntu24-wayland": ("ubuntu", "24.04"), "arch-omarchy": ("arch", None), "fedora-wayland": ("fedora", None)}[environment]
     actual_id = actual_os.get("ID", "").strip('"')
     omarchy = environment == "arch-omarchy" and actual_id == "omarchy" and "arch" in actual_os.get("ID_LIKE", "").strip('"').split()
     if not (actual_id == expected_id or omarchy) or expected_version and actual_os.get("VERSION_ID", "").strip('"') != expected_version:
@@ -156,7 +141,7 @@ def ppm_spread(path, rect):
                 value.extend(byte)
             return bytes(value)
         if token() != b"P6":
-            raise ValueError("Stage A screenshot command must produce P6 PPM")
+            raise ValueError("Screenshot command must produce P6 PPM")
         width, height, maximum = int(token()), int(token()), int(token())
         pixels = stream.read()
     if maximum != 255 or len(pixels) != width * height * 3:
@@ -214,15 +199,22 @@ def native_nodes(pid, deadline):
 
 def owned_process(pid, identity):
     proc = Path("/proc", str(pid))
-    env = dict(v.split(b"=", 1) for v in (proc / "environ").read_bytes().split(b"\0") if b"=" in v)
-    if proc.stat().st_uid != os.getuid() or env.get(b"APPIMAGE") != os.fsencode(identity["asset_path"]):
-        raise ValueError("Actual native process does not own this exact AppImage")
-    appdir = Path(os.fsdecode(env[b"APPDIR"]))
+    if proc.stat().st_uid != os.getuid():
+        raise ValueError("Actual native process is not owned by the desktop user")
+    if identity.get("appdir_path"):
+        appdir = Path(identity["appdir_path"])
+    else:
+        env = dict(v.split(b"=", 1) for v in (proc / "environ").read_bytes().split(b"\0") if b"=" in v)
+        if env.get(b"APPIMAGE") != os.fsencode(identity["asset_path"]):
+            raise ValueError("Actual native process does not own this exact AppImage")
+        appdir = Path(os.fsdecode(env[b"APPDIR"]))
     if (proc / "exe").resolve() != (appdir / "usr/bin/aperture").resolve():
-        raise ValueError("Observed native process is not the packaged Aperture executable")
+        raise ValueError("Observed native process is not the expected Aperture executable")
+    if identity.get("appdir_path") and sha(proc / "exe") != identity["binary_sha256"]:
+        raise ValueError("Actual development executable SHA256 differs")
     info = json.loads((appdir / "usr/share/aperture/BUILDINFO.json").read_text())
     if info["source_sha"] != identity["source_sha"]:
-        raise ValueError("Embedded source differs from frozen candidate")
+        raise ValueError("Embedded source differs from candidate")
     return {"start_ticks": (proc / "stat").read_text().rsplit(")", 1)[1].split()[19], "buildinfo": info}
 
 
@@ -287,7 +279,7 @@ def launcher(identity, receipt, extra):
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--identity", type=Path, required=True)
-    parser.add_argument("--environment", choices=["debian12", "ubuntu24", "arch-omarchy", "fedora-wayland"])
+    parser.add_argument("--environment", choices=["debian12", "ubuntu24-wayland", "ubuntu24", "arch-omarchy", "fedora-wayland"])
     parser.add_argument("--report", type=Path, required=True)
     parser.add_argument("--launcher", action="store_true", help=argparse.SUPPRESS)
     parser.add_argument("--extract-and-run", action="store_true", help=argparse.SUPPRESS)
@@ -300,21 +292,21 @@ def main():
     if extra or not args.environment:
         parser.error("environment required; unexpected arguments")
     if args.report.exists() or not args.report.parent.is_dir():
-        raise ValueError("Stage A must prepare a fresh evidence destination")
+        raise ValueError("A fresh evidence destination is required")
     if identity.get("extract_and_run"):
         raise ValueError("Primary launch must use FUSE; prepared fallback follows normal close")
-    report = {k: identity[k] for k in ("source_sha", "build_inputs_sha256", "checksums_sha256", "freeze_started_at", "deadline_at")}
-    report.update(schema=1, stage="C", environment=args.environment, status="inconclusive", attempts=1, forced_kill=False, started_at=utc(), steps=[], helper_sha256=sha(__file__), helper_revision=identity["source_sha"], asset_sha256=identity["asset_sha256"], tiny_tiff_sha256=identity["tiny_tiff_sha256"], os_release=Path("/etc/os-release").read_text(), uid=os.getuid())
+    report = {k: identity[k] for k in ("source_sha", "checksums_sha256", "binary_sha256") if k in identity}
+    report.update(schema=1, operation="smoke", environment=args.environment, status="inconclusive", attempts=1, forced_kill=False, started_at=utc(), steps=[], helper_sha256=sha(__file__), helper_revision=identity["source_sha"], asset_sha256=identity["asset_sha256"], tiny_tiff_sha256=identity["tiny_tiff_sha256"], os_release=Path("/etc/os-release").read_text(), uid=os.getuid())
+    report["operation"] = "validate" if identity.get("appdir_path") else "smoke"
     route = None
     current_launch = None
     receipt = args.report.with_suffix(".exit.json")
     limit = 0
     def remaining():
-        freeze = datetime.fromisoformat(identity["deadline_at"].replace("Z", "+00:00")).timestamp() - time.time()
-        return max(0, min(limit - time.monotonic(), freeze))
+        return max(0, limit - time.monotonic())
     def request(method, suffix, body=None):
         if remaining() <= 0:
-            raise TimeoutError("Frozen attempt deadline reached")
+            raise TimeoutError("Smoke step timed out")
         with urlopen(Request(identity["driver_url"] + suffix, data=json.dumps(body).encode() if body is not None else None, method=method, headers={"Content-Type": "application/json"}), timeout=request_timeout(method, suffix, remaining())) as response:
             value = json.load(response)["value"]
         if isinstance(value, dict) and value.get("error"):
@@ -334,24 +326,21 @@ def main():
         report["steps"].append(row)
         try:
             if remaining() <= 0:
-                raise TimeoutError("Frozen attempt deadline reached")
+                raise TimeoutError("Smoke step timed out")
             with bounded_action(remaining()):
                 row["detail"] = action()
             if remaining() <= 0:
-                raise TimeoutError("Step or frozen attempt deadline reached")
+                raise TimeoutError("Smoke step timed out")
             row["status"] = "pass"
         finally:
             row["finished_at"] = utc()
     def launch():
         nonlocal route, current_launch
         verify_inputs(identity)
-        report["observer_tools"] = identity["readiness"]["tools"]
         report["driver_observer"] = verify_driver(identity, max(.1, min(remaining(), 5)))
         actual_os = dict(line.split("=", 1) for line in Path("/etc/os-release").read_text().splitlines() if "=" in line)
         assert_os(args.environment, actual_os)
-        if identity["readiness"]["environment"] != args.environment or identity["readiness"]["source_sha"] != identity["source_sha"]:
-            raise ValueError("Stage A receipt does not match candidate/environment")
-        if identity.get("extract_and_run") and args.environment not in ("debian12", "ubuntu24"):
+        if identity.get("extract_and_run") and args.environment not in ("debian12", "ubuntu24", "ubuntu24-wayland"):
             raise ValueError("Fallback is confined to Debian/Ubuntu")
         if not request("GET", "/status")["ready"]:
             raise ValueError("Prepared native driver unavailable")
@@ -371,7 +360,7 @@ def main():
         pid, process_identity, nodes = wait(lambda: application_process(launcher_pid, identity, time.monotonic() + remaining()))
         rows = subprocess.run([shutil.which("ss"), "-xnp"], check=True, capture_output=True, text=True, timeout=max(.1, remaining())).stdout.splitlines()
         peers, wayland, x11 = display_sockets(rows, pid)
-        if args.environment in ("fedora-wayland", "arch-omarchy") and not (wayland and not x11):
+        if args.environment in ("fedora-wayland", "arch-omarchy", "ubuntu24-wayland") and not (wayland and not x11):
             raise ValueError("Actual native Wayland socket proof absent or mixed")
         current_launch = dict(pid=pid, launcher_pid=launcher_pid, launch_method="extract-and-run" if identity.get("extract_and_run") else "FUSE", image_argument=identity["tiny_tiff_path"], process_identity=process_identity, native_windows=[row for _, row in nodes], socket_rows=peers, backend="wayland" if wayland and not x11 else "x11" if x11 and not wayland else "unproven")
         return current_launch
@@ -441,7 +430,7 @@ def main():
         if Path("/proc", str(pid)).exists():
             raise ValueError("Actual native application remains alive after normal Close")
         verify_inputs(identity)
-        return {**result, "app_pid": pid, "app_exited": True, "exit_code_source": "exact AppImage launcher wait"}
+        return {**result, "app_pid": pid, "app_exited": True, "exit_code_source": "exact launcher wait", "forced_cleanup": False}
     try:
         step("launch", launch)
         step("render", render)

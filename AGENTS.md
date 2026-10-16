@@ -1,46 +1,35 @@
 # Development
 
-- Follow SPECS.md. Keep the implementation minimal, readable, and focused on
-  current requirements. Apply KISS and YAGNI.
+- Follow `SPECS.md`. Keep changes minimal, readable and focused on current needs.
 - Format frontend files with Prettier and Rust with `cargo fmt --all`.
 - Test meaningful behavior at the appropriate level. Validate native desktop
-  flows in the running application; browser previews alone are insufficient.
-- Keep real microscopy datasets, generated caches, and validation artifacts out
-  of Git. Never modify source test images.
+  dialogs, saving and lifecycle in the running application.
+- Keep real microscopy datasets, generated caches and validation artifacts out of
+  Git. Never modify source test images.
 
-# Release contract
+# Releases
 
-- Follow `RELEASING.md`. Complete functional testing and fixes before final OS
-  packaging. Use CI-built executables for limited native desktop checks.
-- Require successful readiness evidence for the exact reviewed source,
-  executable bytes, runtime dependencies, source coverage and prepared smoke labs.
-  Missing evidence or unsupported tooling blocks deployment before packaging.
-- Package and sign the approved executables and dependencies. Do not recompile
-  application code or resolve fresh dependencies during release execution.
-- After packaging, run only the fixed package smoke checks, signature/hash/feed
-  validation, then publish the exact tested bytes. Do not expand acceptance testing.
-- One agent owns release execution and gives every subagent this contract and
-  explicit ownership. Subagents must not independently launch builds or VMs.
-- A failed readiness check blocks packaging; continue prerequisite development
-  only when the user has authorized that scope. It does not cancel that work.
-- Target 30 minutes with a 60-minute hard deadline per explicitly authorized
-  release attempt. Keep job and transfer budgets generous; follow the timeout
-  table in `RELEASING.md`. A required Stage B/C failure stops that
-  attempt: preserve evidence and report the blocker. Do not automatically repair,
-  rebuild, reset the freeze clock or redispatch. Only the documented bounded
-  transient smoke retry is permitted; another release attempt needs a new instruction.
-- An explicitly authorized publication recovery may reuse completed packages.
-  Preserve the stopped attempt, source proof and asset bytes, verify their exact
-  identities, and record a separate completion deadline and fresh lab readiness.
-  Use the reviewed resume workflow; never silently extend an expired receipt.
-- Routine deployment must not expand into CI implementation, dependency/source
-  repairs, VM provisioning or automation repair. Those require separately scoped
-  development work. Finish explicitly authorized prerequisites before packaging;
-  calling failures Stage A does not authorize another automatic release loop.
+- Follow `RELEASING.md`: validate, package, publish.
+- Finish functional tests, fixes, corresponding-source preparation and desktop
+  preparation before packaging. Package the exact validated executables and
+  runtime dependencies without recompilation or fresh dependency resolution.
+- After packaging, verify hashes, updater signatures and source coverage. Run only
+  the fixed native launch, small-TIFF render and normal-close smoke checks, then
+  publish those exact bytes.
+- One operator owns orchestration. Give subagents explicit ownership; they must
+  not independently start builds or VMs.
+- Preserve completed outputs and failed diagnostics. Per-step timeouts stop that
+  operation; elapsed time does not invalidate unchanged source or artifact hashes.
+  Resume from the failed operation after repair, rerunning affected checks only.
+- Authorization to complete a release covers its repairs, retries and publication.
+  Do not add recurring permission gates. Respect any narrower user instruction.
+- Never move a published tag or replace different public asset bytes. A defect in
+  a public application release requires a higher version.
 
 # Git safety
 
 - Create or reuse a feature branch. From `origin/main`, use
   `git switch --no-track -c <branch> origin/main`.
 - Never push `main` or let another branch track `origin/main`.
-- Push the feature branch and open a ready PR to `main`. Never merge it.
+- Push the feature branch and open a ready PR to `main`. Merge only when the user
+  has explicitly authorized it.

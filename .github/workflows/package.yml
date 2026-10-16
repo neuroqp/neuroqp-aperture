@@ -1,0 +1,157 @@
+name: Package
+
+on:
+  workflow_dispatch:
+    inputs:
+      source_sha:
+        description: Validated reviewed source commit
+        required: true
+      validation_run_id:
+        description: Successful Validate seal run containing validated-inputs
+        required: true
+
+permissions:
+  contents: read
+  actions: read
+
+jobs:
+  packages:
+    if: github.ref == 'refs/heads/main'
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - platform: linux
+            os: ubuntu-24.04
+          - platform: windows
+            os: windows-2022
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 45
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+        with:
+          ref: ${{ inputs.source_sha }}
+          persist-credentials: false
+      - uses: actions/setup-python@a26af69be951a213d495a4c3e4e4022e16d87065 # v5
+        with:
+          python-version: "3.12"
+      - name: Require successful validation
+        shell: bash
+        env:
+          GH_TOKEN: ${{ github.token }}
+          VALIDATION_RUN: ${{ inputs.validation_run_id }}
+          SOURCE_SHA: ${{ inputs.source_sha }}
+        run: python scripts/release/release-state.py trusted-run "$VALIDATION_RUN" validate.yml --source-sha "$SOURCE_SHA"
+      - uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4
+        with:
+          name: validated-inputs
+          run-id: ${{ inputs.validation_run_id }}
+          github-token: ${{ github.token }}
+          path: build/validated
+      - uses: pnpm/action-setup@f40ffcd9367d9f12939873eb1018b921a783ffaa # v4
+        with:
+          version: 9.15.9
+      - uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4
+        with:
+          node-version: 22.22.0
+          cache: pnpm
+      - run: pnpm install --frozen-lockfile
+      - name: Verify and stage validated runtime inputs
+        shell: bash
+        env:
+          SOURCE_SHA: ${{ inputs.source_sha }}
+          PLATFORM: ${{ matrix.platform }}
+        run: python scripts/release/release-state.py stage build/validated --platform "$PLATFORM" --source-sha "$SOURCE_SHA"
+      - name: Wrap tested Linux AppDir and sign
+        if: matrix.platform == 'linux'
+        env:
+          LINUX_RUNTIME_DIR: ${{ github.workspace }}/build/linux-prepared
+          APPIMAGE_EXTRACT_AND_RUN: "1"
+          TAURI_SIGNING_PRIVATE_KEY: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY }}
+          TAURI_SIGNING_PRIVATE_KEY_PASSWORD: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY_PASSWORD }}
+        run: |
+          bash scripts/release/package-linux.sh
+          mkdir -p build/extracted
+          (cd build/extracted && ../release/Aperture-x86_64.AppImage --appimage-extract >/dev/null)
+          python3 scripts/release/linux-runtime.py verify-package build/extracted/squashfs-root build/linux-prepared/manifest.json
+          node node_modules/@tauri-apps/cli/tauri.js signer sign --app-version "$(python3 scripts/release/release.py check)" build/release/Aperture-x86_64.AppImage
+      - uses: dtolnay/rust-toolchain@e2a55d2ffb04f378e9626c28d38b36d230d1e12f
+        if: matrix.platform == 'windows'
+        with:
+          toolchain: 1.98.0
+          targets: x86_64-pc-windows-msvc
+      - name: Install pinned Windows packaging tools
+        if: matrix.platform == 'windows'
+        run: pwsh scripts/release/prepare-windows-packaging.ps1
+      - name: Bundle tested Windows runtime without recompilation
+        if: matrix.platform == 'windows'
+        env:
+          TAURI_SIGNING_PRIVATE_KEY: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY }}
+          TAURI_SIGNING_PRIVATE_KEY_PASSWORD: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY_PASSWORD }}
+        run: |
+          cargo metadata --manifest-path src-tauri/Cargo.toml --no-deps --locked --format-version 1 | Out-Null
+          if ($LASTEXITCODE) { exit $LASTEXITCODE }
+          node node_modules/@tauri-apps/cli/tauri.js bundle --target x86_64-pc-windows-msvc --bundles nsis --ci --no-binary-patching
+          if ($LASTEXITCODE) { exit $LASTEXITCODE }
+          $manifest = Get-Content build/validated/validation.json -Raw | ConvertFrom-Json
+          if ((Get-FileHash src-tauri/target/x86_64-pc-windows-msvc/release/aperture.exe).Hash.ToLowerInvariant() -ne $manifest.platforms.windows.binary_sha256) { throw 'Bundler changed tested executable' }
+          $installers = @(Get-ChildItem src-tauri/target/x86_64-pc-windows-msvc/release/bundle/nsis/*.exe)
+          if ($installers.Count -ne 1) { throw 'Expected one installer' }
+          Copy-Item $installers[0].FullName build/release/Aperture-Setup-x64.exe
+          Copy-Item ($installers[0].FullName + '.sig') build/release/Aperture-Setup-x64.exe.sig
+          pwsh scripts/release/build-portable.ps1 -Version (python scripts/release/release.py check)
+          if ($LASTEXITCODE) { exit $LASTEXITCODE }
+          node node_modules/@tauri-apps/cli/tauri.js signer sign --app-version (python scripts/release/release.py check) build/release/Aperture-Portable-x64.exe
+          if ($LASTEXITCODE) { exit $LASTEXITCODE }
+          pwsh scripts/release/smoke-windows.ps1 -Version (python scripts/release/release.py check) -Setup build/release/Aperture-Setup-x64.exe
+          if ($LASTEXITCODE) { exit $LASTEXITCODE }
+      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
+        with:
+          name: packages-${{ matrix.platform }}
+          path: build/release/*
+          if-no-files-found: error
+          retention-days: 90
+          compression-level: 0
+
+  assemble:
+    needs: packages
+    runs-on: ubuntu-24.04
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+        with:
+          ref: ${{ inputs.source_sha }}
+          persist-credentials: false
+      - uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4
+        with:
+          name: validated-inputs
+          run-id: ${{ inputs.validation_run_id }}
+          github-token: ${{ github.token }}
+          path: build/validated
+      - uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4
+        with:
+          pattern: packages-*
+          path: build/release
+          merge-multiple: true
+      - run: sudo apt-get update && sudo apt-get install -y --no-install-recommends minisign
+      - name: Assemble metadata and verify all exact release bytes
+        env:
+          SOURCE_SHA: ${{ inputs.source_sha }}
+        run: |
+          cp build/validated/source/* build/release/
+          plan=build/release/Aperture-Corresponding-Source.json
+          python3 scripts/release/release.py metadata build/release --version "$(python3 scripts/release/release.py check)" --source-sha "$SOURCE_SHA" --plan "$plan" --plan-sha256 "$(sha256sum "$plan" | cut -d' ' -f1)"
+          python3 scripts/release/release-state.py package build/release build/validated/validation.json build/package.json
+      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
+        with:
+          name: release-files
+          path: build/release/*
+          if-no-files-found: error
+          retention-days: 90
+          compression-level: 0
+      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
+        with:
+          name: package-manifest
+          path: build/package.json
+          if-no-files-found: error
+          retention-days: 90
