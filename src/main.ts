@@ -62,7 +62,6 @@ document.querySelector<HTMLDivElement>("#app")!.innerHTML = `
       <button id="next-image-button" class="tool image-navigation" type="button" title="Next image" aria-label="Next image" disabled>${icon("next")}</button>
     </div>
     <div class="file-actions">
-      <button id="new-window-button" class="file-button" type="button" title="New window (Ctrl+N)">${icon("restore")}<span>New window</span></button>
       <button id="open-button" class="file-button" type="button" title="Open image (Ctrl+O)">${icon("open")}<span>Open</span></button>
       <button id="save-button" class="file-button" type="button" title="Save annotated TIFF (Ctrl+S)" disabled>${icon("save")}<span>Save</span></button>
     </div>
@@ -738,9 +737,6 @@ async function cancelLoad() {
   $<HTMLButtonElement>("cancel-button").disabled = false;
 }
 
-$("new-window-button").addEventListener("click", () => {
-  if (native) void invoke("new_window").catch(showError);
-});
 $("save-button").addEventListener("click", () => void saveAnnotations());
 $("open-button").addEventListener("click", () => void chooseImage());
 $("previous-image-button").addEventListener(
@@ -885,7 +881,6 @@ if (windowHandle) {
     .then((path) => (path ? openPath(path, true) : loader.restore()))
     .catch(showError);
 } else {
-  $<HTMLButtonElement>("new-window-button").disabled = true;
   $<HTMLButtonElement>("open-button").disabled = true;
   $("open-button").title = "Open images in the desktop app";
   document

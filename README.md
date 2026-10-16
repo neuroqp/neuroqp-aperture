@@ -18,8 +18,8 @@ initial theme follows the system.
 
 ## Multiple windows and file opening
 
-Each Aperture window displays one image. Launch another copy, use **New window**
-or press **Ctrl+N** to compare images independently. **Open** and folder navigation
+Each Aperture window displays one image. Launch another copy or press **Ctrl+N**
+to compare images independently. **Open** and folder navigation
 replace only the image in their current window.
 
 You can pass an image filename when launching Aperture:
