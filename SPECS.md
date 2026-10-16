@@ -9,7 +9,8 @@ preview as soon as possible, and stays responsive while loading large images.
   a per-user NSIS installer and a single-file portable launcher; Linux uses
   AppImage. Defer macOS, ARM, app stores, and distro-specific packages.
 - Display one image per window. Allow independent application processes for
-  side-by-side viewing. Launching an image path opens it in a new process;
+  side-by-side viewing. Ctrl+N starts a new instance without a toolbar button.
+  Launching an image path opens it in a new process;
   Open and folder navigation replace the image in the current window.
 - Give each process a reusable cache directory with exclusive ownership. Cleanup
   must never remove another running process's working files or display cache.
