@@ -106,12 +106,20 @@ jobs:
           pwsh scripts/release/smoke-windows.ps1 -Version (python scripts/release/release.py check) -Setup build/release/Aperture-Setup-x64.exe
           if ($LASTEXITCODE) { exit $LASTEXITCODE }
       - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
+        if: always()
         with:
           name: packages-${{ matrix.platform }}
           path: build/release/*
-          if-no-files-found: error
+          if-no-files-found: ignore
           retention-days: 90
           compression-level: 0
+      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
+        if: always()
+        with:
+          name: package-diagnostics-${{ matrix.platform }}
+          path: build/evidence/**
+          if-no-files-found: ignore
+          retention-days: 90
 
   assemble:
     needs: packages
@@ -143,15 +151,17 @@ jobs:
           python3 scripts/release/release.py metadata build/release --version "$(python3 scripts/release/release.py check)" --source-sha "$SOURCE_SHA" --plan "$plan" --plan-sha256 "$(sha256sum "$plan" | cut -d' ' -f1)"
           python3 scripts/release/release-state.py package build/release build/validated/validation.json build/package.json
       - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
+        if: always()
         with:
           name: release-files
           path: build/release/*
-          if-no-files-found: error
+          if-no-files-found: ignore
           retention-days: 90
           compression-level: 0
       - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
+        if: always()
         with:
           name: package-manifest
           path: build/package.json
-          if-no-files-found: error
+          if-no-files-found: ignore
           retention-days: 90

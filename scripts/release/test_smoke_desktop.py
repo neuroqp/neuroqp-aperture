@@ -171,7 +171,7 @@ class DesktopSmokeTests(unittest.TestCase):
             identity = dict(appdir_path=str(root), binary_sha256=smoke.sha(binary),
                 asset_path=str(launcher), asset_sha256=smoke.sha(launcher),
                 tiny_tiff_path=str(image), tiny_tiff_sha256=smoke.sha(image))
-            with patch.object(smoke.os, "getuid", return_value=1000):
+            with patch.object(smoke.os, "getuid", return_value=1000, create=True):
                 smoke.verify_inputs(identity)
                 binary.write_bytes(b"changed executable")
                 with self.assertRaisesRegex(ValueError, "Development executable SHA256"):

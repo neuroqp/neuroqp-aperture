@@ -27,9 +27,9 @@ class ReleaseStateTests(unittest.TestCase):
         report = {"schema": 1, "operation": "smoke", "source_sha": identity["source_sha"], "checksums_sha256": identity["checksums_sha256"], "reports": []}
         for env in sorted(state.ENVIRONMENTS):
             name = "Aperture-Setup-x64.exe" if env == "windows11-setup" else "Aperture-Portable-x64.exe" if env == "windows11-portable" else "Aperture-x86_64.AppImage"
-            report["reports"].append({"source_sha": identity["source_sha"], "checksums_sha256": identity["checksums_sha256"], "environment": env, "status": "pass", "forced_kill": False, "asset_sha256": assets[name], "steps": [
+            report["reports"].append({"schema": 1, "operation": "smoke", "source_sha": identity["source_sha"], "checksums_sha256": identity["checksums_sha256"], "environment": env, "status": "pass", "forced_kill": False, "asset_sha256": assets[name], "steps": [
                 {"name": "launch", "status": "pass"},
-                {"name": "render", "status": "pass", "detail": {"pixel_observation": {"spread": 40, "samples": [0, 40]}}},
+                {"name": "render", "status": "pass", "detail": {"observation": {"phase": "ready", "rendered_canvas": True, "state": {"phase": "ready", "previewReady": True}}, "pixel_observation": {"spread": 40, "samples": [0, 40]}}},
                 {"name": "clean-exit", "status": "pass", "detail": {"exit_code": 0, "forced_cleanup": False, "app_exited": True}}]})
         state.acceptance(report, identity, smoke=True)
         for mutation in (lambda r: r.update(checksums_sha256="c" * 64),
@@ -41,6 +41,28 @@ class ReleaseStateTests(unittest.TestCase):
             mutation(invalid)
             with self.assertRaises(ValueError):
                 state.acceptance(invalid, identity, smoke=True)
+
+    def test_validation_rejects_pass_stubs_and_missing_native_observations(self):
+        identity = {"source_sha": "a" * 40, "platforms": {platform: {"binary_sha256": digit * 64} for platform, digit in (("windows", "1"), ("linux", "2"))}}
+        report = {"schema": 1, "operation": "validate", "source_sha": identity["source_sha"], "reports": []}
+        for env in sorted(state.FUNCTIONAL_ENVIRONMENTS):
+            platform = "windows" if env == "windows11" else "linux"
+            report["reports"].append({"schema": 1, "operation": "validate", "source_sha": identity["source_sha"], "environment": env, "status": "pass", "forced_kill": False, "binary_sha256": identity["platforms"][platform]["binary_sha256"], "steps": [
+                {"name": "launch", "status": "pass"},
+                {"name": "render", "status": "pass", "detail": {"observation": {"phase": "ready", "rendered_canvas": True, "state": {"phase": "ready", "previewReady": True}}, "pixel_observation": {"spread": 40, "samples": [0, 40]}}},
+                {"name": "clean-exit", "status": "pass", "detail": {"exit_code": 0, "forced_cleanup": False, "app_exited": True}}]})
+        state.acceptance(report, identity)
+        for mutation in (lambda r: [row.pop(key) for row in r["reports"] for key in ("schema", "operation", "steps")],
+                         lambda r: r["reports"][0].update(operation="smoke"),
+                         lambda r: r["reports"][0].update(steps=[]),
+                         lambda r: r["reports"][0]["steps"][1]["detail"].pop("observation"),
+                         lambda r: r["reports"][0]["steps"][1]["detail"]["observation"]["state"].update(phase="error"),
+                         lambda r: r["reports"][0]["steps"][1]["detail"].pop("pixel_observation"),
+                         lambda r: r["reports"][0]["steps"][2]["detail"].update(exit_code=1)):
+            invalid = copy.deepcopy(report)
+            mutation(invalid)
+            with self.assertRaises(ValueError):
+                state.acceptance(invalid, identity)
 
     def test_evidence_has_no_expiry_and_cannot_be_overwritten(self):
         with tempfile.TemporaryDirectory() as temp:

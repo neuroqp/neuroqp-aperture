@@ -39,7 +39,7 @@ def hex_value(value, length=64):
 
 def source_identity(source_sha):
     hex_value(source_sha, 40)
-    actual = subprocess.check_output(["git", "rev-parse", "HEAD"], text=True).strip()
+    actual = subprocess.check_output(["git", "-c", f"safe.directory={Path.cwd()}", "rev-parse", "HEAD"], text=True).strip()
     if actual != source_sha:
         raise ValueError("Checkout differs from requested source")
     return {"schema": 1, "source_sha": source_sha, "version": current_version(), "lockfiles": lockfile_hashes(Path.cwd())}
@@ -83,6 +83,8 @@ def acceptance(report, identity, smoke=False):
     if len(rows) != len(required) or {row.get("environment") for row in rows} != required:
         raise ValueError("Required native environments are missing or duplicated")
     for row in rows:
+        if row.get("schema") != 1 or row.get("operation") != report["operation"]:
+            raise ValueError("Native report schema/operation differs")
         if row.get("source_sha") != identity["source_sha"]:
             raise ValueError("Native report belongs to a different source commit")
         if smoke and row.get("checksums_sha256") != identity["checksums_sha256"]:
@@ -98,17 +100,22 @@ def acceptance(report, identity, smoke=False):
             expected = identity["platforms"][platform]["binary_sha256"]
         if row.get(key) != expected:
             raise ValueError("Native evidence executable/package differs")
-        if smoke:
-            steps = row.get("steps", [])
-            if [step.get("name") for step in steps] != ["launch", "render", "clean-exit"] or any(step.get("status") != "pass" for step in steps):
-                raise ValueError("Fixed native install/launch/open/close smoke is incomplete")
-            rendered = steps[1].get("detail", {})
-            pixels = rendered.get("pixel_observation", {})
-            closed = steps[2].get("detail", {})
-            if not isinstance(pixels.get("spread"), (int, float)) or pixels["spread"] < 35 or not pixels.get("samples"):
-                raise ValueError("Native smoke lacks visible rendered pixels")
-            if closed.get("exit_code") != 0 or closed.get("forced_cleanup", False) is not False or (platform == "linux" and closed.get("app_exited") is not True):
-                raise ValueError("Native smoke requires normal application close with exit 0")
+        steps = row.get("steps", [])
+        if [step.get("name") for step in steps] != ["launch", "render", "clean-exit"] or any(step.get("status") != "pass" for step in steps):
+            raise ValueError("Native launch/render/clean-exit evidence is incomplete")
+        rendered = steps[1].get("detail", {})
+        observation = rendered.get("observation", {})
+        state = observation.get("state", {})
+        pixels = rendered.get("pixel_observation", {})
+        closed = steps[2].get("detail", {})
+        if (observation.get("phase") != "ready" or observation.get("rendered_canvas") is not True
+                or state.get("phase") != "ready" or state.get("previewReady") is not True
+                or observation.get("error") or state.get("error")):
+            raise ValueError("Native evidence lacks a ready rendered image")
+        if not isinstance(pixels.get("spread"), (int, float)) or pixels["spread"] < 35 or not pixels.get("samples"):
+            raise ValueError("Native evidence lacks visible rendered pixels")
+        if closed.get("exit_code") != 0 or closed.get("forced_cleanup", False) is not False or (platform == "linux" and closed.get("app_exited") is not True):
+            raise ValueError("Native evidence requires normal application close with exit 0")
     return report
 
 
