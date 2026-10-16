@@ -64,12 +64,22 @@ python3 scripts/release/linux-smoke.py copy-to PACKAGE /prepared/PACKAGE SHA256 
 python3 scripts/release/linux-smoke.py run identity.json report.json --driver-plan driver-plan.json
 ```
 
-Windows runs the actual package through the prepared native observer:
+Windows runs one native observer process with a 12-minute outer timeout:
 
 ```powershell
-powershell -NoProfile -STA -File scripts/release/smoke-desktop-windows.ps1 -Identity identity.json -Environment windows11-setup -Report smoke.json
+$helper=(Resolve-Path scripts/release/smoke-desktop-windows.ps1).Path
+$identity=(Resolve-Path identity.json).Path
+$report=[IO.Path]::GetFullPath('smoke.json')
+$arguments='-NoProfile -STA -File "'+$helper+'" -Identity "'+$identity+'" -Environment windows11-setup -Report "'+$report+'"'
+$observer=Start-Process powershell -ArgumentList $arguments -PassThru
+if (!$observer.WaitForExit(720000)) { throw 'Native observer timed out; preserve the app and observer for diagnosis' }
+if ($observer.ExitCode -ne 0 -or !(Test-Path -LiteralPath $report)) { throw 'Native smoke failed; retain its report and diagnostics' }
 # Use -Environment windows11-portable with its separate identity/report.
 ```
+
+The helper keeps its launch, render and close deadlines and writes one final
+report. Read that report after the process exits. A timeout or missing report
+fails the operation; preserve available diagnostics before retrying.
 
 Use strict SSH host-key verification and an existing identity. Prepare owned
 writable destinations. The Linux driver plan retains desktop variables in its `environment` object,
