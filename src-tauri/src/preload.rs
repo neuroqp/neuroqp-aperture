@@ -4,7 +4,7 @@ use crate::{
     backend::{self, Job, LoadContext},
     instances::Fingerprint,
     memory::{Budget, Reservation},
-    nd2::{Dimensions, ExtractedNd2, Selection},
+    nd2::{Dimensions, ExtractedNd2, Projection, Selection},
     nd2_cache::{Cache, Geometry},
 };
 use serde::Serialize;
@@ -222,6 +222,32 @@ impl Acquisition {
         result
     }
 
+    pub fn extract_projection(
+        &self,
+        output: &Path,
+        selection: Selection,
+        projection: Projection,
+        cancel: &AtomicBool,
+        progress: impl FnMut(f64),
+    ) -> Result<ExtractedNd2, String> {
+        let mut guard = self.cache()?;
+        if cancel.load(Ordering::Relaxed) || self.stopped.load(Ordering::Relaxed) {
+            return Err("Loading cancelled.".into());
+        }
+        let cache = guard.as_mut().unwrap();
+        let result = cache.extract_projection(output, selection, projection, cancel, progress);
+        self.snapshot_cache(cache);
+        if self.trim_requested.load(Ordering::Relaxed)
+            || self.clear_requested.load(Ordering::Relaxed)
+        {
+            self.trim_cache(&mut guard)?;
+        }
+        if cancel.load(Ordering::Relaxed) || self.stopped.load(Ordering::Relaxed) {
+            return Err("Loading cancelled.".into());
+        }
+        result
+    }
+
     fn current(&self, generation: u64, foreground: &Job) -> bool {
         !self.stopped.load(Ordering::Relaxed)
             && !foreground.cancel.load(Ordering::Relaxed)
@@ -344,6 +370,9 @@ impl Drop for Running<'_> {
 /// Runs after foreground loading, in that loader's existing owned thread.
 /// Every optional job has a separate work directory and no UI notifier.
 pub(crate) fn run(context: &LoadContext, foreground: &Arc<Job>) {
+    if foreground.projection != Projection::None {
+        return;
+    }
     let Some(acquisition) = &foreground.acquisition else {
         return;
     };

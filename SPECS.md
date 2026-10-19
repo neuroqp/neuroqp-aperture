@@ -247,6 +247,24 @@ on Open, folder navigation or Close. Cancellation or save failure must retain un
   fixtures; check real public acquisitions and native UI separately. Keep real
   acquisitions and generated evidence outside Git.
 
+## ND2 maximum-intensity projections
+
+- The Dimensions panel has independent Z max and Time max controls; enabling both
+  reduces all Z/time frames at the current position. Unprojected axes and local
+  channel selection remain navigable. Projected axes show their full extent and
+  disable slice scrolling. Turning projection off starts at the first slice.
+- Calculate component-wise maxima from original unsigned 8/16-bit intensities,
+  then normalize the completed projection for display. Preserve channel/RGB order
+  and keep positions separate. Never project independently normalized previews.
+- Reserve one original-depth accumulator plus the current input decode and
+  display conversion under the shared budget. Borrow cached inputs; stream and
+  release uncached inputs instead of retaining an entire stack. Check source
+  identity and cancellation between frames and during reduction/conversion.
+- Projection cache keys include mode and source identity and canonicalize the
+  projected coordinates. Reuse completed display caches. Do not automatically
+  preload projections in this iteration; ordinary preloading resumes when
+  projection mode is off. Projections are display-only and remain read-only.
+
 ## Image memory and preloading
 
 - Settings > General sets an image-memory upper limit, default 4 GiB and shared

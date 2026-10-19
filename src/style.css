@@ -939,3 +939,29 @@ select:focus-visible {
 #settings-dialog #memory-error {
   color: var(--error);
 }
+
+.dimension-projections {
+  display: flex;
+  gap: 16px;
+  margin-top: 10px;
+  padding-top: 9px;
+  border-top: 1px solid var(--line);
+}
+.dimension-projections label {
+  display: flex;
+  align-items: center;
+  gap: 5px;
+  font-size: 11px;
+}
+.dimension-projections input {
+  width: 13px;
+  height: 13px;
+  margin: 0;
+  accent-color: var(--solid);
+}
+.dimension-projections label:has(input:disabled) {
+  color: var(--muted);
+}
+#dimension-projection-status {
+  color: var(--accent-ink);
+}
