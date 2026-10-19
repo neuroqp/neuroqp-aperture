@@ -858,3 +858,84 @@ select:focus-visible {
   content: " •";
   color: var(--focus);
 }
+
+#navigator-panel {
+  flex-basis: 258px;
+}
+.dimension-axis {
+  display: flex;
+  align-items: center;
+  gap: 9px;
+  font-size: 11px;
+  color: var(--muted);
+}
+.dimension-axis select {
+  flex: 1;
+  min-width: 0;
+  padding: 4px 7px;
+  border: 1px solid var(--line);
+  border-radius: 3px;
+  color: var(--ink);
+  background: var(--panel);
+  font: inherit;
+}
+#dimension-count {
+  min-width: 48px;
+  text-align: right;
+  font-variant-numeric: tabular-nums;
+  color: var(--ink);
+}
+.dimension-scroll {
+  display: flex;
+  align-items: center;
+  gap: 7px;
+  margin: 10px 0 5px;
+}
+#dimension-range {
+  flex: 1;
+  min-width: 0;
+  accent-color: var(--accent);
+}
+.dimension-name {
+  min-height: 16px;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  font-size: 11px;
+}
+.dimension-scope {
+  margin: 8px 0 0;
+  color: var(--muted);
+  font-size: 10px;
+  line-height: 1.5;
+}
+
+.memory-settings {
+  margin-bottom: 28px;
+}
+.memory-controls {
+  display: flex;
+  align-items: center;
+  flex-shrink: 0;
+  gap: 8px;
+}
+.memory-value {
+  white-space: nowrap;
+}
+#memory-limit {
+  width: 76px;
+  height: 30px;
+  padding: 0 8px;
+  border: 1px solid var(--field-border);
+  border-radius: 4px;
+  color: var(--ink);
+  background: var(--paper);
+  font: inherit;
+}
+#memory-apply {
+  height: 30px;
+  padding: 0 10px;
+}
+#settings-dialog #memory-error {
+  color: var(--error);
+}

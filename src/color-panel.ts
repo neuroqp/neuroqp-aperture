@@ -9,6 +9,7 @@ import {
   removeColorConnection,
   resetColorConnection,
   setOutputColor,
+  sameColorChannels,
   setColorConnectionRange,
   toHex,
   toHSV,
@@ -827,7 +828,8 @@ export function bindColorPanel(onChange: (settings: ColorSettings) => void) {
   new ResizeObserver(() => draw()).observe(patch);
   render();
   return {
-    setChannels(next: readonly ColorChannel[]) {
+    setChannels(next: readonly ColorChannel[], preserve = false) {
+      if (preserve && sameColorChannels(channels, next)) return;
       closeTransient();
       channels = next.map((channel) => ({ ...channel }));
       histograms = [];

@@ -11,6 +11,21 @@ export interface ColorChannel {
   color?: string;
 }
 
+export function sameColorChannels(
+  previous: readonly ColorChannel[],
+  next: readonly ColorChannel[],
+) {
+  return (
+    previous.length === next.length &&
+    previous.every(
+      (channel, index) =>
+        channel.id === next[index].id &&
+        channel.name === next[index].name &&
+        channel.color === next[index].color,
+    )
+  );
+}
+
 export interface ColorConnection extends DisplaySettings {
   id: number;
   source: string;
@@ -241,4 +256,18 @@ export function setOutputColor(
   return hex && color in settings.colors
     ? { ...settings, colors: { ...settings.colors, [color]: hex } }
     : settings;
+}
+
+export function visibleChannelSettings(
+  settings: ColorSettings,
+  channel: number,
+): ColorSettings {
+  return channel < 0
+    ? settings
+    : {
+        ...settings,
+        connections: settings.connections.filter(
+          (connection) => connection.source === String(channel),
+        ),
+      };
 }

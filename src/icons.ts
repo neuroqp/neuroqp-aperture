@@ -18,6 +18,7 @@ import {
   ChevronLeft,
   ChevronRight,
   Palette,
+  Layers,
   Trash2,
   type IconNode,
 } from "lucide";
@@ -41,6 +42,7 @@ const icons = {
   previous: ChevronLeft,
   next: ChevronRight,
   color: Palette,
+  navigator: Layers,
   trash: Trash2,
   // Three point markers, drawn on Lucide's 24px grid.
   points: [

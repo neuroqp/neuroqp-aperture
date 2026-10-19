@@ -14,7 +14,139 @@ export type ImageState = {
   orientation?: number;
   channels?: { name: string; color: string }[];
   channelMode?: boolean;
+  readOnly?: boolean;
+  displayRanges?: [number, number][];
+  calibration?: {
+    pixelWidthUm: number | null;
+    pixelHeightUm: number | null;
+    zStepUm: number | null;
+    timeIncrementSeconds: number | null;
+  };
+  dimensions?: {
+    positions: string[];
+    z: number;
+    time: number;
+    position: number;
+    zIndex: number;
+    timeIndex: number;
+  };
 };
+
+export type DimensionAxis = "position" | "z" | "time" | "channel";
+
+export function dimensionAxis(
+  image: ImageState | null,
+  axis: DimensionAxis,
+  channel: number,
+) {
+  const dimensions = image?.dimensions;
+  switch (axis) {
+    case "position":
+      return {
+        index: dimensions?.position ?? 0,
+        count: dimensions?.positions.length ?? 1,
+        name: dimensions?.positions[dimensions.position] ?? "",
+      };
+    case "z":
+      return {
+        index: dimensions?.zIndex ?? 0,
+        count: dimensions?.z ?? 1,
+        name: "Z plane",
+      };
+    case "time":
+      return {
+        index: dimensions?.timeIndex ?? 0,
+        count: dimensions?.time ?? 1,
+        name: "Time point",
+      };
+    case "channel":
+      return {
+        index: channel + 1,
+        count: (image?.channels?.length ?? 0) + 1,
+        name:
+          channel < 0 ? "Composite" : (image?.channels?.[channel]?.name ?? ""),
+      };
+  }
+}
+
+export type PlaneSelection = { position: number; z: number; time: number };
+export type NavigationHint = {
+  axis: keyof PlaneSelection;
+  direction: -1 | 1;
+};
+
+/** Serialize native plane changes, keeping only the latest requested coordinates. */
+export class PlaneNavigation {
+  selection: PlaneSelection | null = null;
+  private confirmed: PlaneSelection | null = null;
+  private pending = false;
+  private generation = 0;
+  private hint: NavigationHint | undefined;
+
+  private apply: (
+    position: number,
+    z: number,
+    time: number,
+    hint?: NavigationHint,
+  ) => Promise<boolean>;
+  private changed: () => void;
+
+  constructor(apply: PlaneNavigation["apply"], changed: () => void) {
+    this.apply = apply;
+    this.changed = changed;
+  }
+
+  setPlane(plane: PlaneSelection | null, preserve = false) {
+    this.confirmed = plane;
+    if (!preserve) {
+      this.generation++;
+      this.pending = false;
+    }
+    if (!this.pending) this.selection = plane;
+  }
+
+  select(axis: keyof PlaneSelection, value: number) {
+    if (!this.selection) return;
+    this.hint = { axis, direction: value < this.selection[axis] ? -1 : 1 };
+    this.selection = { ...this.selection, [axis]: value };
+    this.changed();
+    void this.flush();
+  }
+
+  private async flush() {
+    if (this.pending) return;
+    this.pending = true;
+    const generation = this.generation;
+    while (
+      this.selection &&
+      (this.selection.position !== this.confirmed?.position ||
+        this.selection.z !== this.confirmed?.z ||
+        this.selection.time !== this.confirmed?.time)
+    ) {
+      const selected = this.selection;
+      const applied = await this.apply(
+        selected.position,
+        selected.z,
+        selected.time,
+        this.hint,
+      );
+      if (generation !== this.generation) return;
+      if (!applied) {
+        this.selection = this.confirmed;
+        break;
+      }
+      this.confirmed = selected;
+    }
+    this.pending = false;
+    this.changed();
+  }
+}
+
+/** Keep the detail cache near 32 MiB, allowing source planes and CPU composites. */
+export function imageTileCacheCount(channels = 3) {
+  const tileBytes = 256 ** 2 * (Math.max(1, channels) * 2 + 8);
+  return Math.max(1, Math.min(128, Math.floor((32 * 1024 ** 2) / tileBytes)));
+}
 
 // OSD flips stored pixels horizontally before applying clockwise rotation.
 export function orientation(value = 1) {
@@ -81,6 +213,13 @@ export class ImageLoader {
   private unlisten: (() => void) | undefined;
   private commands: {
     open: (path: string) => Promise<ImageState>;
+    selectPlane?: (
+      id: string,
+      position: number,
+      z: number,
+      time: number,
+      hint?: NavigationHint,
+    ) => Promise<ImageState>;
     state: () => Promise<ImageState | null>;
     cancel: () => Promise<void>;
     listen?: (changed: (state: ImageState) => void) => Promise<() => void>;
@@ -116,9 +255,9 @@ export class ImageLoader {
     return ++this.generation;
   }
 
-  private begin() {
+  private begin(previous: ImageState | null = null) {
     const generation = this.invalidate();
-    this.state = null;
+    this.state = previous;
     this.active = true;
     this.pending = true;
     this.buffered.clear();
@@ -126,36 +265,54 @@ export class ImageLoader {
   }
 
   async open(path: string) {
-    const generation = this.begin();
-    try {
-      await this.listening;
-      if (generation !== this.generation || this.disposed) return;
-      const state = await this.commands.open(path);
-      if (generation === this.generation) this.finish(state, generation);
-    } catch (error) {
-      if (generation === this.generation) {
-        this.active = false;
-        this.pending = false;
-        this.buffered.clear();
-        this.failed(String(error));
-      }
-    }
+    await this.request(() => this.commands.open(path));
   }
 
   async restore() {
-    const generation = this.begin();
+    await this.request(() => this.commands.state());
+  }
+
+  async selectPlane(
+    position: number,
+    z: number,
+    time: number,
+    hint?: NavigationHint,
+  ) {
+    const previous = this.state;
+    if (!previous?.dimensions || !this.commands.selectPlane) return false;
+    return this.request(
+      () =>
+        hint
+          ? this.commands.selectPlane!(previous.id, position, z, time, hint)
+          : this.commands.selectPlane!(previous.id, position, z, time),
+      previous,
+    );
+  }
+
+  private async request(
+    command: () => Promise<ImageState | null>,
+    previous: ImageState | null = null,
+  ) {
+    const generation = this.begin(previous);
     try {
       await this.listening;
-      if (generation !== this.generation || this.disposed) return;
-      const state = await this.commands.state();
-      if (generation === this.generation) this.finish(state, generation);
+      if (generation !== this.generation || this.disposed) return false;
+      const state = await command();
+      if (generation !== this.generation) return false;
+      this.finish(state, generation);
+      return Boolean(state);
     } catch (error) {
       if (generation === this.generation) {
-        this.active = false;
+        this.active = Boolean(previous);
         this.pending = false;
         this.buffered.clear();
+        if (previous) {
+          this.state = null;
+          this.accept(previous, generation);
+        }
         this.failed(String(error));
       }
+      return false;
     }
   }
 
@@ -215,19 +372,21 @@ export class ImageLoader {
   }
 
   async cancel() {
+    const selectingPlane = this.pending && Boolean(this.state?.dimensions);
     const generation = this.invalidate();
     this.active = false;
     this.pending = false;
     this.buffered.clear();
     try {
       await this.commands.cancel();
-      if (generation === this.generation && this.state) {
+      if (generation !== this.generation) return false;
+      // A plane command may have replaced the native id before its reply arrives.
+      const state = selectingPlane
+        ? ((await this.commands.state()) ?? this.state)
+        : this.state;
+      if (generation === this.generation && state) {
         this.accept(
-          {
-            ...this.state,
-            revision: this.state.revision + 1,
-            phase: "cancelled",
-          },
+          { ...state, revision: state.revision + 1, phase: "cancelled" },
           generation,
         );
       }

@@ -25,7 +25,7 @@ use std::{
 };
 
 pub const CACHE_LIMIT: u64 = 2 * 1024 * 1024 * 1024;
-pub const IMAGE_EXTENSIONS: &[&str] = &["jpg", "jpeg", "png", "bmp", "tif", "tiff", "webp"];
+pub const IMAGE_EXTENSIONS: &[&str] = &["jpg", "jpeg", "png", "bmp", "tif", "tiff", "webp", "nd2"];
 const TILE_SIZE: u32 = 256;
 static NEXT_ID: AtomicU64 = AtomicU64::new(1);
 
@@ -77,6 +77,10 @@ pub struct ImageState {
     pub detail: String,
     pub channels: Vec<Channel>,
     pub channel_mode: bool,
+    pub read_only: bool,
+    pub dimensions: Option<crate::nd2::Dimensions>,
+    pub calibration: Option<crate::nd2::Calibration>,
+    pub display_ranges: Vec<[u16; 2]>,
 }
 
 type Notifier = Arc<dyn Fn(&ImageState) + Send + Sync>;
@@ -88,6 +92,11 @@ pub struct Job {
     pub dir: Mutex<PathBuf>,
     pub input: PathBuf,
     pub source: PathBuf,
+    nd2: Option<crate::nd2::Selection>,
+    pub(crate) acquisition: Option<Arc<crate::preload::Acquisition>>,
+    pub(crate) preview_only: bool,
+    pub(crate) background: bool,
+    memory: Arc<crate::memory::Budget>,
     /// Initial metadata remains the sourceIndex basis through repeated saves.
     pub annotations: Mutex<Option<crate::annotation_io::AnnotationBasis>>,
     work: PathBuf,
@@ -97,6 +106,8 @@ pub struct Job {
     cache_key: String,
     process_number: AtomicU64,
     decoder: Mutex<Option<Arc<crate::decoder::Decoder>>>,
+    decoder_memory: Mutex<Option<DecoderMemory>>,
+    frame_memory: AtomicU64,
     processes: Mutex<HashMap<u64, Arc<Mutex<Child>>>>,
     notifier: Option<Notifier>,
     budget_check: Mutex<Instant>,
@@ -104,20 +115,49 @@ pub struct Job {
     cache_access: Arc<Mutex<()>>,
 }
 
+struct DecoderMemory {
+    bytes: u64,
+    // Additional admission after metadata discovery keeps the initial lease alive.
+    reservations: Vec<crate::memory::Reservation>,
+}
+
+#[derive(Clone, Copy)]
+enum LoadMode {
+    Foreground,
+    Preview,
+    Detail,
+}
+
+#[derive(Clone)]
+pub(crate) struct LoadContext {
+    pub root: PathBuf,
+    pub memory: Arc<crate::memory::Budget>,
+    pub cache_access: Arc<Mutex<()>>,
+}
+
 pub struct Backend {
     pub current: Mutex<Option<Arc<Job>>>,
     root: PathBuf,
     workers: Mutex<Vec<thread::JoinHandle<()>>>,
     pub requests: AtomicU64,
-    pub closing: AtomicBool,
+    pub closing: Arc<AtomicBool>,
     pub tile_slots: Arc<tokio::sync::Semaphore>,
     notifier: Option<Notifier>,
     cache_access: Arc<Mutex<()>>,
     open_lock: Mutex<()>,
+    pub memory: Arc<crate::memory::Budget>,
+    acquisition: Arc<Mutex<Option<Arc<crate::preload::Acquisition>>>>,
+    browser_memory: Mutex<Option<crate::memory::Reservation>>,
 }
 
 impl Backend {
+    #[cfg(test)]
     pub fn new(root: PathBuf) -> Result<Self, String> {
+        let memory = crate::memory::Budget::new(root.clone())?;
+        Self::with_memory(root, memory)
+    }
+
+    pub fn with_memory(root: PathBuf, memory: Arc<crate::memory::Budget>) -> Result<Self, String> {
         fs::create_dir_all(&root).map_err(|e| e.to_string())?;
         // Snapshot stale work at startup; deletion runs off the window thread.
         let stale: Vec<_> = fs::read_dir(&root)
@@ -135,16 +175,48 @@ impl Backend {
                 let _ = fs::remove_dir_all(path);
             }
         });
+        let closing = Arc::new(AtomicBool::new(false));
+        let acquisition: Arc<Mutex<Option<Arc<crate::preload::Acquisition>>>> =
+            Arc::new(Mutex::new(None));
+        let maintenance = {
+            let closing = Arc::downgrade(&closing);
+            let acquisition = acquisition.clone();
+            let memory = memory.clone();
+            thread::spawn(move || {
+                let mut epoch = memory.reclaim_epoch().unwrap_or(0);
+                while closing
+                    .upgrade()
+                    .is_some_and(|closing| !closing.load(Ordering::Relaxed))
+                {
+                    let next = memory.reclaim_epoch().unwrap_or(epoch);
+                    let reclaim = next != epoch;
+                    epoch = next;
+                    let current = acquisition.lock().unwrap().clone();
+                    if let Some(current) = current {
+                        if reclaim {
+                            current.foreground();
+                            current.clear_optional();
+                        } else {
+                            let _ = current.trim();
+                        }
+                    }
+                    thread::sleep(Duration::from_millis(250));
+                }
+            })
+        };
         Ok(Self {
             current: Mutex::new(None),
             root,
-            workers: Mutex::new(vec![cleanup]),
-            closing: AtomicBool::new(false),
+            workers: Mutex::new(vec![cleanup, maintenance]),
+            closing,
             requests: AtomicU64::new(0),
             tile_slots: Arc::new(tokio::sync::Semaphore::new(2)),
             notifier: None,
             cache_access: Arc::new(Mutex::new(())),
             open_lock: Mutex::new(()),
+            memory,
+            acquisition,
+            browser_memory: Mutex::new(None),
         })
     }
 
@@ -160,7 +232,7 @@ impl Backend {
             return Err("Viewer shutting down.".into());
         }
         let source = fs::canonicalize(path).map_err(|e| format!("Cannot open image: {e}"))?;
-        self.open_source(path, source)
+        self.open_source(path, source, None)
     }
 
     /// Keep the selected filename for display/format detection while loading the
@@ -168,13 +240,251 @@ impl Backend {
     pub fn open_resolved(&self, path: &Path, source: &Path) -> Result<ImageState, String> {
         let _opening = self.open_lock.lock().unwrap();
         self.cancel();
-        self.open_source(path, source.to_path_buf())
+        self.open_source(path, source.to_path_buf(), None)
     }
 
-    fn open_source(&self, path: &Path, source: PathBuf) -> Result<ImageState, String> {
+    /// Select a frame without changing the pinned source or the folder selection.
+    pub fn select_plane(
+        &self,
+        id: &str,
+        selection: crate::nd2::Selection,
+    ) -> Result<ImageState, String> {
+        let _opening = self.open_lock.lock().unwrap();
+        let job = self
+            .current
+            .lock()
+            .unwrap()
+            .clone()
+            .ok_or("No image open")?;
+        let state = job.state.lock().unwrap().clone();
+        if state.id != id {
+            return Err("The image has changed".into());
+        }
+        let dimensions = state
+            .dimensions
+            .as_ref()
+            .ok_or("This image has no dimension navigation")?;
+        if selection.position as usize >= dimensions.positions.len()
+            || selection.z >= dimensions.z
+            || selection.time >= dimensions.time
+        {
+            return Err("The selected ND2 position, Z or time is out of range.".into());
+        }
+        // Seed navigation immediately; the worker independently validates the file metadata.
+        let mut dimensions = dimensions.clone();
+        dimensions.position = selection.position;
+        dimensions.z_index = selection.z;
+        dimensions.time_index = selection.time;
+        self.open_source(
+            Path::new(&state.path),
+            job.source.clone(),
+            Some((selection, dimensions, state.channels)),
+        )
+    }
+
+    fn open_source(
+        &self,
+        path: &Path,
+        source: PathBuf,
+        frame: Option<(crate::nd2::Selection, crate::nd2::Dimensions, Vec<Channel>)>,
+    ) -> Result<ImageState, String> {
         if self.closing.load(Ordering::Relaxed) {
             return Err("Viewer shutting down.".into());
         }
+        {
+            let mut browser = self.browser_memory.lock().unwrap();
+            if browser.is_none() {
+                // Two 32-channel overview sets during replacement and a 32 MiB
+                // tile-cache allowance. Browser/runtime overhead and GPU differ.
+                let amount = 96 * 1024 * 1024;
+                let mut reservation = self.memory.try_reserve(amount, false)?;
+                if reservation.is_none() {
+                    self.memory.request_reclaim()?;
+                    for _ in 0..80 {
+                        thread::sleep(Duration::from_millis(25));
+                        reservation = self.memory.try_reserve(amount, false)?;
+                        if reservation.is_some() {
+                            break;
+                        }
+                    }
+                }
+                *browser = Some(reservation.ok_or("Image display does not fit the shared memory budget. Close another image window or increase the limit in Settings.")?);
+            }
+        }
+        let is_nd2 = path
+            .extension()
+            .is_some_and(|extension| extension.eq_ignore_ascii_case("nd2"));
+        let acquisition = if is_nd2 {
+            let identity =
+                crate::instances::fingerprint(&source).map_err(|error| error.to_string())?;
+            let mut current = self.acquisition.lock().unwrap();
+            if current
+                .as_ref()
+                .is_none_or(|item| !item.matches(&source, &identity))
+            {
+                if let Some(old) = current.take() {
+                    old.stop();
+                }
+                *current = Some(crate::preload::Acquisition::new(
+                    source.clone(),
+                    identity,
+                    self.memory.clone(),
+                ));
+            }
+            current.clone()
+        } else {
+            if let Some(old) = self.acquisition.lock().unwrap().take() {
+                old.stop();
+            }
+            None
+        };
+        if let Some(acquisition) = &acquisition {
+            acquisition.foreground();
+        }
+        let context = LoadContext {
+            root: self.root.clone(),
+            memory: self.memory.clone(),
+            cache_access: self.cache_access.clone(),
+        };
+        let job = context.create_job(
+            path,
+            source,
+            frame,
+            acquisition,
+            LoadMode::Foreground,
+            self.notifier.clone(),
+        )?;
+        let initial = job.state.lock().unwrap().clone();
+        let old = self.current.lock().unwrap().replace(job.clone());
+        if let Some(old) = old {
+            old.cancel();
+        }
+        let mut workers = self.workers.lock().unwrap();
+        workers.retain(|worker| !worker.is_finished());
+        workers.push(thread::spawn(move || {
+            if let Err(error) = load(&job) {
+                job.update(|state| {
+                    state.phase = "error".into();
+                    state.error = Some(error);
+                    state.detail = "Image loading failed.".into();
+                });
+            }
+            finish_decoder(&job);
+            if !job.cancel.load(Ordering::Relaxed) && job.state.lock().unwrap().phase == "ready" {
+                crate::preload::run(&context, &job);
+            }
+            // Generated pyramids need no decoder once complete; native tiles do.
+            if job.native.lock().unwrap().is_empty() {
+                let decoder = job.decoder.lock().unwrap().take();
+                if let Some(decoder) = decoder {
+                    decoder.stop();
+                }
+            }
+            if job.cancel.load(Ordering::Relaxed) || job.state.lock().unwrap().phase == "error" {
+                let decoder = job.decoder.lock().unwrap().clone();
+                if let Some(decoder) = decoder {
+                    decoder.stop();
+                }
+                let dir = job.dir.lock().unwrap().clone();
+                if dir
+                    .file_name()
+                    .unwrap()
+                    .to_string_lossy()
+                    .starts_with("work-")
+                {
+                    let _ = fs::remove_dir_all(dir);
+                }
+            }
+        }));
+        Ok(initial)
+    }
+
+    pub fn navigation_hint(&self, axis: Option<&str>, direction: Option<i8>) {
+        if let Some(acquisition) = self.acquisition.lock().unwrap().as_ref() {
+            acquisition.hint(axis, direction);
+        }
+    }
+
+    pub fn preload_status(&self) -> crate::preload::PreloadStatus {
+        self.acquisition
+            .lock()
+            .unwrap()
+            .as_ref()
+            .map(|item| item.status())
+            .unwrap_or_default()
+    }
+
+    pub fn set_memory_budget(&self, bytes: u64) -> Result<crate::memory::MemoryStatus, String> {
+        self.memory.set_limit(bytes)?;
+        if let Some(acquisition) = self.acquisition.lock().unwrap().as_ref() {
+            acquisition.trim()?;
+        }
+        self.memory.status()
+    }
+
+    pub fn snapshot(&self) -> Option<ImageState> {
+        self.current
+            .lock()
+            .unwrap()
+            .as_ref()
+            .map(|job| job.state.lock().unwrap().clone())
+    }
+    pub fn cancel(&self) {
+        if let Some(acquisition) = self.acquisition.lock().unwrap().as_ref() {
+            acquisition.foreground();
+        }
+        let job = self.current.lock().unwrap().clone();
+        if let Some(job) = job {
+            job.cancel();
+        }
+    }
+    pub fn shutdown(&self) {
+        self.closing.store(true, Ordering::Relaxed);
+        if let Some(acquisition) = self.acquisition.lock().unwrap().take() {
+            acquisition.stop();
+        }
+        self.cancel();
+        for worker in self.workers.lock().unwrap().drain(..) {
+            let _ = worker.join();
+        }
+        while self.requests.load(Ordering::Relaxed) != 0 {
+            thread::sleep(Duration::from_millis(20));
+        }
+    }
+}
+
+impl LoadContext {
+    pub(crate) fn background_job(
+        &self,
+        path: &Path,
+        source: PathBuf,
+        frame: (crate::nd2::Selection, crate::nd2::Dimensions, Vec<Channel>),
+        acquisition: Arc<crate::preload::Acquisition>,
+        preview_only: bool,
+    ) -> Result<Arc<Job>, String> {
+        self.create_job(
+            path,
+            source,
+            Some(frame),
+            Some(acquisition),
+            if preview_only {
+                LoadMode::Preview
+            } else {
+                LoadMode::Detail
+            },
+            None,
+        )
+    }
+
+    fn create_job(
+        &self,
+        path: &Path,
+        source: PathBuf,
+        frame: Option<(crate::nd2::Selection, crate::nd2::Dimensions, Vec<Channel>)>,
+        acquisition: Option<Arc<crate::preload::Acquisition>>,
+        mode: LoadMode,
+        notifier: Option<Notifier>,
+    ) -> Result<Arc<Job>, String> {
         #[cfg(windows)]
         let source_file = File::open(&source).map_err(|e| e.to_string())?;
         #[cfg(windows)]
@@ -190,8 +500,28 @@ impl Backend {
             .unwrap_or("")
             .to_ascii_lowercase();
         if !supported_image(path) {
-            return Err("Supported formats: JPEG, PNG, BMP, WebP, TIFF and BigTIFF.".into());
+            return Err(
+                "Supported formats: JPEG, PNG, BMP, WebP, TIFF, BigTIFF and Nikon ND2.".into(),
+            );
         }
+        let nd2 =
+            (extension == "nd2").then(|| frame.as_ref().map(|frame| frame.0).unwrap_or_default());
+        // BMP opens eagerly in the worker, including for vipsheader. Read only
+        // its dimensions here, before permitting any full-frame allocations.
+        let frame_memory = if extension == "bmp" {
+            let (width, height) = image::ImageReader::with_format(
+                std::io::BufReader::new(File::open(&source).map_err(|e| e.to_string())?),
+                image::ImageFormat::Bmp,
+            )
+            .into_dimensions()
+            .map_err(|e| e.to_string())?;
+            if width == 0 || height == 0 || width > i32::MAX as u32 || height > i32::MAX as u32 {
+                return Err("Invalid or unsupported image dimensions.".into());
+            }
+            decoded_workspace(width, height, 4, 1)?
+        } else {
+            64 * 1024 * 1024
+        };
         let id = format!(
             "{}-{}",
             SystemTime::now()
@@ -226,13 +556,25 @@ impl Backend {
             .modified()
             .map_err(|e| e.to_string())?
             .hash(&mut hasher);
+        if let Some(selection) = &nd2 {
+            "nd2-openreadout-0.3.0-v2-normalized".hash(&mut hasher);
+            (selection.position, selection.z, selection.time).hash(&mut hasher);
+        }
         let cache_key = format!("{:016x}", hasher.finish());
         let dir = self.root.join(format!("work-{id}"));
         fs::create_dir(&dir).map_err(|e| e.to_string())?;
         fs::create_dir(dir.join("tmp")).map_err(|e| e.to_string())?;
-        let input = dir.join(format!("source.{extension}"));
+        let alias = dir.join(format!("source.{extension}"));
         // Loader options use brackets, so never pass a user filename to libvips.
-        crate::platform::source_alias(&source, &input).map_err(|e| e.to_string())?;
+        crate::platform::source_alias(&source, &alias).map_err(|e| e.to_string())?;
+        let input = if nd2.is_some() {
+            dir.join("selected.tif")
+        } else {
+            alias
+        };
+        let (dimensions, initial_channels) = frame
+            .map(|(_, dimensions, channels)| (Some(dimensions), channels))
+            .unwrap_or_default();
         let initial = ImageState {
             id,
             revision: 0,
@@ -255,8 +597,12 @@ impl Backend {
             progress: None,
             error: None,
             detail: "Reading image metadata…".into(),
-            channels: Vec::new(),
-            channel_mode: false,
+            channels: initial_channels,
+            channel_mode: nd2.is_some(),
+            read_only: nd2.is_some(),
+            dimensions,
+            calibration: None,
+            display_ranges: Vec::new(),
         };
         let job = Arc::new(Job {
             state: Mutex::new(initial.clone()),
@@ -265,6 +611,11 @@ impl Backend {
             dir: Mutex::new(dir.clone()),
             input,
             source,
+            nd2,
+            acquisition,
+            preview_only: matches!(mode, LoadMode::Preview),
+            background: !matches!(mode, LoadMode::Foreground),
+            memory: self.memory.clone(),
             annotations: Mutex::new(None),
             work: dir,
             native: Mutex::new(Vec::new()),
@@ -273,74 +624,24 @@ impl Backend {
             cache_key,
             process_number: AtomicU64::new(0),
             decoder: Mutex::new(None),
+            decoder_memory: Mutex::new(None),
+            frame_memory: AtomicU64::new(frame_memory),
             processes: Mutex::new(HashMap::new()),
-            notifier: self.notifier.clone(),
+            notifier,
             budget_check: Mutex::new(Instant::now()),
             housekeeping: AtomicBool::new(false),
             cache_access: self.cache_access.clone(),
         });
-        let old = self.current.lock().unwrap().replace(job.clone());
-        if let Some(old) = old {
-            old.cancel();
-        }
-        let mut workers = self.workers.lock().unwrap();
-        workers.retain(|worker| !worker.is_finished());
-        workers.push(thread::spawn(move || {
-            if let Err(error) = load(&job) {
-                job.update(|state| {
-                    state.phase = "error".into();
-                    state.error = Some(error);
-                    state.detail = "Image loading failed.".into();
-                });
-            }
-            // Generated pyramids need no decoder once complete; native tiles do.
-            if job.native.lock().unwrap().is_empty() {
-                let decoder = job.decoder.lock().unwrap().take();
-                if let Some(decoder) = decoder {
-                    decoder.stop();
-                }
-            }
-            if job.cancel.load(Ordering::Relaxed) || job.state.lock().unwrap().phase == "error" {
-                let decoder = job.decoder.lock().unwrap().clone();
-                if let Some(decoder) = decoder {
-                    decoder.stop();
-                }
-                let dir = job.dir.lock().unwrap().clone();
-                if dir
-                    .file_name()
-                    .unwrap()
-                    .to_string_lossy()
-                    .starts_with("work-")
-                {
-                    let _ = fs::remove_dir_all(dir);
-                }
-            }
-        }));
-        Ok(initial)
+        Ok(job)
     }
+}
 
-    pub fn snapshot(&self) -> Option<ImageState> {
-        self.current
-            .lock()
-            .unwrap()
-            .as_ref()
-            .map(|job| job.state.lock().unwrap().clone())
-    }
-    pub fn cancel(&self) {
-        let job = self.current.lock().unwrap().clone();
-        if let Some(job) = job {
-            job.cancel();
+pub(crate) fn finish_decoder(job: &Job) {
+    if job.native.lock().unwrap().is_empty() {
+        if let Some(decoder) = job.decoder.lock().unwrap().take() {
+            decoder.stop();
         }
-    }
-    pub fn shutdown(&self) {
-        self.closing.store(true, Ordering::Relaxed);
-        self.cancel();
-        for worker in self.workers.lock().unwrap().drain(..) {
-            let _ = worker.join();
-        }
-        while self.requests.load(Ordering::Relaxed) != 0 {
-            thread::sleep(Duration::from_millis(20));
-        }
+        job.decoder_memory.lock().unwrap().take();
     }
 }
 
@@ -369,7 +670,7 @@ impl Job {
         .await
     }
 
-    fn cancel(&self) {
+    pub(crate) fn cancel(&self) {
         let snapshot = {
             let mut state = self.state.lock().unwrap();
             if self.cancel.swap(true, Ordering::Relaxed) {
@@ -387,6 +688,7 @@ impl Job {
         if let Some(decoder) = decoder {
             decoder.stop();
         }
+        self.decoder_memory.lock().unwrap().take();
         for (_, process) in self.processes.lock().unwrap().drain() {
             let mut child = process.lock().unwrap();
             let _ = child.kill();
@@ -508,6 +810,12 @@ struct CacheManifest {
     channel_mode: bool,
     planes: Vec<Plane>,
     native: Vec<NativeLevel>,
+    #[serde(default)]
+    dimensions: Option<crate::nd2::Dimensions>,
+    #[serde(default)]
+    calibration: Option<crate::nd2::Calibration>,
+    #[serde(default)]
+    display_ranges: Vec<[u16; 2]>,
 }
 
 // AppImage readers live under a different mount path after each launch. The
@@ -626,13 +934,17 @@ fn write_manifest(job: &Job, dir: &Path) -> Result<(), String> {
         channel_mode: state.channel_mode,
         planes: job.planes.lock().unwrap().clone(),
         native: job.native.lock().unwrap().clone(),
+        dimensions: state.dimensions,
+        calibration: state.calibration,
+        display_ranges: state.display_ranges,
     };
     let bytes = serde_json::to_vec(&manifest).map_err(|error| error.to_string())?;
     fs::write(dir.join("manifest.json"), bytes).map_err(|error| error.to_string())
 }
 
 fn cached_manifest(job: &Job, dir: &Path) -> Option<CacheManifest> {
-    if !dir.join("complete").is_file() {
+    let complete = dir.join("complete").is_file();
+    if !complete && (job.nd2.is_none() || !dir.join("previews").is_file()) {
         return None;
     }
     let file = File::open(dir.join("manifest.json")).ok()?;
@@ -654,6 +966,18 @@ fn cached_manifest(job: &Job, dir: &Path) -> Option<CacheManifest> {
             .iter()
             .any(|plane| plane.page >= 256 || plane.band >= channels::MAX_CHANNELS)
         || manifest.native.len() > 29
+        || (job.nd2.is_some() != manifest.dimensions.is_some())
+        || manifest.dimensions.as_ref().is_some_and(|dimensions| {
+            dimensions.positions.is_empty()
+                || dimensions.position as usize >= dimensions.positions.len()
+                || dimensions.z_index >= dimensions.z
+                || dimensions.time_index >= dimensions.time
+                || job.nd2.is_none_or(|selected| {
+                    selected.position != dimensions.position
+                        || selected.z != dimensions.z_index
+                        || selected.time != dimensions.time_index
+                })
+        })
         || (!manifest.native.is_empty()
             && !native::valid_cached_levels(&manifest.native, manifest.width, manifest.height))
         || (manifest.channel_mode
@@ -662,12 +986,24 @@ fn cached_manifest(job: &Job, dir: &Path) -> Option<CacheManifest> {
     {
         return None;
     }
-    if !valid_cache_assets(
-        dir,
-        manifest.channels.len(),
-        manifest.channel_mode,
-        !manifest.native.is_empty(),
-    ) {
+    let valid = if complete {
+        valid_cache_assets(
+            dir,
+            manifest.channels.len(),
+            manifest.channel_mode,
+            !manifest.native.is_empty(),
+        )
+    } else {
+        manifest.channel_mode
+            && manifest.native.is_empty()
+            && (0..manifest.channels.len()).all(|i| {
+                valid_preview(
+                    &dir.join("channels").join(i.to_string()).join("preview.png"),
+                    true,
+                )
+            })
+    };
+    if !valid {
         return None;
     }
     Some(manifest)
@@ -718,7 +1054,9 @@ fn housekeeping(job: &Job) -> Result<(), String> {
         return Err("Loading cancelled.".into());
     }
     let active = job.dir.lock().unwrap().clone();
-    prune_except(&job.root, CACHE_LIMIT / 2, Some(&active))?;
+    if !job.background {
+        prune_except(&job.root, CACHE_LIMIT / 2, Some(&active))?;
+    }
     job.housekeeping.store(true, Ordering::Relaxed);
     if tree_size(&job.root) > CACHE_LIMIT {
         return Err("Display cache limit reached.".into());
@@ -726,7 +1064,7 @@ fn housekeeping(job: &Job) -> Result<(), String> {
     Ok(())
 }
 
-fn load(job: &Arc<Job>) -> Result<(), String> {
+pub(crate) fn load(job: &Arc<Job>) -> Result<(), String> {
     let complete = job.root.join(&job.cache_key);
     let manifest = {
         let _access = job.cache_access.lock().unwrap();
@@ -737,28 +1075,84 @@ fn load(job: &Arc<Job>) -> Result<(), String> {
         if let Some(manifest) = &manifest {
             *job.native.lock().unwrap() = manifest.native.clone();
             *job.planes.lock().unwrap() = manifest.planes.clone();
-            *job.dir.lock().unwrap() = complete.clone();
+            if complete.join("complete").is_file() || job.preview_only {
+                *job.dir.lock().unwrap() = complete.clone();
+            } else {
+                for index in 0..manifest.channels.len() {
+                    let target = job.work.join("channels").join(index.to_string());
+                    fs::create_dir_all(&target).map_err(|e| e.to_string())?;
+                    fs::copy(
+                        complete
+                            .join("channels")
+                            .join(index.to_string())
+                            .join("preview.png"),
+                        target.join("preview.png"),
+                    )
+                    .map_err(|e| e.to_string())?;
+                }
+            }
         }
         manifest
     };
     if let Some(manifest) = manifest {
+        let fully_ready = complete.join("complete").is_file();
         job.update(|state| {
             state.width = manifest.width;
             state.height = manifest.height;
             state.orientation = manifest.orientation;
             state.channels = manifest.channels;
             state.channel_mode = manifest.channel_mode;
+            state.dimensions = manifest.dimensions;
+            state.calibration = manifest.calibration;
+            state.display_ranges = manifest.display_ranges;
             state.preview_ready = true;
-            state.tiles_ready = true;
-            state.phase = "ready".into();
-            state.progress = Some(1.0);
-            state.detail = "Reused display cache. Source pixels unchanged.".into();
+            state.tiles_ready = fully_ready;
+            state.phase = if fully_ready || job.preview_only {
+                "ready"
+            } else {
+                "loading"
+            }
+            .into();
+            state.progress = Some(if fully_ready { 1.0 } else { 0.2 });
+            state.detail = "Reused display preview. Source pixels unchanged.".into();
         });
         fs::write(complete.join("access"), b"").map_err(|e| e.to_string())?;
-        return housekeeping(job);
+        if fully_ready || job.preview_only {
+            return housekeeping(job);
+        }
     }
+    let nd2_channels = if let Some(selection) = job.nd2 {
+        let acquisition = job.acquisition.as_ref().ok_or("Missing ND2 acquisition")?;
+        let extracted =
+            acquisition.extract_display(&job.input, selection, job.background, &job.cancel)?;
+        let geometry = acquisition.geometry(selection)?;
+        job.update(|state| {
+            state.width = geometry.width;
+            state.height = geometry.height;
+            state.dimensions = Some(extracted.dimensions);
+            state.channels = extracted.channels.clone();
+            state.calibration = extracted.calibration;
+            state.display_ranges = extracted.display_ranges;
+            state.detail = "Selected ND2 frame decoded. Building display preview…".into();
+        });
+        Some(extracted.channels)
+    } else {
+        None
+    };
     let header = run(job, "vipsheader", &["-a".into(), input(job, "")])?;
     let (width, height) = validate_header(&header)?;
+    if field(&header, "vips-loader") != Some("tiffload") {
+        let bands = field(&header, "bands").unwrap().parse::<u64>().unwrap();
+        let sample_bytes = if field(&header, "format") == Some("ushort") {
+            2
+        } else {
+            1
+        };
+        job.frame_memory.fetch_max(
+            decoded_workspace(width, height, bands, sample_bytes)?,
+            Ordering::Relaxed,
+        );
+    }
     let tiffinfo = if field(&header, "vips-loader") == Some("tiffload") {
         #[cfg(unix)]
         let info = run(job, "tiffinfo", &[job.input.clone().into_os_string()]).ok();
@@ -778,11 +1172,21 @@ fn load(job: &Arc<Job>) -> Result<(), String> {
     } else {
         None
     };
-    let layout = channels::discover(
-        &header,
-        &|options| run(job, "vipsheader", &["-a".into(), input(job, options)]),
-        tiffinfo.as_deref(),
-    )?;
+    let layout = if let Some(channels) = nd2_channels {
+        channels::Layout {
+            planes: (0..channels.len() as u32)
+                .map(|band| Plane { page: 0, band })
+                .collect(),
+            channels,
+            channel_mode: true,
+        }
+    } else {
+        channels::discover(
+            &header,
+            &|options| run(job, "vipsheader", &["-a".into(), input(job, options)]),
+            tiffinfo.as_deref(),
+        )?
+    };
     *job.planes.lock().unwrap() = layout.planes;
     let pages = field(&header, "n-pages").unwrap_or("1");
     let pixel = field(&header, "format").unwrap_or("uchar");
@@ -1099,87 +1503,102 @@ fn load_channels(job: &Arc<Job>, width: u32, height: u32, ushort: bool) -> Resul
             .or_else(|| levels.last())
             .cloned()
     };
-    if uses_worker(job) {
-        let (options, scale): (Vec<_>, Vec<_>) = planes
-            .iter()
-            .map(|plane| match &level {
-                Some(level) => (
-                    level.options.clone(),
-                    (1024.0 / level.width.max(level.height) as f64).min(1.0),
-                ),
-                None => (
-                    format!("[page={},n=1,access=sequential]", plane.page),
-                    (1024.0 / width.max(height) as f64).min(1.0),
-                ),
-            })
-            .unzip();
-        worker_call(
-            job,
-            &crate::vips_worker::Request::ChannelPreviews {
-                input: job
-                    .input
-                    .to_str()
-                    .ok_or("Image decoder path is not UTF-8")?
-                    .into(),
-                options,
-                scale,
-                planes: planes.clone(),
-                ushort,
-                directory: dir
-                    .to_str()
-                    .ok_or("Image decoder path is not UTF-8")?
-                    .into(),
-            },
-            Some((0.0, 0.2)),
-        )?;
-    } else {
-        for (index, plane) in planes.iter().enumerate() {
-            let channel = dir.join("channels").join(index.to_string());
-            fs::create_dir_all(&channel).map_err(|e| e.to_string())?;
-            let (options, scale) = match &level {
-                Some(level) => (
-                    level.options.clone(),
-                    (1024.0 / level.width.max(level.height) as f64).min(1.0),
-                ),
-                None => (
-                    format!("[page={},n=1,access=sequential]", plane.page),
-                    (1024.0 / width.max(height) as f64).min(1.0),
-                ),
-            };
-            let resized = job.work.join(format!("preview-{index}.v"));
-            run(
+    let previews_ready = (0..planes.len()).all(|index| {
+        valid_preview(
+            &dir.join("channels")
+                .join(index.to_string())
+                .join("preview.png"),
+            true,
+        )
+    });
+    if !previews_ready {
+        if uses_worker(job) {
+            let (options, scale): (Vec<_>, Vec<_>) = planes
+                .iter()
+                .map(|plane| match &level {
+                    Some(level) => (
+                        level.options.clone(),
+                        (1024.0 / level.width.max(level.height) as f64).min(1.0),
+                    ),
+                    None => (
+                        format!("[page={},n=1,access=sequential]", plane.page),
+                        (1024.0 / width.max(height) as f64).min(1.0),
+                    ),
+                })
+                .unzip();
+            worker_call(
                 job,
-                "vips",
-                &[
-                    "resize".into(),
-                    input(job, &options),
+                &crate::vips_worker::Request::ChannelPreviews {
+                    input: job
+                        .input
+                        .to_str()
+                        .ok_or("Image decoder path is not UTF-8")?
+                        .into(),
+                    options,
+                    scale,
+                    planes: planes.clone(),
+                    ushort,
+                    directory: dir
+                        .to_str()
+                        .ok_or("Image decoder path is not UTF-8")?
+                        .into(),
+                },
+                Some((0.0, 0.2)),
+            )?;
+        } else {
+            for (index, plane) in planes.iter().enumerate() {
+                let channel = dir.join("channels").join(index.to_string());
+                fs::create_dir_all(&channel).map_err(|e| e.to_string())?;
+                let (options, scale) = match &level {
+                    Some(level) => (
+                        level.options.clone(),
+                        (1024.0 / level.width.max(level.height) as f64).min(1.0),
+                    ),
+                    None => (
+                        format!("[page={},n=1,access=sequential]", plane.page),
+                        (1024.0 / width.max(height) as f64).min(1.0),
+                    ),
+                };
+                let resized = job.work.join(format!("preview-{index}.v"));
+                run(
+                    job,
+                    "vips",
+                    &[
+                        "resize".into(),
+                        input(job, &options),
+                        resized.clone().into_os_string(),
+                        scale.to_string().into(),
+                    ],
+                )?;
+                let partial = channel.join("preview.partial.png");
+                extract_plane(
+                    job,
                     resized.clone().into_os_string(),
-                    scale.to_string().into(),
-                ],
-            )?;
-            let partial = channel.join("preview.partial.png");
-            extract_plane(
-                job,
-                resized.clone().into_os_string(),
-                plane.band,
-                &partial,
-                ushort,
-            )?;
-            let _ = fs::remove_file(resized);
-            fs::rename(partial, channel.join("preview.png")).map_err(|e| e.to_string())?;
+                    plane.band,
+                    &partial,
+                    ushort,
+                )?;
+                let _ = fs::remove_file(resized);
+                fs::rename(partial, channel.join("preview.png")).map_err(|e| e.to_string())?;
+            }
         }
     }
     job.update(|state| {
         state.preview_ready = true;
-        state.tiles_ready = !native;
+        state.tiles_ready = false;
         state.progress = Some(0.2);
         state.detail = format!(
-            "{} channel previews available. First Z/T plane; sharper tiles are loading…",
-            planes.len()
+            "{} channel previews available. {} Sharper tiles are loading…",
+            planes.len(),
+            if state.read_only {
+                "Selected ND2 frame; browsing only."
+            } else {
+                "First Z/T plane."
+            }
         );
     });
     housekeeping(job)?;
-    if !native {
+    if !native && !job.preview_only {
         for (index, plane) in planes.iter().enumerate() {
             let start = 0.2 + 0.79 * index as f64 / planes.len() as f64;
             let end = 0.2 + 0.79 * (index + 1) as f64 / planes.len() as f64;
@@ -1219,7 +1638,12 @@ fn load_channels(job: &Arc<Job>, width: u32, height: u32, ushort: bool) -> Resul
         }
     }
     write_manifest(job, &dir)?;
-    fs::write(dir.join("complete"), b"channels-v1").map_err(|e| e.to_string())?;
+    let marker = if job.preview_only {
+        "previews"
+    } else {
+        "complete"
+    };
+    fs::write(dir.join(marker), b"channels-v1").map_err(|e| e.to_string())?;
     fs::write(dir.join("access"), b"").map_err(|e| e.to_string())?;
     let access = job.cache_access.lock().unwrap();
     if job.cancel.load(Ordering::Relaxed) {
@@ -1230,7 +1654,7 @@ fn load_channels(job: &Arc<Job>, width: u32, height: u32, ushort: bool) -> Resul
         .root
         .join(format!("promote-{}", job.state.lock().unwrap().id));
     fs::create_dir(&staging).map_err(|e| e.to_string())?;
-    for name in ["channels", "manifest.json", "complete", "access"] {
+    for name in ["channels", "manifest.json", marker, "access"] {
         fs::rename(dir.join(name), staging.join(name)).map_err(|e| e.to_string())?;
     }
     if complete.exists() {
@@ -1242,11 +1666,16 @@ fn load_channels(job: &Arc<Job>, width: u32, height: u32, ushort: bool) -> Resul
     drop(access);
     job.update(|state| {
         state.phase = "ready".into();
-        state.tiles_ready = true;
+        state.tiles_ready = !job.preview_only;
         state.progress = Some(1.0);
         state.detail = format!(
-            "{} channels ready. First Z/T plane. Source pixels unchanged.",
-            planes.len()
+            "{} channels ready. {} Source pixels unchanged.",
+            planes.len(),
+            if state.read_only {
+                "Selected ND2 frame; browsing only."
+            } else {
+                "First Z/T plane."
+            }
         );
     });
     Ok(())
@@ -1502,6 +1931,16 @@ fn run_with_progress(
             progress,
         );
     }
+    // Direct tools have the same admission rules as the worker. Keep this lease
+    // local until the child has exited or has been killed and reaped, including
+    // when Job::cancel drains the process table from another thread.
+    let bytes = if matches!(program, "vips" | "vipsheader") {
+        decoder_workspace(job)?
+    } else {
+        // Metadata tools do not need a second image workspace beside a live worker.
+        8 * 1024 * 1024
+    };
+    let _memory = reserve_workspace(job, bytes)?;
     let dir = job.work.clone();
     let number = job.process_number.fetch_add(1, Ordering::Relaxed);
     let stdout_path = dir.join(format!("stdout-{number}"));
@@ -1609,6 +2048,74 @@ fn uses_worker(job: &Job) -> bool {
         )
 }
 
+fn decoded_workspace(
+    width: u32,
+    height: u32,
+    bands: u64,
+    sample_bytes: u64,
+) -> Result<u64, String> {
+    // Full-image codecs can retain source pixels alongside decoder/output copies.
+    // Four copies also cover BMP's two retained loader variants and copy peak.
+    u64::from(width)
+        .checked_mul(u64::from(height))
+        .and_then(|bytes| bytes.checked_mul(bands))
+        .and_then(|bytes| bytes.checked_mul(sample_bytes))
+        .and_then(|bytes| bytes.checked_mul(4))
+        .ok_or_else(|| "Image decoder workspace is too large.".into())
+}
+
+fn decoder_workspace(job: &Job) -> Result<u64, String> {
+    let state = job.state.lock().unwrap();
+    let preview = state.channels.len().max(1) as u64 * 1024 * 1024 * 4;
+    let (overhead, frame) = if job.nd2.is_some() {
+        // ND2 display TIFFs have one whole-image strip; preserve its full decode.
+        (
+            128 * 1024 * 1024,
+            decoded_workspace(state.width, state.height, state.channels.len() as u64, 1)?,
+        )
+    } else {
+        // A bounded metadata/streaming allowance, plus geometry for codecs that
+        // can materialize a complete frame. Small images fit the minimum budget.
+        (
+            64 * 1024 * 1024,
+            job.frame_memory
+                .load(Ordering::Relaxed)
+                .max(64 * 1024 * 1024),
+        )
+    };
+    frame
+        .checked_add(overhead)
+        .and_then(|bytes| bytes.checked_add(preview))
+        .ok_or_else(|| "Image decoder workspace is too large.".into())
+}
+
+fn reserve_workspace(job: &Job, bytes: u64) -> Result<crate::memory::Reservation, String> {
+    if job.cancel.load(Ordering::Relaxed) {
+        return Err("Loading cancelled.".into());
+    }
+    let reservation = if let Some(acquisition) = &job.acquisition {
+        acquisition.reserve_workspace(bytes, job.background)?
+    } else {
+        let mut reservation = job.memory.try_reserve(bytes, job.background)?;
+        if reservation.is_none() && !job.background && bytes <= job.memory.status()?.limit_bytes {
+            job.memory.request_reclaim()?;
+            let deadline = Instant::now() + Duration::from_secs(2);
+            while reservation.is_none() && Instant::now() < deadline {
+                if job.cancel.load(Ordering::Relaxed) {
+                    return Err("Loading cancelled.".into());
+                }
+                thread::sleep(Duration::from_millis(25));
+                reservation = job.memory.try_reserve(bytes, false)?;
+            }
+        }
+        reservation
+    };
+    if job.cancel.load(Ordering::Relaxed) {
+        return Err("Loading cancelled.".into());
+    }
+    reservation.ok_or_else(|| "Image decoding does not fit the memory limit. Increase it in Settings or close another image window.".into())
+}
+
 fn worker_call(
     job: &Job,
     request: &crate::vips_worker::Request,
@@ -1619,8 +2126,26 @@ fn worker_call(
         if job.cancel.load(Ordering::Relaxed) {
             return Err("Loading cancelled.".into());
         }
+        let amount = decoder_workspace(job)?;
+        let mut memory = job.decoder_memory.lock().unwrap();
+        let previous = memory.as_ref().map_or(0, |memory| memory.bytes);
+        if amount > previous {
+            let reservation = reserve_workspace(job, amount - previous)?;
+            let memory = memory.get_or_insert_with(|| DecoderMemory {
+                bytes: 0,
+                reservations: Vec::new(),
+            });
+            memory.bytes = amount;
+            memory.reservations.push(reservation);
+        }
         if slot.is_none() {
-            *slot = Some(Arc::new(crate::decoder::Decoder::start(&job.work)?));
+            *slot = match crate::decoder::Decoder::start(&job.work) {
+                Ok(decoder) => Some(Arc::new(decoder)),
+                Err(error) => {
+                    memory.take();
+                    return Err(error);
+                }
+            };
         }
         slot.as_ref().unwrap().clone()
     };
@@ -1842,7 +2367,7 @@ fn native_tile(job: &Job, level: u32, x: u32, y: u32) -> Result<Vec<u8>, String>
     fs::read(destination).map_err(|e| e.to_string())
 }
 
-fn tree_size(path: &Path) -> u64 {
+pub(crate) fn tree_size(path: &Path) -> u64 {
     let Ok(entries) = fs::read_dir(path) else {
         return 0;
     };
@@ -1868,7 +2393,8 @@ fn prune_except(root: &Path, limit: u64, protected: Option<&Path>) -> Result<(),
         .flatten()
         .filter(|entry| {
             protected != Some(entry.path().as_path())
-                && entry.path().join("complete").is_file()
+                && (entry.path().join("complete").is_file()
+                    || entry.path().join("previews").is_file())
                 && !entry.file_name().to_string_lossy().starts_with("work-")
         })
         .collect();
@@ -1892,6 +2418,164 @@ fn prune_except(root: &Path, limit: u64, protected: Option<&Path>) -> Result<(),
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    fn workspace_fixture() -> (PathBuf, Backend, Arc<Job>) {
+        let root = std::env::temp_dir().join(format!(
+            "aperture-decoder-memory-{}-{}",
+            std::process::id(),
+            NEXT_ID.fetch_add(1, Ordering::Relaxed)
+        ));
+        fs::create_dir_all(&root).unwrap();
+        let source = root.join("source.png");
+        fs::write(&source, []).unwrap();
+        let backend = Backend::new(root.join("cache")).unwrap();
+        backend
+            .memory
+            .set_limit(crate::memory::MIN_LIMIT_BYTES)
+            .unwrap();
+        let context = LoadContext {
+            root: backend.root.clone(),
+            memory: backend.memory.clone(),
+            cache_access: backend.cache_access.clone(),
+        };
+        let job = context
+            .create_job(
+                &source,
+                source.clone(),
+                None,
+                None,
+                LoadMode::Foreground,
+                None,
+            )
+            .unwrap();
+        (root, backend, job)
+    }
+
+    #[test]
+    fn decoder_workspace_accounts_for_rgba_ushort_and_eager_bmp() {
+        assert_eq!(decoded_workspace(8000, 8000, 4, 2).unwrap(), 2_048_000_000);
+        assert_eq!(decoded_workspace(8000, 8000, 3, 1).unwrap(), 768_000_000);
+        assert!(decoded_workspace(u32::MAX, u32::MAX, 4, 2).is_err());
+        let (root, backend, job) = workspace_fixture();
+        // The browser allowance plus a small image workspace fits 256 MiB.
+        assert!(
+            96 * 1024 * 1024 + decoder_workspace(&job).unwrap() <= crate::memory::MIN_LIMIT_BYTES
+        );
+        let bmp = root.join("source.bmp");
+        image::RgbaImage::new(16, 12).save(&bmp).unwrap();
+        let context = LoadContext {
+            root: backend.root.clone(),
+            memory: backend.memory.clone(),
+            cache_access: backend.cache_access.clone(),
+        };
+        let bmp_job = context
+            .create_job(&bmp, bmp.clone(), None, None, LoadMode::Foreground, None)
+            .unwrap();
+        assert_eq!(
+            bmp_job.frame_memory.load(Ordering::Relaxed),
+            16 * 12 * 4 * 4
+        );
+        backend.shutdown();
+        drop((job, bmp_job, backend));
+        fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn ordinary_foreground_workspace_reclaims_another_windows_optional_memory() {
+        let (root, backend, job) = workspace_fixture();
+        let peer = crate::memory::Budget::new(root.join("cache")).unwrap();
+        let optional = peer.try_reserve(200 * 1024 * 1024, false).unwrap().unwrap();
+        let epoch = peer.reclaim_epoch().unwrap();
+        let maintenance = thread::spawn(move || {
+            let deadline = Instant::now() + Duration::from_secs(5);
+            while peer.reclaim_epoch().unwrap() == epoch {
+                assert!(
+                    Instant::now() < deadline,
+                    "Foreground admission did not request reclaim"
+                );
+                thread::sleep(Duration::from_millis(2));
+            }
+            drop(optional);
+        });
+        let bytes = decoder_workspace(&job).unwrap();
+        let reservation = reserve_workspace(&job, bytes).unwrap();
+        maintenance.join().unwrap();
+        assert_eq!(backend.memory.status().unwrap().used_bytes, bytes);
+        drop(reservation);
+        assert_eq!(backend.memory.status().unwrap().used_bytes, 0);
+        backend.shutdown();
+        drop((job, backend));
+        fs::remove_dir_all(root).unwrap();
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn direct_decoder_refuses_oversized_geometry_before_spawning() {
+        let (root, backend, job) = workspace_fixture();
+        job.frame_memory.store(
+            decoded_workspace(8000, 8000, 4, 2).unwrap(),
+            Ordering::Relaxed,
+        );
+        let error = run(&job, "vipsheader", &["-a".into(), input(&job, "")]).unwrap_err();
+        assert!(error.contains("does not fit the memory limit"), "{error}");
+        assert!(job.processes.lock().unwrap().is_empty());
+        assert_eq!(backend.memory.status().unwrap().used_bytes, 0);
+        backend.shutdown();
+        drop((job, backend));
+        fs::remove_dir_all(root).unwrap();
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn direct_admission_cancels_before_spawn_and_releases_after_reaping() {
+        let (root, backend, job) = workspace_fixture();
+        let full = backend
+            .memory
+            .try_reserve(crate::memory::MIN_LIMIT_BYTES, false)
+            .unwrap()
+            .unwrap();
+        let epoch = backend.memory.reclaim_epoch().unwrap();
+        let pending = {
+            let job = job.clone();
+            thread::spawn(move || run(&job, "sleep", &["0".into()]))
+        };
+        let deadline = Instant::now() + Duration::from_secs(5);
+        while backend.memory.reclaim_epoch().unwrap() == epoch {
+            assert!(
+                Instant::now() < deadline,
+                "Direct command did not wait for admission"
+            );
+            thread::sleep(Duration::from_millis(2));
+        }
+        assert!(job.processes.lock().unwrap().is_empty());
+        let cancelled = Instant::now();
+        job.cancel();
+        assert!(pending.join().unwrap().unwrap_err().contains("cancelled"));
+        assert!(cancelled.elapsed() < Duration::from_secs(1));
+        drop(full);
+        assert_eq!(backend.memory.status().unwrap().used_bytes, 0);
+
+        job.cancel.store(false, Ordering::Relaxed);
+        run(&job, "sleep", &["0".into()]).unwrap();
+        assert_eq!(backend.memory.status().unwrap().used_bytes, 0);
+        let running = {
+            let job = job.clone();
+            thread::spawn(move || run(&job, "sleep", &["30".into()]))
+        };
+        let deadline = Instant::now() + Duration::from_secs(5);
+        while job.processes.lock().unwrap().is_empty() {
+            assert!(Instant::now() < deadline, "Admitted child did not spawn");
+            thread::sleep(Duration::from_millis(2));
+        }
+        assert_eq!(backend.memory.status().unwrap().used_bytes, 8 * 1024 * 1024);
+        job.cancel();
+        assert!(running.join().unwrap().unwrap_err().contains("cancelled"));
+        assert!(job.processes.lock().unwrap().is_empty());
+        assert_eq!(backend.memory.status().unwrap().used_bytes, 0);
+        backend.shutdown();
+        drop((job, backend));
+        fs::remove_dir_all(root).unwrap();
+    }
 
     #[cfg(windows)]
     #[test]

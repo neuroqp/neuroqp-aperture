@@ -1143,3 +1143,35 @@ The isolated production component also passed hover, disabled-state and
 were inspected. The 76 frontend tests, Prettier, TypeScript, frontend build,
 embedded Linux native build and independent code review passed. Local runnable
 checks and screenshots remain ignored under `artifacts/graph-controls/`.
+
+## Initial ND2 browsing, October 16, 2026
+
+The first Rust-only ND2 implementation passed 84 frontend tests, 80 mandatory
+Rust tests, strict Clippy, TypeScript, frontend/native builds, Prettier and rustfmt.
+The optional public ND2 test also passed, checking exact source pixels against
+independent upstream expectations for lossless-compressed files. Mandatory
+synthetic tests check exact P/Z/T/channel addressing, unsigned 8/16-bit samples,
+RGB order, display normalization, malformed actual chunk lengths and cache reuse.
+
+The Linux native harness passed all 20 checks in GPU and forced CPU rendering.
+It verified visible framebuffer pixels, changed frames, repeated keyboard input,
+coalesced wheel input, local channel switching, read-only backend enforcement,
+coordinate-specific cache revisits, replacement/cancellation, seven supported
+public acquisitions, explicit mixed-RGB refusal, unchanged source SHA-256 and
+normal Close with no remaining application/worker processes. Modern uncompressed,
+zlib and legacy JPEG 2000 files rendered successfully. The 640-by-400 native
+window check found no panel or document overflow. Screenshots were inspected.
+
+Only the chooser response was supplied by the harness. Native chooser appearance,
+Windows execution, installer associations, large laboratory acquisitions and
+bounded total resident memory were not validated. The selected-frame cap is
+256 MiB, not a total memory cap. Sixteen-bit display normalization adapts per
+frame/channel; displayed intensities across frames are not quantitative. ND2
+annotations and scientific export remain unsupported. See [ND2 support](docs/ND2.md).
+
+Ignored evidence is under `artifacts/nd2/`, including `native-layout-gpu.json`,
+`native-layout-cpu.json`, screenshots, build/check logs and retained failed
+diagnostics. Real acquisitions and provenance remain in ignored `test-data/nd2/`.
+An unrelated existing instance-lease test failed once in the initial parallel run;
+its isolated rerun and the complete serial Rust suite passed. Its implementation
+was not changed.
