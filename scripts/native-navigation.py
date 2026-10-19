@@ -22,7 +22,7 @@ from urllib.request import Request, urlopen
 
 
 ROOT = Path(__file__).resolve().parents[1]
-BIG_TIFF = Path('/home/pascal/src/neuroqp-aperture-loading/artifacts/compressed-native/corpus/gray16-big-deflate-p2-r64.tif')
+BIG_TIFF = ROOT / 'test-data/gray16-big-deflate-p2-r64.tif'
 
 
 def main():
@@ -31,7 +31,7 @@ def main():
     parser.add_argument('--driver-url', default='http://127.0.0.1:4446')
     parser.add_argument('--output', type=Path, default=ROOT / 'artifacts/folder-navigation/native-navigation.json')
     parser.add_argument('--large-image', type=Path, default=BIG_TIFF)
-    parser.add_argument('--channel-image', type=Path, default=Path('/home/pascal/src/neuroqp-aperture-color-mocks/test-data/color-five-channel-imagej.tif'))
+    parser.add_argument('--channel-image', type=Path, default=ROOT / 'test-data/color-five-channel-imagej.tif')
     parser.add_argument('--timeout', type=float, default=180)
     parser.add_argument('--bridge-dialogs', action='store_true')
     args = parser.parse_args()
