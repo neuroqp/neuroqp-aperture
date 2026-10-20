@@ -259,7 +259,6 @@ pub(crate) struct RawFrame {
     pub bytes: usize,
     pub rgb: bool,
     pub pixels: Vec<u8>,
-    pub metadata: ExtractedFrame,
 }
 
 pub(crate) fn decode_frame(
@@ -268,10 +267,9 @@ pub(crate) fn decode_frame(
     images: &[ImageInfo],
     selection: Selection,
 ) -> Result<RawFrame, String> {
-    let metadata = description(format, images, selection)?;
+    let bands = description(format, images, selection)?.channels.len() as u32;
     let image = &images[selection.position as usize];
     let bytes = image.pixel_type.bytes_per_sample();
-    let bands = metadata.channels.len() as u32;
     let length = frame_bytes(format, image.size_x, image.size_y, bands, bytes)?;
     // ponytail: bounded whole-frame assembly until the reader offers bounded regions.
     let mut pixels = vec![0u8; length];
@@ -316,7 +314,6 @@ pub(crate) fn decode_frame(
         bytes,
         rgb: image.samples_per_pixel == 3,
         pixels,
-        metadata,
     })
 }
 
@@ -330,12 +327,13 @@ pub(crate) fn check_cancel(cancel: Option<&AtomicBool>) -> Result<(), String> {
 
 pub(crate) fn write_frame(
     frame: &RawFrame,
+    description: ExtractedFrame,
     output: &Path,
     display: bool,
     cancel: Option<&AtomicBool>,
 ) -> Result<ExtractedFrame, String> {
     check_cancel(cancel)?;
-    let mut result = frame.metadata.clone();
+    let mut result = description;
     // Normalize only the disposable display cache; original frame samples stay intact.
     let normalized;
     let (pixels, output_bits) = if display && frame.bytes == 2 {

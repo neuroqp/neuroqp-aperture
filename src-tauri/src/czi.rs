@@ -713,7 +713,7 @@ mod tests {
     use super::*;
     use crate::frame_cache::Cache;
     use crate::frames::tests::{strip, temporary};
-    use crate::frames::{self, Format, Projection, RawFrame, Selection};
+    use crate::frames::{self, ExtractedFrame, Format, Projection, RawFrame, Selection};
     use openreadout_core::FormatReader;
     use std::sync::atomic::AtomicBool;
 
@@ -902,12 +902,13 @@ mod tests {
     }
 
     /// The validated reader path without the shared-budget cache.
-    fn raw(path: &Path, selection: Selection) -> Result<RawFrame, String> {
+    fn raw(path: &Path, selection: Selection) -> Result<(RawFrame, ExtractedFrame), String> {
         let plan = planned(path)?;
         let mut dataset = openreadout_czi::CziReader.open(path).map_err(error)?;
         let images = dataset.info().map_err(error)?.images;
         plan.check_images(&images)?;
-        frames::decode_frame(Format::Czi, dataset.as_mut(), &images, selection)
+        let frame = frames::decode_frame(Format::Czi, dataset.as_mut(), &images, selection)?;
+        Ok((frame, frames::description(Format::Czi, &images, selection)?))
     }
 
     fn written(bytes: &[u8]) -> (std::path::PathBuf, std::path::PathBuf) {
@@ -926,7 +927,7 @@ mod tests {
         let bytes = stack();
         let (temp, source) = written(&bytes);
         for (s, z, t) in [(0, 0, 0), (1, 1, 0), (0, 1, 1), (1, 1, 1)] {
-            let frame = raw(
+            let (frame, metadata) = raw(
                 &source,
                 Selection {
                     position: s.into(),
@@ -948,7 +949,6 @@ mod tests {
                     sample(s, z, t, 1, 1),
                 ])
             );
-            let metadata = frame.metadata;
             assert_eq!(metadata.dimensions.positions, ["Well A1", "Well B2"]);
             assert_eq!((metadata.dimensions.z, metadata.dimensions.time), (2, 2));
             assert_eq!(
@@ -1027,12 +1027,11 @@ mod tests {
                 ),
             )
             .unwrap();
-            let frame = raw(&source, Selection::default()).unwrap();
+            let (frame, metadata) = raw(&source, Selection::default()).unwrap();
             assert!(frame.rgb);
             assert_eq!(frame.pixels, expected);
             assert_eq!(
-                frame
-                    .metadata
+                metadata
                     .channels
                     .iter()
                     .map(|c| &*c.name)
@@ -1053,7 +1052,7 @@ mod tests {
             )
         });
         let (temp, source) = written(&synthetic(&tiles, &xml(&[], &[])));
-        let frame = raw(&source, Selection::default()).unwrap();
+        let (frame, _) = raw(&source, Selection::default()).unwrap();
         assert_eq!((frame.width, frame.height), (4, 1));
         assert_eq!(frame.pixels, [1, 2, 3, 4]);
         std::fs::remove_dir_all(temp).unwrap();
@@ -1369,7 +1368,7 @@ mod tests {
             std::fs::write(&source, synthetic(&[tile], &xml(&[], &[]))).unwrap();
             planned(&source).unwrap();
             if compression == 0 {
-                assert_eq!(raw(&source, Selection::default()).unwrap().pixels, data);
+                assert_eq!(raw(&source, Selection::default()).unwrap().0.pixels, data);
             }
         }
         let mut tile = block(0, &[('X', 0, 2), ('Y', 0, 1)], vec![0; 2]);
@@ -1644,13 +1643,12 @@ mod tests {
                     peak < crate::memory::DEFAULT_LIMIT_BYTES / 4,
                     "{name}: {peak}"
                 );
-                let mut decoded: Option<(Selection, RawFrame)> = None;
+                let mut decoded: Option<(Selection, (RawFrame, ExtractedFrame))> = None;
                 let mut frame = |selection: Selection| {
                     if decoded.as_ref().is_none_or(|(key, _)| *key != selection) {
                         decoded = Some((selection, raw(&path, selection).unwrap()));
                     }
-                    let frame = &decoded.as_ref().unwrap().1;
-                    let metadata = &frame.metadata;
+                    let (frame, metadata) = &decoded.as_ref().unwrap().1;
                     assert_eq!(metadata.dimensions.positions.len(), scenes.len(), "{name}");
                     assert_eq!(metadata.dimensions.z, index(sizes, "Z").max(1), "{name}");
                     assert_eq!(metadata.dimensions.time, index(sizes, "T").max(1), "{name}");
@@ -1673,7 +1671,7 @@ mod tests {
                             "{name}"
                         );
                     }
-                    decoded.as_ref().unwrap().1.pixels.clone()
+                    frame.pixels.clone()
                 };
                 let selection = |at: &serde_json::Value| Selection {
                     position,
