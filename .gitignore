@@ -8,3 +8,9 @@ artifacts/
 *.log
 __pycache__/
 build/
+# Microscopy images stay out of Git except the small tracked test fixtures.
+*.tif
+*.tiff
+*.nd2
+*.czi
+!tests/fixtures/**
