@@ -263,7 +263,8 @@ function setRois(rois: PointRoi[], edited: boolean) {
   current.rois = rois;
   if (edited) {
     current.dirty = true;
-    // A save confirmation no longer applies once points change again.
+    // A save confirmation or warning no longer applies once points change again.
+    current.saveNotice = null;
     if (statusMessage && !statusMessage.error) statusMessage = null;
   }
   annotationViewer.setRois(rois);
