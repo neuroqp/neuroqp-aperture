@@ -257,7 +257,19 @@ impl Cache {
         } else {
             self.load(selection, background, true)?.ok_or_else(|| format!("{} selected frame decoding does not fit the application memory budget. Increase the limit in Settings.", self.format))?
         };
-        // Keep the raw frame's lease while normalizing its separate display copy.
+        self.convert_display(output, selection, frame, background, cancel)
+    }
+
+    /// Keep the raw frame's lease while normalizing its separate display copy,
+    /// then cache it again unless the source changed.
+    fn convert_display(
+        &mut self,
+        output: &Path,
+        selection: Selection,
+        frame: Frame,
+        background: bool,
+        cancel: Option<&AtomicBool>,
+    ) -> Result<ExtractedFrame, String> {
         let display_bytes = if frame.raw.bytes == 2 {
             frame.raw.pixels.len() as u64 / 2
         } else {
@@ -267,16 +279,16 @@ impl Cache {
             Some(_display) => frames::write_frame(&frame.raw, output, true, cancel),
             None => Err(format!("{} display conversion does not fit the application memory budget. Increase the limit in Settings.", self.format)),
         };
-        if let Err(error) = self
-            .check_source()
-            .and_then(|_| frames::check_cancel(cancel))
-        {
+        let source = self.check_source();
+        if source.is_ok() {
+            self.frames.push_back((selection, frame));
+        }
+        if let Err(error) = source.and_then(|_| frames::check_cancel(cancel)) {
             if result.is_ok() {
                 let _ = std::fs::remove_file(output);
             }
             return Err(error);
         }
-        self.frames.push_back((selection, frame));
         result
     }
 
@@ -675,6 +687,13 @@ mod tests {
             .is_err());
         assert!(!cancelled.exists());
         assert!(cache.contains(first));
+        // Cancelling after the raw frame is taken out still caches it again.
+        let frame = cache.frames.pop_back().unwrap().1;
+        assert!(cache
+            .convert_display(&cancelled, first, frame, true, Some(&cancel))
+            .is_err());
+        assert!(!cancelled.exists());
+        assert_eq!(cache.frames[0].1.raw.pixels.as_ptr(), raw_pointer);
 
         let next = Selection { z: 1, ..first };
         let peak = cache.geometry(next).unwrap().decode_peak_bytes;
