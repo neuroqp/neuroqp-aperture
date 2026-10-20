@@ -50,6 +50,13 @@ pub(crate) struct SaveResult {
     acknowledgment: String,
 }
 
+impl SaveResult {
+    /// A warning must be acknowledged for exactly the state it describes.
+    fn unacknowledged(&self, acknowledgment: Option<&str>) -> bool {
+        self.warning.is_some() && acknowledgment != Some(self.acknowledgment.as_str())
+    }
+}
+
 fn save_warning(session: &Session, id: &str, target: &Path) -> Result<SaveResult, String> {
     let loaded = session.loaded.lock().unwrap();
     let loaded = loaded
@@ -210,7 +217,7 @@ pub(crate) async fn save_annotations(
                 .save_lock(target)
                 .map_err(|e| e.to_string())?;
             let status = save_warning(&session, &id, target)?;
-            if status.warning.is_some() && acknowledgment.as_ref() != Some(&status.acknowledgment) {
+            if status.unacknowledged(acknowledgment.as_deref()) {
                 return Ok(status);
             }
             path_key(target).map_err(|e| e.to_string())?
@@ -235,9 +242,7 @@ pub(crate) async fn save_annotations(
                     .save_lock(target)
                     .map_err(|e| e.to_string())?;
                 let status = save_warning(&session, &id, target)?;
-                if status.warning.is_some()
-                    && acknowledgment.as_ref() != Some(&status.acknowledgment)
-                {
+                if status.unacknowledged(acknowledgment.as_deref()) {
                     return Ok(status);
                 }
                 return Err(error);
@@ -264,7 +269,7 @@ pub(crate) async fn save_annotations(
             );
             return Ok(status);
         }
-        if status.warning.is_some() && acknowledgment.as_ref() != Some(&status.acknowledgment) {
+        if status.unacknowledged(acknowledgment.as_deref()) {
             return Ok(status);
         }
         staged.commit()?;
