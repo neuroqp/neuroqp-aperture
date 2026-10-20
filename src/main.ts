@@ -405,6 +405,9 @@ async function saveAnnotations() {
     if (!path) return;
     session.savedPath = path;
     session.dirty = false;
+    // Confirm the save now, even while detail is still loading.
+    if (current === session)
+      statusMessage = { text: session.saveNotice || "Saved", error: false };
   } catch (error) {
     session.saveError = String(error);
   } finally {
