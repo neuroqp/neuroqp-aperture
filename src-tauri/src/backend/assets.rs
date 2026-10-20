@@ -8,6 +8,7 @@ use super::{
 use std::{
     ffi::OsString,
     fs,
+    path::Path,
     sync::{atomic::Ordering, Arc},
     thread,
     time::Duration,
@@ -15,204 +16,6 @@ use std::{
 use tauri::Manager;
 
 const TILE_SIZE: u32 = 256;
-
-pub(crate) fn channel_asset(
-    path: &str,
-    id: &str,
-    width: u32,
-    height: u32,
-    channel_count: usize,
-) -> Option<Asset> {
-    let parts: Vec<_> = path.trim_start_matches('/').split('/').collect();
-    if parts.len() < 4 || parts[0] != id || parts[1] != "channels" {
-        return None;
-    }
-    let channel: u32 = parts[2].parse().ok()?;
-    if channel as usize >= channel_count {
-        return None;
-    }
-    if parts.len() == 4 && parts[3] == "preview.png" {
-        return Some(Asset::ChannelPreview { channel });
-    }
-    if parts.len() != 6 || parts[3] != "tiles" {
-        return None;
-    }
-    let tile = parts[5].strip_suffix(".png")?;
-    match asset(
-        &format!("/{id}/tiles/{}/{tile}.jpg", parts[4]),
-        id,
-        width,
-        height,
-    )? {
-        Asset::Tile { level, x, y } => Some(Asset::ChannelTile {
-            channel,
-            level,
-            x,
-            y,
-        }),
-        _ => None,
-    }
-}
-
-fn read_channel_asset(job: &Arc<Job>, asset: Asset) -> Result<Vec<u8>, (u16, String)> {
-    let deadline = std::time::Instant::now() + Duration::from_secs(600);
-    loop {
-        if job.cancel.load(Ordering::Relaxed) {
-            return Err((410, "Image replaced or cancelled.".into()));
-        }
-        let state = job.state.lock().unwrap().clone();
-        if state.phase == Phase::Error {
-            return Err((500, state.error.unwrap_or_default()));
-        }
-        // Windows cannot move a directory while a descendant file is open.
-        // Keep path selection and each short read inside the promotion guard.
-        let access = job.cache_access.lock().unwrap();
-        let dir = job.dir.lock().unwrap().clone();
-        let path = match asset {
-            Asset::ChannelPreview { channel } => dir
-                .join("channels")
-                .join(channel.to_string())
-                .join("preview.png"),
-            Asset::ChannelTile {
-                channel,
-                level,
-                x,
-                y,
-            } => {
-                if !job.native.lock().unwrap().is_empty() {
-                    drop(access);
-                    return native_channel_tile(job, channel, level, x, y)
-                        .map_err(|error| (500, error));
-                }
-                dir.join("channels")
-                    .join(channel.to_string())
-                    .join("tiles_files")
-                    .join(level.to_string())
-                    .join(format!("{x}_{y}.png"))
-            }
-            _ => unreachable!(),
-        };
-        if let Ok(bytes) = fs::read(&path) {
-            if bytes.starts_with(b"\x89PNG\r\n\x1a\n") && bytes.ends_with(b"IEND\xaeB`\x82") {
-                return Ok(bytes);
-            }
-        }
-        drop(access);
-        if *job.dir.lock().unwrap() != dir {
-            continue;
-        }
-        if state.phase == Phase::Ready {
-            return Err((404, "Channel tile unavailable.".into()));
-        }
-        if std::time::Instant::now() > deadline {
-            return Err((504, "Channel tile generation timed out.".into()));
-        }
-        thread::sleep(Duration::from_millis(100));
-    }
-}
-
-fn native_channel_tile(
-    job: &Job,
-    channel: u32,
-    level: u32,
-    x: u32,
-    y: u32,
-) -> Result<Vec<u8>, String> {
-    let state = job.state.lock().unwrap().clone();
-    let factor = 1_u64 << (max_level(state.width, state.height) - level);
-    let width = (state.width as u64).div_ceil(factor) as u32;
-    let height = (state.height as u64).div_ceil(factor) as u32;
-    let source = {
-        let levels = job.native.lock().unwrap();
-        levels
-            .iter()
-            .rev()
-            .find(|source| source.width >= width && source.height >= height)
-            .unwrap_or(&levels[0])
-            .clone()
-    };
-    let plane = job
-        .planes
-        .lock()
-        .unwrap()
-        .get(channel as usize)
-        .cloned()
-        .ok_or("Invalid image channel.")?;
-    let access = job.cache_access.lock().unwrap();
-    let tiles = job
-        .dir
-        .lock()
-        .unwrap()
-        .join("channels")
-        .join(channel.to_string())
-        .join("native_tiles");
-    fs::create_dir_all(&tiles).map_err(|e| e.to_string())?;
-    let destination = tiles.join(format!("{level}-{x}-{y}.png"));
-    if let Ok(bytes) = fs::read(&destination) {
-        return Ok(bytes);
-    }
-    drop(access);
-    let number = job.process_number.fetch_add(1, Ordering::Relaxed);
-    let resized = job.work.join(format!("channel-tile-{number}.v"));
-    let partial = job.work.join(format!("channel-tile-{number}.png"));
-    let result = (|| {
-        run(
-            job,
-            "vips",
-            &[
-                "affine".into(),
-                input(job, &source.options),
-                resized.clone().into_os_string(),
-                format!(
-                    "{} 0 0 {}",
-                    width as f64 / source.width as f64,
-                    height as f64 / source.height as f64
-                )
-                .into(),
-                format!(
-                    "--oarea={} {} {} {}",
-                    x * TILE_SIZE,
-                    y * TILE_SIZE,
-                    TILE_SIZE.min(width - x * TILE_SIZE),
-                    TILE_SIZE.min(height - y * TILE_SIZE)
-                )
-                .into(),
-                "--interpolate=bilinear".into(),
-                "--extend=copy".into(),
-            ],
-        )?;
-        let header = run(
-            job,
-            "vipsheader",
-            &["-a".into(), resized.clone().into_os_string()],
-        )?;
-        extract_plane(
-            job,
-            resized.clone().into_os_string(),
-            plane.band,
-            &partial,
-            field(&header, "format") == Some("ushort"),
-        )?;
-        if job.cancel.load(Ordering::Relaxed) {
-            return Err("Loading cancelled.".into());
-        }
-        let _access = job.cache_access.lock().unwrap();
-        let tiles = job
-            .dir
-            .lock()
-            .unwrap()
-            .join("channels")
-            .join(channel.to_string())
-            .join("native_tiles");
-        fs::create_dir_all(&tiles).map_err(|e| e.to_string())?;
-        let destination = tiles.join(format!("{level}-{x}-{y}.png"));
-        fs::rename(&partial, &destination).map_err(|e| e.to_string())?;
-        fs::read(&destination).map_err(|e| e.to_string())
-    })();
-    let _ = fs::remove_file(resized);
-    let _ = fs::remove_file(partial);
-    result
-}
 
 pub(super) fn max_level(width: u32, height: u32) -> u32 {
     32 - width.max(height).saturating_sub(1).leading_zeros()
@@ -266,44 +69,95 @@ fn asset(path: &str, id: &str, width: u32, height: u32) -> Option<Asset> {
     Some(Asset::Tile { level, x, y })
 }
 
-pub(crate) fn read_asset(job: &Arc<Job>, asset: Asset) -> Result<Vec<u8>, (u16, String)> {
-    if matches!(
-        asset,
-        Asset::ChannelPreview { .. } | Asset::ChannelTile { .. }
-    ) {
-        return read_channel_asset(job, asset);
+pub(crate) fn channel_asset(
+    path: &str,
+    id: &str,
+    width: u32,
+    height: u32,
+    channel_count: usize,
+) -> Option<Asset> {
+    let parts: Vec<_> = path.trim_start_matches('/').split('/').collect();
+    if parts.len() < 4 || parts[0] != id || parts[1] != "channels" {
+        return None;
     }
+    let channel: u32 = parts[2].parse().ok()?;
+    if channel as usize >= channel_count {
+        return None;
+    }
+    if parts.len() == 4 && parts[3] == "preview.png" {
+        return Some(Asset::ChannelPreview { channel });
+    }
+    if parts.len() != 6 || parts[3] != "tiles" {
+        return None;
+    }
+    let tile = parts[5].strip_suffix(".png")?;
+    match asset(
+        &format!("/{id}/tiles/{}/{tile}.jpg", parts[4]),
+        id,
+        width,
+        height,
+    )? {
+        Asset::Tile { level, x, y } => Some(Asset::ChannelTile {
+            channel,
+            level,
+            x,
+            y,
+        }),
+        _ => None,
+    }
+}
+
+/// Read a display asset, waiting while it is generated and following the cache
+/// directory when promotion publishes it. Channel assets are lossless PNGs.
+pub(crate) fn read_asset(job: &Arc<Job>, asset: Asset) -> Result<Vec<u8>, (u16, String)> {
+    let channel = match asset {
+        Asset::Preview | Asset::Tile { .. } => None,
+        Asset::ChannelPreview { channel } | Asset::ChannelTile { channel, .. } => Some(channel),
+    };
     let deadline = std::time::Instant::now() + Duration::from_secs(600);
     loop {
         if job.cancel.load(Ordering::Relaxed) {
             return Err((410, "Image replaced or cancelled.".into()));
         }
         let state = job.state.lock().unwrap().clone();
+        let failed = || (500, state.error.clone().unwrap_or_default());
+        // Channel assets stop at a failed load; others still serve finished files.
+        if channel.is_some() && state.phase == Phase::Error {
+            return Err(failed());
+        }
         // Windows cannot move a directory while a descendant file is open.
         // Keep path selection and each short read inside the promotion guard.
         let access = job.cache_access.lock().unwrap();
         let dir = job.dir.lock().unwrap().clone();
+        let base = match channel {
+            Some(channel) => dir.join("channels").join(channel.to_string()),
+            None => dir.clone(),
+        };
         let path = match asset {
-            Asset::Preview => dir.join("preview.jpg"),
-            Asset::ChannelPreview { .. } | Asset::ChannelTile { .. } => unreachable!(),
-            Asset::Tile { level, x, y } => {
+            Asset::Preview => base.join("preview.jpg"),
+            Asset::ChannelPreview { .. } => base.join("preview.png"),
+            Asset::Tile { level, x, y } | Asset::ChannelTile { level, x, y, .. } => {
                 if !job.native.lock().unwrap().is_empty() {
                     if state.phase == Phase::Error {
-                        return Err((500, state.error.unwrap_or_default()));
+                        return Err(failed());
                     }
                     drop(access);
-                    return native_tile(job, level, x, y).map_err(|error| {
-                        job.update(|s| {
-                            s.phase = Phase::Error;
-                            s.error = Some(error.clone());
-                            s.detail = "Cannot load image detail.".into();
-                        });
+                    return native_tile(job, channel, level, x, y).map_err(|error| {
+                        // A failed composite detail tile fails the whole image.
+                        if channel.is_none() {
+                            job.update(|s| {
+                                s.phase = Phase::Error;
+                                s.error = Some(error.clone());
+                                s.detail = "Cannot load image detail.".into();
+                            });
+                        }
                         (500, error)
                     });
                 }
-                dir.join("tiles_files")
+                let extension = if channel.is_some() { "png" } else { "jpg" };
+                base.join("tiles_files")
                     .join(level.to_string())
-                    .join(format!("{x}_{y}.jpg"))
+                    .join(format!("{x}_{y}.{extension}"))
             }
         };
         // libvips' direct DeepZoom saver uses .jpeg; older caches use .jpg.
@@ -316,8 +170,13 @@ pub(crate) fn read_asset(job: &Arc<Job>, asset: Asset) -> Result<Vec<u8>, (u16, 
                 Err(error)
             }
         }) {
-            // dzsave writes each tile directly; only expose complete JPEG streams.
-            if bytes.starts_with(&[0xff, 0xd8]) && bytes.ends_with(&[0xff, 0xd9]) {
+            // dzsave writes each tile directly; only expose complete image streams.
+            let complete = if channel.is_some() {
+                bytes.starts_with(b"\x89PNG\r\n\x1a\n") && bytes.ends_with(b"IEND\xaeB`\x82")
+            } else {
+                bytes.starts_with(&[0xff, 0xd8]) && bytes.ends_with(&[0xff, 0xd9])
+            };
+            if complete {
                 return Ok(bytes);
             }
         }
@@ -326,93 +185,140 @@ pub(crate) fn read_asset(job: &Arc<Job>, asset: Asset) -> Result<Vec<u8>, (u16, 
             continue;
         }
         if state.phase == Phase::Error {
-            return Err((500, state.error.unwrap_or_default()));
+            return Err(failed());
         }
+        let kind = if channel.is_some() {
+            "Channel tile"
+        } else {
+            "Tile"
+        };
         if state.phase == Phase::Ready {
-            return Err((404, "Tile unavailable.".into()));
+            return Err((404, format!("{kind} unavailable.")));
         }
         if std::time::Instant::now() > deadline {
-            return Err((504, "Tile generation timed out.".into()));
+            return Err((504, format!("{kind} generation timed out.")));
         }
         thread::sleep(Duration::from_millis(100));
     }
 }
 
-fn native_tile(job: &Job, level: u32, x: u32, y: u32) -> Result<Vec<u8>, String> {
+/// Render one tile from the nearest native level at least as large. Channel
+/// tiles are resampled before their band is extracted as a lossless PNG.
+fn native_tile(
+    job: &Job,
+    channel: Option<u32>,
+    level: u32,
+    x: u32,
+    y: u32,
+) -> Result<Vec<u8>, String> {
     let state = job.state.lock().unwrap().clone();
-    let max = max_level(state.width, state.height);
-    let factor = 1_u64 << (max - level);
-    let target_width = (state.width as u64).div_ceil(factor) as u32;
-    let target_height = (state.height as u64).div_ceil(factor) as u32;
-    let levels = job.native.lock().unwrap();
-    let source = levels
-        .iter()
-        .rev()
-        .find(|v| v.width >= target_width && v.height >= target_height)
-        .unwrap_or(&levels[0])
-        .clone();
-    drop(levels);
-    let access = job.cache_access.lock().unwrap();
-    let dir = job.dir.lock().unwrap().clone();
-    let tiles = dir.join("native_tiles");
-    fs::create_dir_all(&tiles).map_err(|e| e.to_string())?;
-    let destination = tiles.join(format!("{level}-{x}-{y}.jpg"));
-    if let Ok(bytes) = fs::read(&destination) {
-        return Ok(bytes);
+    let factor = 1_u64 << (max_level(state.width, state.height) - level);
+    let width = (state.width as u64).div_ceil(factor) as u32;
+    let height = (state.height as u64).div_ceil(factor) as u32;
+    let source = {
+        let levels = job.native.lock().unwrap();
+        levels
+            .iter()
+            .rev()
+            .find(|source| source.width >= width && source.height >= height)
+            .unwrap_or(&levels[0])
+            .clone()
+    };
+    let band = channel
+        .map(|channel| {
+            job.planes
+                .lock()
+                .unwrap()
+                .get(channel as usize)
+                .map(|plane| plane.band)
+                .ok_or("Invalid image channel.")
+        })
+        .transpose()?;
+    let tiles = |dir: &Path| match channel {
+        Some(channel) => dir
+            .join("channels")
+            .join(channel.to_string())
+            .join("native_tiles"),
+        None => dir.join("native_tiles"),
+    };
+    let extension = if band.is_some() { "png" } else { "jpg" };
+    let name = format!("{level}-{x}-{y}.{extension}");
+    {
+        let _access = job.cache_access.lock().unwrap();
+        let tiles = tiles(&job.dir.lock().unwrap());
+        fs::create_dir_all(&tiles).map_err(|e| e.to_string())?;
+        if let Ok(bytes) = fs::read(tiles.join(&name)) {
+            return Ok(bytes);
+        }
     }
-    drop(access);
     let number = job.process_number.fetch_add(1, Ordering::Relaxed);
-    let partial = job.work.join(format!("tile-{number}.partial.jpg"));
-    let tile_width = TILE_SIZE.min(target_width - x * TILE_SIZE);
-    let tile_height = TILE_SIZE.min(target_height - y * TILE_SIZE);
-    // Affine's output area keeps the global sampling grid and exact edge sizes.
-    // Demand-driven native TIFF loading reads the requested source region only.
-    let result = run(
-        job,
-        "vips",
-        &[
-            "affine".into(),
-            input(job, &source.options),
-            OsString::from(format!(
-                "{}[Q=85,strip,background=52 54 51]",
-                partial.display()
-            )),
-            format!(
-                "{} 0 0 {}",
-                target_width as f64 / source.width as f64,
-                target_height as f64 / source.height as f64
-            )
-            .into(),
-            format!(
-                "--oarea={} {} {} {}",
-                x * TILE_SIZE,
-                y * TILE_SIZE,
-                tile_width,
-                tile_height
-            )
-            .into(),
-            "--interpolate=bilinear".into(),
-            "--extend=copy".into(),
-        ],
-    );
-    if let Err(error) = result {
-        let _ = fs::remove_file(&partial);
-        return Err(error);
-    }
-    if job.cancel.load(Ordering::Relaxed) {
-        let _ = fs::remove_file(&partial);
-        return Err("Loading cancelled.".into());
-    }
-    if tree_size(&job.root) > CACHE_LIMIT {
-        let _ = fs::remove_file(&partial);
-        return Err("Display cache limit reached.".into());
-    }
-    let _access = job.cache_access.lock().unwrap();
-    let tiles = job.dir.lock().unwrap().join("native_tiles");
-    fs::create_dir_all(&tiles).map_err(|e| e.to_string())?;
-    let destination = tiles.join(format!("{level}-{x}-{y}.jpg"));
-    fs::rename(&partial, &destination).map_err(|e| e.to_string())?;
-    fs::read(destination).map_err(|e| e.to_string())
+    let resized = job.work.join(format!("tile-{number}.v"));
+    let partial = job.work.join(format!("tile-{number}.partial.{extension}"));
+    let output = match band {
+        Some(_) => resized.clone().into_os_string(),
+        None => OsString::from(format!(
+            "{}[Q=85,strip,background=52 54 51]",
+            partial.display()
+        )),
+    };
+    let result = (|| {
+        // Affine's output area keeps the global sampling grid and exact edge sizes.
+        // Demand-driven native TIFF loading reads the requested source region only.
+        run(
+            job,
+            "vips",
+            &[
+                "affine".into(),
+                input(job, &source.options),
+                output,
+                format!(
+                    "{} 0 0 {}",
+                    width as f64 / source.width as f64,
+                    height as f64 / source.height as f64
+                )
+                .into(),
+                format!(
+                    "--oarea={} {} {} {}",
+                    x * TILE_SIZE,
+                    y * TILE_SIZE,
+                    TILE_SIZE.min(width - x * TILE_SIZE),
+                    TILE_SIZE.min(height - y * TILE_SIZE)
+                )
+                .into(),
+                "--interpolate=bilinear".into(),
+                "--extend=copy".into(),
+            ],
+        )?;
+        if let Some(band) = band {
+            let header = run(
+                job,
+                "vipsheader",
+                &["-a".into(), resized.clone().into_os_string()],
+            )?;
+            extract_plane(
+                job,
+                resized.clone().into_os_string(),
+                band,
+                &partial,
+                field(&header, "format") == Some("ushort"),
+            )?;
+        }
+        if job.cancel.load(Ordering::Relaxed) {
+            return Err("Loading cancelled.".into());
+        }
+        if tree_size(&job.root) > CACHE_LIMIT {
+            return Err("Display cache limit reached.".into());
+        }
+        let _access = job.cache_access.lock().unwrap();
+        let tiles = tiles(&job.dir.lock().unwrap());
+        fs::create_dir_all(&tiles).map_err(|e| e.to_string())?;
+        let destination = tiles.join(&name);
+        fs::rename(&partial, &destination).map_err(|e| e.to_string())?;
+        fs::read(destination).map_err(|e| e.to_string())
+    })();
+    let _ = fs::remove_file(resized);
+    let _ = fs::remove_file(partial);
+    result
 }
 
 /// Serve one aperture:// request from the current image off the WebView thread.
@@ -515,7 +421,7 @@ fn response(status: u16, bytes: Vec<u8>) -> tauri::http::Response<Vec<u8>> {
 mod tests {
     use super::*;
     use crate::backend::{pyramid::dimensions, tests::wait_ready, NEXT_ID};
-    use std::{path::Path, process::Command};
+    use std::process::Command;
 
     #[test]
     fn stored_asset_reads_wait_for_promotion_and_use_the_published_directory() {
