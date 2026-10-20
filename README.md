@@ -199,7 +199,7 @@ python scripts/native-smoke.py src-tauri/target/debug/aperture \
 The current native harness uses Hyprland, `ydotool`, `wl-copy`, and `grim` to
 operate the real file chooser and capture the application window. It uses the
 keyboard, clipboard, and window focus while running. Results and screenshots
-stay in ignored `test-data/`.
+stay in ignored `artifacts/`.
 
 For Settings and update-restart regression checks, start `tauri-driver` with
 isolated `XDG_CONFIG_HOME`, `XDG_CACHE_HOME` and `TMPDIR`, then run:
