@@ -109,7 +109,7 @@ type Notifier = Arc<dyn Fn(&ImageState) + Send + Sync>;
 pub struct Job {
     pub state: Mutex<ImageState>,
     pub cancel: AtomicBool,
-    pub cancelled: tokio::sync::Notify,
+    cancelled: tokio::sync::Notify,
     pub dir: Mutex<PathBuf>,
     pub input: PathBuf,
     pub source: PathBuf,
@@ -122,7 +122,7 @@ pub struct Job {
     /// Initial metadata remains the sourceIndex basis through repeated saves.
     pub annotations: Mutex<Option<crate::annotation_io::AnnotationBasis>>,
     work: PathBuf,
-    pub native: Mutex<Vec<NativeLevel>>,
+    native: Mutex<Vec<NativeLevel>>,
     planes: Mutex<Vec<Plane>>,
     root: PathBuf,
     cache_key: String,
@@ -155,9 +155,9 @@ pub struct Backend {
     pub current: Mutex<Option<Arc<Job>>>,
     root: PathBuf,
     workers: Mutex<Vec<thread::JoinHandle<()>>>,
-    pub requests: AtomicU64,
-    pub closing: Arc<AtomicBool>,
-    pub tile_slots: Arc<tokio::sync::Semaphore>,
+    requests: AtomicU64,
+    closing: Arc<AtomicBool>,
+    tile_slots: Arc<tokio::sync::Semaphore>,
     notifier: Option<Notifier>,
     cache_access: Arc<Mutex<()>>,
     open_lock: Mutex<()>,
@@ -691,7 +691,7 @@ pub(crate) fn finish_decoder(job: &Job) {
 }
 
 impl Job {
-    pub async fn tile_permit(
+    async fn tile_permit(
         &self,
         slots: Arc<tokio::sync::Semaphore>,
     ) -> Result<tokio::sync::OwnedSemaphorePermit, (u16, String)> {
