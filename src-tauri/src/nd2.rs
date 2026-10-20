@@ -915,6 +915,7 @@ pub(crate) mod tests {
         );
         assert_eq!(std::fs::read(&source).unwrap(), bytes);
         backend.shutdown();
+        drop(backend);
         std::fs::remove_dir_all(temp).unwrap();
     }
 
