@@ -35,7 +35,8 @@ JPEG XR subblocks.
 Explicitly rejected: float, int32, double and complex pixel types; mixed pixel
 types; multi-file documents and any subblock that references another file part;
 inconsistent scenes; files without an intact subblock directory; JPEG XR
-subblocks whose codestream geometry or pixel format disagrees with the directory;
+subblocks whose codestream geometry or pixel format disagrees with the directory
+or whose container has duplicate image-offset tags; malformed event lists;
 and JPEG-lossless or camera/system raw subblocks, which the
 reader does not decode. Only full-resolution level 0 is read; stored pyramid
 levels are not used. Airyscan fast-scan subblocks stored below their logical size
@@ -76,7 +77,9 @@ header and the entry embedded in it, which must agree with the directory, every
 JPEG XR codestream header, the attachment directory, the TimeStamps/EventList
 attachments the reader interprets and every segment header. Event lists are
 walked as the reader walks them, so overlapping descriptions are counted at their
-full expanded size.
+full expanded size, and a malformed event list is rejected because the reader
+copies earlier descriptions before failing. JPEG XR containers with duplicate
+image-offset tags are rejected as ambiguous.
 The XML, attachment directory and interpreted attachments are capped at 32 MiB
 together; the subblock directory has its own 128 MiB cap. Encoded subblock
 payloads are limited to 257 MiB, decoded subblocks to 256 MiB and images to 4096.
@@ -94,7 +97,8 @@ codestreams must declare the directory's tile size and sample layout, so their
 output is bounded; each JPEG XR tile also reserves the decoder's index table (at
 most 8 bytes per payload byte), per-tile-column entropy and quantizer state for
 the column count in its header, and macroblock-row workspace for up to 16
-internal channels. This bounds accounted image data and conservative workspaces,
+internal channels. These JPEG XR reservations are deliberately generous rather
+than measured. This bounds accounted image data and conservative workspaces,
 not total RSS. The reader is reopened for each decoded
 frame and re-reads segment headers, which costs latency on files with many
 subblocks.
