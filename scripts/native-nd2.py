@@ -11,6 +11,7 @@ import base64
 import hashlib
 import json
 import os
+import shutil
 import subprocess
 from pathlib import Path
 import time
@@ -190,13 +191,19 @@ def main():
         assert str(primary) in invoke('folder_images', {'path': str(primary)})
         assert 'nd2' in js('return window.__nd2Test.openOptions.options.filters[0].extensions;')
         report['checks']['metadataAndReadOnlyUi'] = first
+        # A read-only regression may only ever overwrite this disposable copy.
+        refused = args.output.parent / ('refused-save' + primary.suffix)
+        shutil.copyfile(primary, refused)
+        refused_bytes = refused.read_bytes()
         for command, values in [
             ('load_annotations', {'id': first['id']}),
             ('annotation_target', {'id': first['id']}),
-            ('save_annotations', {'id': first['id'], 'path': str(primary), 'rois': [], 'overwrite': True}),
+            ('save_annotations', {'id': first['id'], 'path': str(refused), 'rois': [], 'overwrite': True}),
         ]:
             result = invoke(command, values)
             assert result.get('error') and ('ND2' in result['error'] or 'read-only' in result['error'].lower()), (command, result)
+        assert refused.read_bytes() == refused_bytes
+        refused.unlink()
         report['checks']['backendRefusesAnnotationAndSave'] = True
         initial_hash = plane_hash(first)
         initial_framebuffer = framebuffer()

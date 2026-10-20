@@ -12,6 +12,7 @@ import base64
 import hashlib
 import json
 import os
+import shutil
 import subprocess
 from pathlib import Path
 import time
@@ -252,14 +253,20 @@ def main():
         assert str(primary) in invoke('folder_images', {'path': str(primary)})
         assert 'czi' in js('return window.__cziTest.openOptions.options.filters[0].extensions;')
         report['checks']['metadataAndReadOnlyUi'] = {'state': first, 'ui': read_only_ui()}
+        # A read-only regression may only ever overwrite this disposable copy.
+        refused = args.output.parent / ('refused-save' + primary.suffix)
+        shutil.copyfile(primary, refused)
+        refused_bytes = refused.read_bytes()
         for command, values in [
             ('load_annotations', {'id': first['id']}),
             ('annotation_target', {'id': first['id']}),
-            ('save_annotations', {'id': first['id'], 'path': str(primary), 'rois': [], 'overwrite': True}),
+            ('save_annotations', {'id': first['id'], 'path': str(refused), 'rois': [], 'overwrite': True}),
         ]:
             result = invoke(command, values)
             message = (result.get('error') or '').lower() if isinstance(result, dict) else ''
             assert message and any(word in message for word in ('read-only', 'browsing', 'czi')), (command, result)
+        assert refused.read_bytes() == refused_bytes
+        refused.unlink()
         report['checks']['backendRefusesAnnotationAndSave'] = True
         initial_hash = plane_hash(first)
         initial_framebuffer = framebuffer()
