@@ -19,6 +19,9 @@ and lockfiles. The source gate verifies actual Cargo dependency closure against
 the baseline vendor inventory, exact npm lock identity and native identities.
 A changed root application version does not imply changed dependency coverage.
 New or changed dependencies require refreshed reviewed material before packaging.
+A refreshed bundle copies every prior member unchanged except its updated
+manifest and inventory, adds the newly locked sources, and records the prior
+archive and its embedded recipe in the `refresh` entry of `SOURCE-MANIFEST.json`.
 
 Run release helpers with an interpreter from the
 [command reference](RELEASE-REFERENCE.md). Prepare and verify the files in an
