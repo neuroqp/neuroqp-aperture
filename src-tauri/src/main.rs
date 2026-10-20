@@ -42,12 +42,16 @@ struct LoadedImage {
 }
 
 #[tauri::command]
-async fn open_image(
-    path: String,
-    backend: State<'_, Backend>,
-    session: State<'_, Arc<Session>>,
-) -> Result<ImageState, String> {
-    open_image_path(Path::new(&path), &backend, &session)
+async fn open_image(path: String, app: tauri::AppHandle) -> Result<ImageState, String> {
+    tauri::async_runtime::spawn_blocking(move || {
+        open_image_path(
+            Path::new(&path),
+            &app.state::<Backend>(),
+            &app.state::<Arc<Session>>(),
+        )
+    })
+    .await
+    .map_err(|e| e.to_string())?
 }
 
 fn open_image_path(
@@ -159,15 +163,21 @@ fn image_state(backend: State<'_, Backend>) -> Option<ImageState> {
     backend.snapshot()
 }
 #[tauri::command]
-async fn memory_status(backend: State<'_, Backend>) -> Result<memory::MemoryStatus, String> {
-    backend.memory.status()
+async fn memory_status(app: tauri::AppHandle) -> Result<memory::MemoryStatus, String> {
+    tauri::async_runtime::spawn_blocking(move || app.state::<Backend>().memory.status())
+        .await
+        .map_err(|e| e.to_string())?
 }
 #[tauri::command]
 async fn set_memory_budget(
     limit_bytes: u64,
-    backend: State<'_, Backend>,
+    app: tauri::AppHandle,
 ) -> Result<memory::MemoryStatus, String> {
-    backend.set_memory_budget(limit_bytes)
+    tauri::async_runtime::spawn_blocking(move || {
+        app.state::<Backend>().set_memory_budget(limit_bytes)
+    })
+    .await
+    .map_err(|e| e.to_string())?
 }
 #[tauri::command]
 fn nd2_preload_status(backend: State<'_, Backend>) -> preload::PreloadStatus {
@@ -183,16 +193,22 @@ async fn select_plane(
     projection: Option<frames::Projection>,
     navigation_axis: Option<String>,
     navigation_direction: Option<i8>,
-    backend: State<'_, Backend>,
-    session: State<'_, Arc<Session>>,
+    app: tauri::AppHandle,
 ) -> Result<ImageState, String> {
-    let _opening = session.opening.lock().unwrap();
-    backend.navigation_hint(navigation_axis.as_deref(), navigation_direction);
-    let state = backend.select_view(&id, frames::Selection { position, z, time }, projection)?;
-    if let Some(loaded) = session.loaded.lock().unwrap().as_mut() {
-        loaded.id = state.id.clone();
-    }
-    Ok(state)
+    tauri::async_runtime::spawn_blocking(move || {
+        let backend = app.state::<Backend>();
+        let session = app.state::<Arc<Session>>();
+        let _opening = session.opening.lock().unwrap();
+        backend.navigation_hint(navigation_axis.as_deref(), navigation_direction);
+        let state =
+            backend.select_view(&id, frames::Selection { position, z, time }, projection)?;
+        if let Some(loaded) = session.loaded.lock().unwrap().as_mut() {
+            loaded.id = state.id.clone();
+        }
+        Ok(state)
+    })
+    .await
+    .map_err(|e| e.to_string())?
 }
 #[tauri::command]
 fn cancel_load(backend: State<'_, Backend>) {
