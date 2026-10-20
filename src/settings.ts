@@ -207,6 +207,7 @@ export function bindSettings() {
   return {
     showGeneral,
     close,
+    busy: () => busy,
     setBusy(value: boolean) {
       busy = value;
       closeButton.disabled = value;

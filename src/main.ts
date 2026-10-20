@@ -123,13 +123,7 @@ const native = isTauri();
 const windowHandle = native ? getCurrentWindow() : null;
 const dimensionNavigation = bindDimensionNavigation(
   async (position, z, time, hint, projection) => {
-    if (
-      !native ||
-      saving ||
-      dialogOpen ||
-      $("settings-dialog").hasAttribute("open")
-    )
-      return false;
+    if (!native || blocked()) return false;
     setLoading(true);
     return loader.selectPlane(position, z, time, hint, projection);
   },
@@ -194,10 +188,36 @@ let saveError: string | null = null;
 let saveNotice: string | null = null;
 let dirty = false;
 let saving = false;
+// Freeze edits while an update stops image work and installs.
+let updating = false;
+let dialogOpen = false;
 let savedPath: string | null = null;
 const saveDialog = $<HTMLDialogElement>("save-dialog");
+const settingsDialog = $<HTMLDialogElement>("settings-dialog");
+const frozen = () => saving || updating;
+const blocked = () => frozen() || dialogOpen || settingsDialog.open;
+
+async function withDialog<T>(show: () => Promise<T>) {
+  dialogOpen = true;
+  try {
+    return await show();
+  } finally {
+    dialogOpen = false;
+  }
+}
+
+function showModal(dialog: HTMLDialogElement) {
+  dialog.returnValue = "cancel";
+  return new Promise<string>((resolve) => {
+    dialog.addEventListener("close", () => resolve(dialog.returnValue), {
+      once: true,
+    });
+    dialog.showModal();
+  });
+}
+
 function editAnnotations(next: PointRoi[] | null) {
-  if (!next || next === rois || !annotationsReady || saving) return;
+  if (!next || next === rois || !annotationsReady || frozen()) return;
   rois = next;
   dirty = true;
   annotationViewer.setRois(rois);
@@ -217,17 +237,17 @@ const annotationViewer = new AnnotationViewer(viewer, {
   },
   delete: (reference) => editAnnotations(deletePoint(rois, reference)),
   active: () => tools.pointsActive(),
-  editable: () => annotationsReady && !saving,
+  editable: () => annotationsReady && !frozen(),
 });
 
 function updatePointTool(key?: keyof AnnotationSettings) {
-  if (key === "counter" && annotationsReady && !saving) {
+  if (key === "counter" && annotationsReady && !frozen()) {
     rois = selectCounter(rois, tools.pointSettings().counter);
     annotationViewer.setRois(rois);
   } else if (
     key &&
     annotationsReady &&
-    !saving &&
+    !frozen() &&
     key !== "allSlices" &&
     key !== "counter"
   ) {
@@ -244,7 +264,7 @@ function updatePointTool(key?: keyof AnnotationSettings) {
       ".point-choice, #point-labels, #point-all-slices, #point-counter, #point-counter-options button[data-counter]",
     )
     .forEach((control) => {
-      control.disabled = saving || !annotationsReady;
+      control.disabled = frozen() || !annotationsReady;
     });
   const active = tools.pointsActive();
   annotationViewer.updateInteraction();
@@ -257,42 +277,30 @@ function updatePointTool(key?: keyof AnnotationSettings) {
   $<HTMLButtonElement>("save-button").disabled =
     !annotationsReady ||
     (!dirty && !rois.some((roi) => roi.points.length > 0)) ||
-    saving;
+    frozen();
 }
 
 async function discardChanges() {
-  if (saving || dialogOpen || $<HTMLDialogElement>("settings-dialog").open)
-    return false;
-  if (!dirty) return true;
-  dialogOpen = true;
-  try {
-    return await confirm(
-      "Discard unsaved point annotations? Save first to keep them.",
-      {
+  if (blocked()) return false;
+  return (
+    !dirty ||
+    withDialog(() =>
+      confirm("Discard unsaved point annotations? Save first to keep them.", {
         title: "Unsaved annotations",
         kind: "warning",
         okLabel: "Discard",
         cancelLabel: "Cancel",
-      },
-    );
-  } finally {
-    dialogOpen = false;
-  }
+      }),
+    )
+  );
 }
 
 async function prepareUpdate() {
-  if (saving || dialogOpen) return false;
+  if (blocked()) return false;
   if (dirty) {
-    dialogOpen = true;
-    const dialog = $<HTMLDialogElement>("update-unsaved-dialog");
-    dialog.returnValue = "cancel";
-    const choice = await new Promise<string>((resolve) => {
-      dialog.addEventListener("close", () => resolve(dialog.returnValue), {
-        once: true,
-      });
-      dialog.showModal();
-    });
-    dialogOpen = false;
+    const choice = await withDialog(() =>
+      showModal($<HTMLDialogElement>("update-unsaved-dialog")),
+    );
     if (choice === "save") {
       await saveAnnotations();
       if (dirty) return false;
@@ -300,8 +308,7 @@ async function prepareUpdate() {
     // Keep discarded edits marked unsaved until exit; installation can still fail.
   }
   // Freeze edits before stopping image requests and joining native workers.
-  saving = true;
-  dialogOpen = true;
+  updating = true;
   histogramLoad?.abort();
   for (const job of downloads) job.abort();
   downloads.clear();
@@ -312,14 +319,11 @@ async function prepareUpdate() {
 async function saveAnnotations() {
   if (
     !native ||
-    saving ||
-    dialogOpen ||
-    $<HTMLDialogElement>("settings-dialog").open ||
+    blocked() ||
     !currentId ||
     $<HTMLButtonElement>("save-button").disabled
   )
     return;
-  dialogOpen = true;
   saving = true;
   saveError = null;
   saveNotice = null;
@@ -343,15 +347,7 @@ async function saveAnnotations() {
         $("save-overwrite-button").textContent = target.warning
           ? "Overwrite anyway"
           : "Overwrite";
-        saveDialog.returnValue = "cancel";
-        return new Promise<string>((resolve) => {
-          saveDialog.addEventListener(
-            "close",
-            () => resolve(saveDialog.returnValue),
-            { once: true },
-          );
-          saveDialog.showModal();
-        });
+        return showModal(saveDialog);
       },
       pick: (defaultPath) =>
         save({
@@ -383,7 +379,6 @@ async function saveAnnotations() {
     saveError = String(error);
   } finally {
     saving = false;
-    dialogOpen = false;
     updatePointTool();
     if (currentImage) showImage(currentImage);
     if (completed && !$("status").classList.contains("error")) {
@@ -402,7 +397,6 @@ viewer.addHandler("tile-loaded", (event) => {
   loadedImages.add(event.tiledImage);
 });
 let pyramidAdded = false;
-let dialogOpen = false;
 let loading = false;
 let tileError: string | null = null;
 let histogramLoad: AbortController | null = null;
@@ -776,8 +770,7 @@ function updateNavigation() {
 }
 
 async function navigateImage(direction: -1 | 1) {
-  if (!native || saving || dialogOpen) return;
-  if (dirty && !(await discardChanges())) return;
+  if (!native || !(await discardChanges())) return;
   const path = folder.adjacent(direction);
   if (path) await openPath(path, true);
 }
@@ -798,24 +791,23 @@ async function openPath(path: string, checked = false) {
 }
 
 async function chooseImage() {
-  if (!native || dialogOpen || !(await discardChanges())) return;
-  dialogOpen = true;
+  if (!native || !(await discardChanges())) return;
   let path: string | string[] | null = null;
   try {
-    path = await open({
-      multiple: false,
-      directory: false,
-      filters: [
-        {
-          name: "Images",
-          extensions: await invoke<string[]>("image_extensions"),
-        },
-      ],
-    });
+    path = await withDialog(async () =>
+      open({
+        multiple: false,
+        directory: false,
+        filters: [
+          {
+            name: "Images",
+            extensions: await invoke<string[]>("image_extensions"),
+          },
+        ],
+      }),
+    );
   } catch (error) {
     showError(String(error));
-  } finally {
-    dialogOpen = false;
   }
   if (typeof path === "string") await openPath(path, true);
 }
@@ -872,8 +864,7 @@ $("zoom-out-button").addEventListener("click", () => {
   viewer.viewport.applyConstraints();
 });
 document.addEventListener("keydown", (event) => {
-  if (dialogOpen || saving || $<HTMLDialogElement>("settings-dialog").open)
-    return;
+  if (blocked()) return;
   if ((event.ctrlKey || event.metaKey) && event.key.toLowerCase() === "n") {
     event.preventDefault();
     if (native) void invoke("new_window").catch(showError);
@@ -919,14 +910,14 @@ document.addEventListener("keydown", (event) => {
 if (windowHandle) {
   void windowHandle
     .onCloseRequested(async (event) => {
-      if ($<HTMLDialogElement>("settings-dialog").open) {
-        if ($<HTMLButtonElement>("settings-close").disabled) {
+      if (settingsDialog.open) {
+        if (settings.busy()) {
           event.preventDefault();
           return;
         }
         settings.close();
       }
-      if (dirty || saving || dialogOpen) {
+      if (dirty || blocked()) {
         event.preventDefault();
         if (await discardChanges()) {
           dirty = false;
@@ -986,8 +977,7 @@ if (windowHandle) {
 bindUpdates(
   prepareUpdate,
   () => {
-    saving = false;
-    dialogOpen = false;
+    updating = false;
     updatePointTool();
   },
   settings,
