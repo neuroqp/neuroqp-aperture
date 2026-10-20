@@ -28,19 +28,16 @@ pub(super) fn input(job: &Job, options: &str) -> OsString {
 // count the persisted cache once the preview is visible. Short read-only metadata
 // commands then avoid repeatedly traversing thousands of cached display tiles.
 pub(super) fn budget_exceeded(job: &Job, finished: bool) -> bool {
-    if !job.housekeeping.load(Ordering::Relaxed) {
-        if finished || job.budget_check.lock().unwrap().elapsed() >= Duration::from_millis(500) {
-            *job.budget_check.lock().unwrap() = Instant::now();
-            return tree_size(&job.work) > CACHE_LIMIT / 2;
-        }
-        return false;
-    }
     let mut last = job.budget_check.lock().unwrap();
     if !finished && last.elapsed() < Duration::from_millis(500) {
         return false;
     }
     *last = Instant::now();
-    tree_size(&job.root) > CACHE_LIMIT
+    if job.housekeeping.load(Ordering::Relaxed) {
+        tree_size(&job.root) > CACHE_LIMIT
+    } else {
+        tree_size(&job.work) > CACHE_LIMIT / 2
+    }
 }
 
 // Each decode lives in a killable process. libvips' operation cache is bounded;
