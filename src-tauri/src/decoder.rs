@@ -154,7 +154,7 @@ impl Drop for Decoder {
 }
 
 #[cfg(all(test, unix))]
-mod tests {
+pub(crate) mod tests {
     use super::*;
     use std::{
         fs,
@@ -163,7 +163,7 @@ mod tests {
         time::{Instant, SystemTime, UNIX_EPOCH},
     };
 
-    fn helper(body: &str) -> (Decoder, std::path::PathBuf) {
+    pub(crate) fn helper(body: &str) -> (Decoder, std::path::PathBuf) {
         let root = std::env::temp_dir().join(format!(
             "aperture-decoder-{}-{}",
             std::process::id(),

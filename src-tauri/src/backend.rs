@@ -2180,50 +2180,69 @@ fn worker_call(
     request: &crate::vips_worker::Request,
     progress: Option<(f64, f64)>,
 ) -> Result<String, String> {
-    let decoder = {
-        let mut slot = job.decoder.lock().unwrap();
-        if job.cancel.load(Ordering::Relaxed) {
-            return Err("Loading cancelled.".into());
-        }
-        let amount = decoder_workspace(job)?;
-        let mut memory = job.decoder_memory.lock().unwrap();
-        let previous = memory.as_ref().map_or(0, |memory| memory.bytes);
-        if amount > previous {
-            let reservation = reserve_workspace(job, amount - previous)?;
-            let memory = memory.get_or_insert_with(|| DecoderMemory {
-                bytes: 0,
-                reservations: Vec::new(),
-            });
-            memory.bytes = amount;
-            memory.reservations.push(reservation);
-        }
-        // A failed call stops its decoder; later native tiles need a fresh one.
-        if slot.as_ref().is_none_or(|decoder| decoder.stopped()) {
-            *slot = match crate::decoder::Decoder::start(&job.work) {
-                Ok(decoder) => Some(Arc::new(decoder)),
-                Err(error) => {
-                    memory.take();
-                    return Err(error);
+    let exceeded = std::cell::Cell::new(false);
+    let call = |decoder: &crate::decoder::Decoder| {
+        decoder.call(
+            request,
+            &job.cancel,
+            || {
+                exceeded.set(budget_exceeded(job, false));
+                exceeded.get()
+            },
+            |fraction| {
+                if let Some((start, end)) = progress {
+                    // Rough work percentage: preview 20%, pyramid 79%, final writes 1%.
+                    job.report_progress(start + (end - start) * fraction);
                 }
-            };
-        }
-        slot.as_ref().unwrap().clone()
+            },
+        )
     };
-    let output = decoder.call(
-        request,
-        &job.cancel,
-        || budget_exceeded(job, false),
-        |fraction| {
-            if let Some((start, end)) = progress {
-                // Rough work percentage: preview 20%, pyramid 79%, final writes 1%.
-                job.report_progress(start + (end - start) * fraction);
-            }
-        },
-    )?;
+    let decoder = worker(job)?;
+    let mut output = call(&decoder);
+    // A crashed decoder fails its in-flight call; retry it once with a fresh
+    // decoder. Cancellation and cache-limit stops are not retried.
+    if output.is_err()
+        && decoder.stopped()
+        && !exceeded.get()
+        && !job.cancel.load(Ordering::Relaxed)
+    {
+        output = call(&*worker(job)?);
+    }
+    let output = output?;
     if budget_exceeded(job, true) {
         return Err("Display cache limit reached.".into());
     }
     Ok(output)
+}
+
+fn worker(job: &Job) -> Result<Arc<crate::decoder::Decoder>, String> {
+    let mut slot = job.decoder.lock().unwrap();
+    if job.cancel.load(Ordering::Relaxed) {
+        return Err("Loading cancelled.".into());
+    }
+    let amount = decoder_workspace(job)?;
+    let mut memory = job.decoder_memory.lock().unwrap();
+    let previous = memory.as_ref().map_or(0, |memory| memory.bytes);
+    if amount > previous {
+        let reservation = reserve_workspace(job, amount - previous)?;
+        let memory = memory.get_or_insert_with(|| DecoderMemory {
+            bytes: 0,
+            reservations: Vec::new(),
+        });
+        memory.bytes = amount;
+        memory.reservations.push(reservation);
+    }
+    // Replace a decoder that exited while idle or stopped after a failed call.
+    if slot.as_ref().is_none_or(|decoder| decoder.stopped()) {
+        *slot = match crate::decoder::Decoder::start(&job.work) {
+            Ok(decoder) => Some(Arc::new(decoder)),
+            Err(error) => {
+                memory.take();
+                return Err(error);
+            }
+        };
+    }
+    Ok(slot.as_ref().unwrap().clone())
 }
 
 pub fn max_level(width: u32, height: u32) -> u32 {
@@ -3678,7 +3697,7 @@ mod tests {
             }
         )
         .is_ok());
-        // A crashed decoder is replaced for the next native tile.
+        // A decoder that exited while idle is replaced for the next native tile.
         let decoder = job.decoder.lock().unwrap().clone();
         if let Some(decoder) = &decoder {
             decoder.stop();
@@ -3697,6 +3716,27 @@ mod tests {
                 &decoder,
                 job.decoder.lock().unwrap().as_ref().unwrap()
             ));
+        }
+        // A decoder that crashes during a native tile is retried once.
+        #[cfg(unix)]
+        if job.decoder.lock().unwrap().is_some() {
+            let (crashing, work) = crate::decoder::tests::helper("pass");
+            let crashing = Arc::new(crashing);
+            *job.decoder.lock().unwrap() = Some(crashing.clone());
+            assert!(read_asset(
+                &job,
+                Asset::Tile {
+                    level: 12,
+                    x: 1,
+                    y: 0
+                }
+            )
+            .is_ok());
+            assert!(crashing.stopped());
+            let replacement = job.decoder.lock().unwrap().clone().unwrap();
+            assert!(!Arc::ptr_eq(&crashing, &replacement));
+            assert!(!replacement.stopped());
+            fs::remove_dir_all(work).unwrap();
         }
         backend.shutdown();
         drop(job);
