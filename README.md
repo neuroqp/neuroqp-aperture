@@ -16,12 +16,14 @@ Point type, color, and size buttons preview the current combination. The header'
 sun/moon button switches light and dark modes and remembers your choice; the
 initial theme follows the system.
 
-Nikon ND2 files can be browsed through the **Dimensions** toolbar button. Choose
-Position, Z, Time or Channel, then use the range, arrow buttons or mouse wheel over
-the control. Channel includes the composite and each named channel. This initial
-Rust reader supports unsigned 8/16-bit channels and single-channel RGB acquisitions;
-it loads one selected frame at a time. ND2 annotation editing, saving and scientific
-export are not implemented. See [ND2 support](docs/ND2.md) for limits and validation.
+Nikon ND2 and Zeiss CZI files can be browsed through the **Dimensions** toolbar
+button. Choose Position, Z, Time or Channel, then use the range, arrow buttons or
+mouse wheel over the control. Channel includes the composite and each named channel.
+These initial Rust readers support unsigned 8/16-bit channels and single-channel RGB
+acquisitions; they load one selected frame of up to 256 MiB at a time, so whole-slide
+CZI scans are not yet supported. Annotation editing, saving and scientific export are
+not implemented for these formats. See [ND2 support](docs/ND2.md) and
+[CZI support](docs/CZI.md) for limits and validation.
 
 ## Multiple windows and file opening
 
