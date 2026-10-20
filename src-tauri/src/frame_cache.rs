@@ -68,7 +68,7 @@ pub struct Geometry {
 
 struct Frame {
     raw: RawFrame,
-    _reservation: Reservation,
+    reservation: Reservation,
 }
 
 pub struct Cache {
@@ -172,10 +172,12 @@ impl Cache {
         if status.pressure {
             self.clear();
         } else {
-            while self.budget.status()?.used_bytes > status.limit_bytes {
-                if self.frames.pop_front().is_none() {
+            let mut excess = status.used_bytes.saturating_sub(status.limit_bytes);
+            while excess > 0 {
+                let Some((_, frame)) = self.frames.pop_front() else {
                     break;
-                }
+                };
+                excess = excess.saturating_sub(frame.reservation.bytes());
             }
         }
         Ok(())
@@ -219,10 +221,7 @@ impl Cache {
         self.check_source()?;
         let raw = decoded?;
         reservation.shrink(retained_frame_bytes(&raw))?;
-        Ok(Some(Frame {
-            raw,
-            _reservation: reservation,
-        }))
+        Ok(Some(Frame { raw, reservation }))
     }
 
     pub fn preload(&mut self, selection: Selection) -> bool {
@@ -653,7 +652,7 @@ mod tests {
         assert_eq!(cache.frames[0].1.raw.pixels, original);
         assert_eq!(cache.retained_bytes(), 8);
         assert_eq!(
-            cache.frames[0].1._reservation.bytes(),
+            cache.frames[0].1.reservation.bytes(),
             retained_frame_bytes(&cache.frames[0].1.raw)
         );
         assert!(cache.contains(first));

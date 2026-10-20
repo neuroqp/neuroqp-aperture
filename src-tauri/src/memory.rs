@@ -275,7 +275,6 @@ impl Budget {
 }
 
 impl Reservation {
-    #[cfg(test)]
     pub fn bytes(&self) -> u64 {
         self.bytes
     }
