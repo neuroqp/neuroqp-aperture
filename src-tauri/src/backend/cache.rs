@@ -292,6 +292,39 @@ pub(super) fn housekeeping(job: &Job) -> Result<(), String> {
     Ok(())
 }
 
+/// Publish finished work under the source cache key. Serialize promotion,
+/// eviction and cache selection: a replaced worker must never remove a cache
+/// selected by the next image job.
+pub(super) fn promote(job: &Job, dir: &Path, names: &[&str]) -> Result<(), String> {
+    let _access = job.cache_access.lock().unwrap();
+    if job.cancel.load(Ordering::Relaxed) {
+        return Err("Loading cancelled.".into());
+    }
+    let mut published = job.dir.lock().unwrap();
+    // Keep a job-local source alias and temp directory for on-demand native tiles.
+    let staging = job
+        .root
+        .join(format!("promote-{}", job.state.lock().unwrap().id));
+    fs::create_dir(&staging).map_err(|e| e.to_string())?;
+    for name in names {
+        let source = dir.join(name);
+        if source.exists() {
+            if *name == "preview.jpg" {
+                fs::hard_link(source, staging.join(name)).map_err(|e| e.to_string())?;
+            } else {
+                fs::rename(source, staging.join(name)).map_err(|e| e.to_string())?;
+            }
+        }
+    }
+    let complete = job.root.join(&job.cache_key);
+    if complete.exists() {
+        fs::remove_dir_all(&complete).map_err(|e| e.to_string())?;
+    }
+    fs::rename(staging, &complete).map_err(|e| e.to_string())?;
+    *published = complete;
+    Ok(())
+}
+
 pub(crate) fn tree_size(path: &Path) -> u64 {
     let Ok(entries) = fs::read_dir(path) else {
         return 0;

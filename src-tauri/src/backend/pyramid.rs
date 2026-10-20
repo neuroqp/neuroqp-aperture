@@ -1,6 +1,8 @@
 //! Display pyramid construction: header validation, previews and generated tiles.
 use super::{
-    cache::{cached_manifest, housekeeping, valid_cache_assets, valid_preview, write_manifest},
+    cache::{
+        cached_manifest, housekeeping, promote, valid_cache_assets, valid_preview, write_manifest,
+    },
     process::{decoded_workspace, input, run, run_with_progress, uses_worker, worker_call},
     Job, Phase,
 };
@@ -412,42 +414,18 @@ pub(crate) fn load(job: &Arc<Job>) -> Result<(), String> {
     write_manifest(job, &dir)?;
     fs::write(dir.join("complete"), b"v2").map_err(|e| e.to_string())?;
     fs::write(dir.join("access"), b"").map_err(|e| e.to_string())?;
-    // Serialize promotion/eviction/cache selection. A replaced worker must never
-    // remove a cache selected by the next image job.
-    let access = job.cache_access.lock().unwrap();
-    if job.cancel.load(Ordering::Relaxed) {
-        return Err("Loading cancelled.".into());
-    }
-    let mut published = job.dir.lock().unwrap();
-    // Keep a job-local source alias and temp directory for on-demand native tiles.
-    let staging = job
-        .root
-        .join(format!("promote-{}", job.state.lock().unwrap().id));
-    fs::create_dir(&staging).map_err(|e| e.to_string())?;
-    for name in [
-        "preview.jpg",
-        "manifest.json",
-        "complete",
-        "access",
-        "tiles_files",
-        "tiles.dzi",
-    ] {
-        let source = dir.join(name);
-        if source.exists() {
-            if name == "preview.jpg" {
-                fs::hard_link(source, staging.join(name)).map_err(|e| e.to_string())?;
-            } else {
-                fs::rename(source, staging.join(name)).map_err(|e| e.to_string())?;
-            }
-        }
-    }
-    if complete.exists() {
-        fs::remove_dir_all(&complete).map_err(|e| e.to_string())?;
-    }
-    fs::rename(staging, &complete).map_err(|e| e.to_string())?;
-    *published = complete;
-    drop(published);
-    drop(access);
+    promote(
+        job,
+        &dir,
+        &[
+            "preview.jpg",
+            "manifest.json",
+            "complete",
+            "access",
+            "tiles_files",
+            "tiles.dzi",
+        ],
+    )?;
     job.update(|s| {
         s.phase = Phase::Ready;
         s.progress = Some(1.0);
@@ -525,7 +503,6 @@ fn load_channels(job: &Arc<Job>, width: u32, height: u32, ushort: bool) -> Resul
     };
     let planes = job.planes.lock().unwrap().clone();
     let native = !job.native.lock().unwrap().is_empty();
-    let complete = job.root.join(&job.cache_key);
     let dir = job.dir.lock().unwrap().clone();
     let level = {
         let levels = job.native.lock().unwrap();
@@ -677,25 +654,7 @@ fn load_channels(job: &Arc<Job>, width: u32, height: u32, ushort: bool) -> Resul
     };
     fs::write(dir.join(marker), b"channels-v1").map_err(|e| e.to_string())?;
     fs::write(dir.join("access"), b"").map_err(|e| e.to_string())?;
-    let access = job.cache_access.lock().unwrap();
-    if job.cancel.load(Ordering::Relaxed) {
-        return Err("Loading cancelled.".into());
-    }
-    let mut published = job.dir.lock().unwrap();
-    let staging = job
-        .root
-        .join(format!("promote-{}", job.state.lock().unwrap().id));
-    fs::create_dir(&staging).map_err(|e| e.to_string())?;
-    for name in ["channels", "manifest.json", marker, "access"] {
-        fs::rename(dir.join(name), staging.join(name)).map_err(|e| e.to_string())?;
-    }
-    if complete.exists() {
-        fs::remove_dir_all(&complete).map_err(|e| e.to_string())?;
-    }
-    fs::rename(staging, &complete).map_err(|e| e.to_string())?;
-    *published = complete;
-    drop(published);
-    drop(access);
+    promote(job, &dir, &["channels", "manifest.json", marker, "access"])?;
     job.update(|state| {
         state.phase = Phase::Ready;
         state.tiles_ready = !job.preview_only;
