@@ -183,11 +183,10 @@ pub fn stage_save(
 ) -> Result<tiff_annotations::StagedSave, String> {
     let source_is_tiff = is_tiff(source)?;
     check_target(source, target, source_is_tiff, overwrite)?;
+    let (active, overlays) = edited_metadata(basis, rois)?;
     if source_is_tiff {
-        let (active, overlays) = edited_metadata(basis, rois)?;
         return tiff_annotations::stage_copy(source, target, active, overlays, overwrite);
     }
-    let (active, overlays) = edited_metadata(basis, rois)?;
     let source = fs::canonicalize(source).map_err(|e| e.to_string())?;
     let extension = source
         .extension()
@@ -197,19 +196,19 @@ pub fn stage_save(
     if !matches!(extension.as_str(), "jpg" | "jpeg" | "png" | "bmp" | "webp") {
         return Err("Unsupported image format for annotated TIFF conversion".into());
     }
-    #[cfg(unix)]
-    let parent = target
-        .parent()
-        .filter(|p| !p.as_os_str().is_empty())
-        .unwrap_or(Path::new("."));
     let stamp = SystemTime::now()
         .duration_since(UNIX_EPOCH)
         .map_err(|e| e.to_string())?
         .as_nanos();
-    #[cfg(unix)]
-    let temp_parent = parent.to_path_buf();
-    #[cfg(windows)]
-    let temp_parent = std::env::temp_dir();
+    let temp_parent = if cfg!(windows) {
+        std::env::temp_dir()
+    } else {
+        target
+            .parent()
+            .filter(|p| !p.as_os_str().is_empty())
+            .unwrap_or(Path::new("."))
+            .to_path_buf()
+    };
     let temp = temp_parent.join(format!(".aperture-convert-{}-{stamp}", std::process::id()));
     fs::create_dir(&temp).map_err(|e| e.to_string())?;
     let result = (|| {
