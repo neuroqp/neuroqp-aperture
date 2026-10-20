@@ -410,6 +410,7 @@ pub(crate) fn load(job: &Arc<Job>) -> Result<(), String> {
             "tiles_files",
             "tiles.dzi",
         ],
+        false,
     )?;
     job.update(|s| {
         s.phase = Phase::Ready;
@@ -629,7 +630,12 @@ fn load_channels(job: &Arc<Job>, width: u32, height: u32, ushort: bool) -> Resul
     };
     fs::write(dir.join(marker), b"channels-v1").map_err(|e| e.to_string())?;
     fs::write(dir.join("access"), b"").map_err(|e| e.to_string())?;
-    promote(job, &dir, &["channels", "manifest.json", marker, "access"])?;
+    promote(
+        job,
+        &dir,
+        &["channels", "manifest.json", marker, "access"],
+        true,
+    )?;
     job.update(|state| {
         state.phase = Phase::Ready;
         state.tiles_ready = !job.preview_only;

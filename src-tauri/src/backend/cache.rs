@@ -295,7 +295,9 @@ pub(super) fn housekeeping(job: &Job) -> Result<(), String> {
 /// Publish finished work under the source cache key. Serialize promotion,
 /// eviction and cache selection: a replaced worker must never remove a cache
 /// selected by the next image job.
-pub(super) fn promote(job: &Job, dir: &Path, names: &[&str]) -> Result<(), String> {
+/// Publish `names` from `dir` as the job's complete cache. With `required`, a
+/// missing name fails promotion instead of being skipped.
+pub(super) fn promote(job: &Job, dir: &Path, names: &[&str], required: bool) -> Result<(), String> {
     let _access = job.cache_access.lock().unwrap();
     if job.cancel.load(Ordering::Relaxed) {
         return Err("Loading cancelled.".into());
@@ -308,7 +310,7 @@ pub(super) fn promote(job: &Job, dir: &Path, names: &[&str]) -> Result<(), Strin
     fs::create_dir(&staging).map_err(|e| e.to_string())?;
     for name in names {
         let source = dir.join(name);
-        if source.exists() {
+        if required || source.exists() {
             if *name == "preview.jpg" {
                 fs::hard_link(source, staging.join(name)).map_err(|e| e.to_string())?;
             } else {
