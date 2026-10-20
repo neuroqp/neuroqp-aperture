@@ -294,19 +294,7 @@ impl Backend {
             if browser.is_none() {
                 // Two 32-channel overview sets during replacement and a 32 MiB
                 // tile-cache allowance. Browser/runtime overhead and GPU differ.
-                let amount = 96 * 1024 * 1024;
-                let mut reservation = self.memory.try_reserve(amount, false)?;
-                if reservation.is_none() {
-                    self.memory.request_reclaim()?;
-                    for _ in 0..80 {
-                        thread::sleep(Duration::from_millis(25));
-                        reservation = self.memory.try_reserve(amount, false)?;
-                        if reservation.is_some() {
-                            break;
-                        }
-                    }
-                }
-                *browser = Some(reservation.ok_or("Image display does not fit the shared memory budget. Close another image window or increase the limit in Settings.")?);
+                *browser = Some(self.memory.require(96 * 1024 * 1024, "Image display does not fit the shared memory budget. Close another image window or increase the limit in Settings.")?);
             }
         }
         let acquisition = if let Some(format) = crate::frames::Format::from_path(path) {
@@ -2155,19 +2143,8 @@ fn reserve_workspace(job: &Job, bytes: u64) -> Result<crate::memory::Reservation
     let reservation = if let Some(acquisition) = &job.acquisition {
         acquisition.reserve_workspace(bytes, job.background)?
     } else {
-        let mut reservation = job.memory.try_reserve(bytes, job.background)?;
-        if reservation.is_none() && !job.background && bytes <= job.memory.status()?.limit_bytes {
-            job.memory.request_reclaim()?;
-            let deadline = Instant::now() + Duration::from_secs(2);
-            while reservation.is_none() && Instant::now() < deadline {
-                if job.cancel.load(Ordering::Relaxed) {
-                    return Err("Loading cancelled.".into());
-                }
-                thread::sleep(Duration::from_millis(25));
-                reservation = job.memory.try_reserve(bytes, false)?;
-            }
-        }
-        reservation
+        job.memory
+            .reserve(bytes, job.background, Some(&job.cancel))?
     };
     if job.cancel.load(Ordering::Relaxed) {
         return Err("Loading cancelled.".into());

@@ -7,12 +7,20 @@ use std::{
     fs::{self, File, OpenOptions, TryLockError},
     io::{self, Read, Seek, SeekFrom, Write},
     path::{Path, PathBuf},
-    sync::Arc,
+    sync::{
+        atomic::{AtomicBool, Ordering},
+        Arc,
+    },
+    thread,
+    time::{Duration, Instant},
 };
 
 pub const DEFAULT_LIMIT_BYTES: u64 = 4 * 1024 * 1024 * 1024;
 pub const MIN_LIMIT_BYTES: u64 = 256 * 1024 * 1024;
 pub const MAX_LIMIT_BYTES: u64 = 256 * 1024 * 1024 * 1024;
+/// How long foreground admission waits for other processes to reclaim caches.
+const RECLAIM_WAIT: Duration = Duration::from_secs(2);
+const RECLAIM_POLL: Duration = Duration::from_millis(25);
 
 pub struct Budget {
     directory: PathBuf,
@@ -35,7 +43,13 @@ pub struct Reservation {
     _lease: File,
 }
 
-type Snapshot = (MemoryStatus, Option<(u64, File)>, u64);
+struct Snapshot {
+    status: MemoryStatus,
+    free: Option<(u64, File)>,
+    next: u64,
+    /// Available physical memory, when the platform reports it.
+    physical: Option<u64>,
+}
 
 impl Budget {
     /// `root` must be the global application cache root, not an instance's cache.
@@ -59,7 +73,7 @@ impl Budget {
     pub fn status(&self) -> Result<MemoryStatus, String> {
         let _gate = self.gate().map_err(message)?;
         self.snapshot()
-            .map(|(status, _, _)| status)
+            .map(|snapshot| snapshot.status)
             .map_err(message)
     }
 
@@ -101,7 +115,7 @@ impl Budget {
             .and_then(|file| file.sync_all())
             .map_err(message)?;
         self.snapshot()
-            .map(|(status, _, _)| status)
+            .map(|snapshot| snapshot.status)
             .map_err(message)
     }
 
@@ -113,12 +127,16 @@ impl Budget {
         background: bool,
     ) -> Result<Option<Reservation>, String> {
         let _gate = self.gate().map_err(message)?;
-        let (status, free, next) = self.snapshot().map_err(message)?;
+        let Snapshot {
+            status,
+            free,
+            next,
+            physical,
+        } = self.snapshot().map_err(message)?;
         if status.used_bytes > status.limit_bytes
             || bytes > status.available_bytes
             || (background && status.preloading_paused)
-            || pressure_sample()
-                .is_some_and(|(_, available)| !physical_headroom_allows(bytes, available))
+            || physical.is_some_and(|available| !physical_headroom_allows(bytes, available))
         {
             return Ok(None);
         }
@@ -138,6 +156,38 @@ impl Budget {
             bytes,
             _lease: lease,
         }))
+    }
+
+    /// Like `try_reserve`, but foreground admission that fits the limit asks
+    /// other processes to reclaim optional caches and retries for `RECLAIM_WAIT`.
+    /// Setting `cancel` stops waiting early.
+    pub fn reserve(
+        self: &Arc<Self>,
+        bytes: u64,
+        background: bool,
+        cancel: Option<&AtomicBool>,
+    ) -> Result<Option<Reservation>, String> {
+        if let Some(reservation) = self.try_reserve(bytes, background)? {
+            return Ok(Some(reservation));
+        }
+        if background || bytes > self.status()?.limit_bytes {
+            return Ok(None);
+        }
+        self.request_reclaim()?;
+        let deadline = Instant::now() + RECLAIM_WAIT;
+        while Instant::now() < deadline && !cancel.is_some_and(|c| c.load(Ordering::Relaxed)) {
+            thread::sleep(RECLAIM_POLL);
+            if let Some(reservation) = self.try_reserve(bytes, false)? {
+                return Ok(Some(reservation));
+            }
+        }
+        Ok(None)
+    }
+
+    /// Foreground `reserve` that reports `error` when admission fails.
+    pub fn require(self: &Arc<Self>, bytes: u64, error: &str) -> Result<Reservation, String> {
+        self.reserve(bytes, false, None)?
+            .ok_or_else(|| error.into())
     }
 
     fn gate(&self) -> io::Result<File> {
@@ -202,14 +252,15 @@ impl Budget {
             Err(error) if error.kind() == io::ErrorKind::NotFound => false,
             Err(error) => return Err(error),
         };
-        let pressure = pressure_sample()
+        let sample = pressure_sample();
+        let pressure = sample
             .map(|(total, available)| pressure_paused(was_paused, total, available))
             .unwrap_or(was_paused);
         if pressure != was_paused {
             fs::write(pressure_path, if pressure { b"1" } else { b"0" })?;
         }
-        Ok((
-            MemoryStatus {
+        Ok(Snapshot {
+            status: MemoryStatus {
                 limit_bytes: limit,
                 used_bytes: used,
                 available_bytes: limit.saturating_sub(used),
@@ -218,7 +269,8 @@ impl Budget {
             },
             free,
             next,
-        ))
+            physical: sample.map(|(_, available)| available),
+        })
     }
 }
 

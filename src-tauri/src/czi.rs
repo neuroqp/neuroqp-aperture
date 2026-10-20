@@ -1,6 +1,6 @@
 //! Zeiss CZI checks before the pinned reader allocates, and CZI decode accounting.
 
-use crate::frame_cache::{reserve_after_reclaim, CheckedSource, FRAME_OVERHEAD, MIB};
+use crate::frame_cache::{CheckedSource, FRAME_OVERHEAD, MIB};
 use crate::frames::MAX_FRAME_BYTES;
 use crate::memory::{Budget, Reservation};
 use openreadout_core::ImageInfo;
@@ -64,14 +64,18 @@ impl Plan {
         let plan = scan(&source.stable_path(), budget)?;
         source.check().map_err(|e| e.to_string())?;
         let strings = {
-            let _parser = reserve_after_reclaim(budget, plan.xml.1 * 32 + 8 * MIB, false)?
-                .ok_or("CZI metadata parsing does not fit the application memory budget.")?;
+            let _parser = budget.require(
+                plan.xml.1 * 32 + 8 * MIB,
+                "CZI metadata parsing does not fit the application memory budget.",
+            )?;
             let strings = xml_strings(&source.stable_path(), plan.xml)?;
             source.check().map_err(|e| e.to_string())?;
             strings
         };
-        let metadata = reserve_after_reclaim(budget, plan.opening_bytes(strings), false)?
-            .ok_or("CZI metadata parsing does not fit the application memory budget.")?;
+        let metadata = budget.require(
+            plan.opening_bytes(strings),
+            "CZI metadata parsing does not fit the application memory budget.",
+        )?;
         Ok((plan, metadata))
     }
 
@@ -352,8 +356,10 @@ fn scan(path: &Path, budget: &Arc<Budget>) -> Result<Plan, String> {
         return Err("CZI subblock directory exceeds the 128 MiB input limit.".into());
     }
     // Plane counts grow with directory entries, each at least 32 bytes on disk.
-    let _planes = reserve_after_reclaim(budget, directory_bytes * 2 + MIB, false)?
-        .ok_or("CZI directory validation does not fit the application memory budget.")?;
+    let _planes = budget.require(
+        directory_bytes * 2 + MIB,
+        "CZI directory validation does not fit the application memory budget.",
+    )?;
     let mut directory = BufReader::new(File::open(path).map_err(error)?);
     directory
         .seek(SeekFrom::Start(directory_position + SEGMENT_HEADER_LEN))
@@ -630,7 +636,8 @@ fn scan(path: &Path, budget: &Arc<Budget>) -> Result<Plan, String> {
                 if kind == "CZTIMS" {
                     time_stamp_bytes += size;
                 } else if fits(position + SEGMENT_HEADER_LEN + 256, size) {
-                    let _payload = reserve_after_reclaim(budget, size, false)?.ok_or(
+                    let _payload = budget.require(
+                        size,
                         "CZI event list validation does not fit the application memory budget.",
                     )?;
                     let mut payload = vec![0; size as usize];

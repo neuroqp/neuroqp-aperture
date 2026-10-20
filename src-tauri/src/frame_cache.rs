@@ -182,15 +182,13 @@ impl Cache {
     }
 
     pub fn reserve(&mut self, bytes: u64, background: bool) -> Result<Option<Reservation>, String> {
-        loop {
+        while !self.frames.is_empty() {
             if let Some(reservation) = self.budget.try_reserve(bytes, background)? {
                 return Ok(Some(reservation));
             }
-            if self.frames.pop_front().is_none() {
-                break;
-            }
+            self.frames.pop_front();
         }
-        reserve_after_reclaim(&self.budget, bytes, background)
+        self.budget.reserve(bytes, background, None)
     }
 
     fn load(
@@ -518,27 +516,6 @@ fn summary_bytes(images: &[ImageInfo], capacity: usize) -> u64 {
         }
     }
     bytes
-}
-
-pub(crate) fn reserve_after_reclaim(
-    budget: &Arc<Budget>,
-    bytes: u64,
-    background: bool,
-) -> Result<Option<Reservation>, String> {
-    if let Some(reservation) = budget.try_reserve(bytes, background)? {
-        return Ok(Some(reservation));
-    }
-    if !background && bytes <= budget.status()?.limit_bytes {
-        budget.request_reclaim()?;
-        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(2);
-        while std::time::Instant::now() < deadline {
-            if let Some(reservation) = budget.try_reserve(bytes, false)? {
-                return Ok(Some(reservation));
-            }
-            std::thread::sleep(std::time::Duration::from_millis(25));
-        }
-    }
-    Ok(None)
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]

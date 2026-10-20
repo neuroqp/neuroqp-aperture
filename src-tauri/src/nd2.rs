@@ -1,7 +1,7 @@
 //! Nikon ND2 checks before the pinned reader allocates, and ND2 decode accounting.
 
 use crate::channels::MAX_CHANNELS;
-use crate::frame_cache::{reserve_after_reclaim, CheckedSource, FRAME_OVERHEAD, MIB};
+use crate::frame_cache::{CheckedSource, FRAME_OVERHEAD, MIB};
 #[cfg(test)]
 use crate::frames::{self, ExtractedFrame, Selection};
 use crate::frames::{frame_bytes as checked_frame_bytes, Format, MAX_FRAME_BYTES};
@@ -526,15 +526,19 @@ impl Plan {
         Bounds::scan(&source.stable_path())?;
         source.check().map_err(|e| e.to_string())?;
         let bounds = {
-            let _validation = reserve_after_reclaim(budget, 64 * MIB, false)?
-                .ok_or("ND2 metadata validation does not fit the application memory budget.")?;
+            let _validation = budget.require(
+                64 * MIB,
+                "ND2 metadata validation does not fit the application memory budget.",
+            )?;
             let bounds = Bounds::validated(&source.stable_path())?;
             source.check().map_err(|e| e.to_string())?;
             bounds
         };
         let preflight = {
-            let _parser = reserve_after_reclaim(budget, bounds.metadata_workspace, false)?
-                .ok_or("ND2 metadata parsing does not fit the application memory budget.")?;
+            let _parser = budget.require(
+                bounds.metadata_workspace,
+                "ND2 metadata parsing does not fit the application memory budget.",
+            )?;
             source.check().map_err(|e| e.to_string())?;
             preflight(&source.stable_path())?
         };
@@ -543,8 +547,10 @@ impl Plan {
         // for that opening peak before calling it, then retain only typed summaries.
         let opening_bytes = bounds.metadata_workspace
             + bounds.expanded_bytes * 128 * (u64::from(preflight.positions) + 1);
-        let metadata = reserve_after_reclaim(budget, opening_bytes, false)?
-            .ok_or("ND2 position metadata expansion does not fit the application memory budget.")?;
+        let metadata = budget.require(
+            opening_bytes,
+            "ND2 position metadata expansion does not fit the application memory budget.",
+        )?;
         Ok((
             Self {
                 bounds,
