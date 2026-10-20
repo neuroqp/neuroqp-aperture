@@ -364,7 +364,6 @@ fn scan(path: &Path, budget: &Arc<Budget>) -> Result<Plan, String> {
     let mut images = BTreeMap::new();
     let mut channel_spans = BTreeMap::new();
     let mut planes = HashMap::new();
-    let mut plane_maxima: Vec<u64> = Vec::new();
     for _ in 0..count {
         let mut raw = [0; 32];
         if consumed + 32 > directory_bytes {
@@ -576,8 +575,7 @@ fn scan(path: &Path, budget: &Arc<Budget>) -> Result<Plan, String> {
                 ))
                 .or_insert(0u64);
             *count += 1;
-            plane_maxima.resize(plane_maxima.len().max(tiles.ordinal + 1), 0);
-            plane_maxima[tiles.ordinal] = plane_maxima[tiles.ordinal].max(*count);
+            tiles.plane_tiles = tiles.plane_tiles.max(*count);
         }
         tiles.min_output_bytes = tiles.min_output_bytes.min(output);
         tiles.max_workspace = tiles.max_workspace.max(data_bytes + mask + copies);
@@ -693,7 +691,7 @@ fn scan(path: &Path, budget: &Arc<Budget>) -> Result<Plan, String> {
         images: images
             .into_values()
             .map(|tiles| Tiles {
-                plane_tiles: plane_maxima.get(tiles.ordinal).copied().unwrap_or(0) + tiles.spanning,
+                plane_tiles: tiles.plane_tiles + tiles.spanning,
                 ..tiles
             })
             .collect(),
