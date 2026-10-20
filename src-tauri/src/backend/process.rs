@@ -7,7 +7,8 @@ use std::{
     ffi::OsString,
     fs::{self, File},
     io::Read,
-    process::Stdio,
+    path::PathBuf,
+    process::{Child, Stdio},
     sync::{atomic::Ordering, Arc, Mutex},
     thread,
     time::{Duration, Instant},
@@ -87,10 +88,15 @@ pub(super) fn run_with_progress(
     let _memory = reserve_workspace(job, bytes)?;
     let dir = job.work.clone();
     let number = job.process_number.fetch_add(1, Ordering::Relaxed);
-    let stdout_path = dir.join(format!("stdout-{number}"));
-    let stderr_path = dir.join(format!("stderr-{number}"));
-    let stdout = File::create(&stdout_path).map_err(|e| e.to_string())?;
-    let stderr = File::create(&stderr_path).map_err(|e| e.to_string())?;
+    let mut tool = Tool {
+        job,
+        number,
+        process: None,
+        stdout: dir.join(format!("stdout-{number}")),
+        stderr: dir.join(format!("stderr-{number}")),
+    };
+    let stdout = File::create(&tool.stdout).map_err(|e| e.to_string())?;
+    let stderr = File::create(&tool.stderr).map_err(|e| e.to_string())?;
     let mut command = crate::platform::tool(program);
     let threads = crate::vips_worker::VIPS_THREADS.to_string();
     command
@@ -110,62 +116,40 @@ pub(super) fn run_with_progress(
         let child = command.stdout(Stdio::from(stdout)).stderr(Stdio::from(stderr)).spawn().map_err(|e| format!("Cannot run {program}: {e}. Install libvips tools (and libtiff tools for existing page pyramids)."))?;
         let process = Arc::new(Mutex::new(child));
         processes.insert(number, process.clone());
+        tool.process = Some(process.clone());
         process
     };
     let status = loop {
         if job.cancel.load(Ordering::Relaxed) {
-            let mut child = process.lock().unwrap();
-            let _ = child.kill();
-            let _ = child.wait();
-            drop(child);
-            job.processes.lock().unwrap().remove(&number);
-            let _ = fs::remove_file(stdout_path);
-            let _ = fs::remove_file(stderr_path);
             return Err("Loading cancelled.".into());
         }
         let status = process.lock().unwrap().try_wait();
         match status {
             Ok(Some(status)) => break status,
             Ok(None) => (),
-            Err(error) => {
-                let mut child = process.lock().unwrap();
-                let _ = child.kill();
-                let _ = child.wait();
-                drop(child);
-                job.processes.lock().unwrap().remove(&number);
-                return Err(error.to_string());
-            }
+            Err(error) => return Err(error.to_string()),
         }
         if budget_exceeded(job, false) {
-            let mut child = process.lock().unwrap();
-            let _ = child.kill();
-            let _ = child.wait();
-            drop(child);
-            job.processes.lock().unwrap().remove(&number);
-            let _ = fs::remove_file(&stdout_path);
-            let _ = fs::remove_file(&stderr_path);
             return Err("The 2 GiB display cache limit was reached. This image needs more temporary disk space than this proof of concept allows.".into());
         }
         thread::sleep(Duration::from_millis(2));
     };
-    job.processes.lock().unwrap().remove(&number);
     if job.cancel.load(Ordering::Relaxed) {
         return Err("Loading cancelled.".into());
     }
     let mut output = String::new();
-    File::open(&stdout_path)
+    File::open(&tool.stdout)
         .map_err(|e| e.to_string())?
         .take(65536)
         .read_to_string(&mut output)
         .map_err(|e| e.to_string())?;
     if !status.success() {
         eprintln!("{program} exited with {status}:");
-        if let Ok(mut errors) = File::open(&stderr_path) {
+        if let Ok(mut errors) = File::open(&tool.stderr) {
             let _ = std::io::copy(&mut errors, &mut std::io::stderr().lock());
         }
     }
-    let _ = fs::remove_file(stdout_path);
-    let _ = fs::remove_file(stderr_path);
+    drop(tool);
     if budget_exceeded(job, program == "vips") {
         return Err("Display cache limit reached.".into());
     }
@@ -173,6 +157,30 @@ pub(super) fn run_with_progress(
         Ok(output)
     } else {
         Err("Could not read this image. It may be damaged or use an unsupported format.".into())
+    }
+}
+
+/// A direct tool is killed, reaped and deregistered on every return path, and
+/// its captured output files are removed.
+struct Tool<'a> {
+    job: &'a Job,
+    number: u64,
+    process: Option<Arc<Mutex<Child>>>,
+    stdout: PathBuf,
+    stderr: PathBuf,
+}
+
+impl Drop for Tool<'_> {
+    fn drop(&mut self) {
+        if let Some(process) = &self.process {
+            let mut child = process.lock().unwrap();
+            let _ = child.kill();
+            let _ = child.wait();
+            drop(child);
+            self.job.processes.lock().unwrap().remove(&self.number);
+        }
+        let _ = fs::remove_file(&self.stdout);
+        let _ = fs::remove_file(&self.stderr);
     }
 }
 
@@ -373,6 +381,20 @@ mod tests {
         assert_eq!(backend.memory.status().unwrap().used_bytes, bytes);
         drop(reservation);
         assert_eq!(backend.memory.status().unwrap().used_bytes, 0);
+        backend.shutdown();
+        drop((job, backend));
+        fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn failed_direct_tool_spawn_removes_its_output_files() {
+        let (root, backend, job) = workspace_fixture();
+        let error = run(&job, "aperture-missing-tool", &[]).unwrap_err();
+        assert!(error.starts_with("Cannot run"), "{error}");
+        assert!(fs::read_dir(&job.work)
+            .unwrap()
+            .flatten()
+            .all(|entry| !entry.file_name().to_string_lossy().starts_with("std")));
         backend.shutdown();
         drop((job, backend));
         fs::remove_dir_all(root).unwrap();
