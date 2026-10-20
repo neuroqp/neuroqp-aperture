@@ -172,16 +172,13 @@ export class PlaneNavigation {
     ) {
       const selected = this.selection;
       const projection = this.projection;
-      const args = [
+      const applied = await this.apply(
         selected.position,
         selected.z,
         selected.time,
         this.hint,
-      ] as const;
-      const applied = await (projection !== "none" ||
-      projection !== this.confirmedProjection
-        ? this.apply(...args, projection)
-        : this.apply(...args));
+        projection,
+      );
       if (generation !== this.generation) return;
       if (!applied) {
         this.selection = this.confirmed;
@@ -335,21 +332,10 @@ export class ImageLoader {
     projection?: ProjectionMode,
   ) {
     const previous = this.state;
-    if (!previous?.dimensions || !this.commands.selectPlane) return false;
+    const selectPlane = this.commands.selectPlane;
+    if (!previous?.dimensions || !selectPlane) return false;
     return this.request(
-      () =>
-        projection !== undefined
-          ? this.commands.selectPlane!(
-              previous.id,
-              position,
-              z,
-              time,
-              hint,
-              projection,
-            )
-          : hint
-            ? this.commands.selectPlane!(previous.id, position, z, time, hint)
-            : this.commands.selectPlane!(previous.id, position, z, time),
+      () => selectPlane(previous.id, position, z, time, hint, projection),
       previous,
     );
   }

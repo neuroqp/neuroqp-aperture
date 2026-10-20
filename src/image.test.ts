@@ -433,8 +433,8 @@ test("plane selection restores current frame after rejection and ignores stale r
   oldPlane.resolve({ ...state("stale-plane"), dimensions });
   await navigating;
   assert.deepEqual(calls, [
-    ["nd2", 0, 1, 0],
-    ["nd2", 1, 2, 1],
+    ["nd2", 0, 1, 0, undefined, undefined],
+    ["nd2", 1, 2, 1, undefined, undefined],
   ]);
   assert.deepEqual(seen, ["nd2", "nd2", "replacement"]);
   loader.dispose();
@@ -605,15 +605,17 @@ test("continuous dimension input coalesces coordinates and waits for each new na
   navigation.select("position", 1);
   navigation.select("time", 2);
   assert.deepEqual(navigation.selection, { position: 1, z: 3, time: 2 });
-  assert.deepEqual(calls, [["initial", 0, 1, 0, { axis: "z", direction: 1 }]]);
+  assert.deepEqual(calls, [
+    ["initial", 0, 1, 0, { axis: "z", direction: 1 }, "none"],
+  ]);
   first.resolve({
     ...state("first"),
     dimensions: { ...dimensions, zIndex: 1 },
   });
   await delay(0);
   assert.deepEqual(calls, [
-    ["initial", 0, 1, 0, { axis: "z", direction: 1 }],
-    ["first", 1, 3, 2, { axis: "time", direction: 1 }],
+    ["initial", 0, 1, 0, { axis: "z", direction: 1 }, "none"],
+    ["first", 1, 3, 2, { axis: "time", direction: 1 }, "none"],
   ]);
   last.resolve({
     ...state("last"),
@@ -641,15 +643,15 @@ test("dimension queue restores confirmed coordinates on failure and clears inten
   navigation.setPlane({ position: 0, z: 0, time: 0 });
   pending.resolve(true);
   await delay(0);
-  assert.deepEqual(calls, [[0, 1, 0, { axis: "z", direction: 1 }]]);
+  assert.deepEqual(calls, [[0, 1, 0, { axis: "z", direction: 1 }, "none"]]);
   assert.deepEqual(navigation.selection, { position: 0, z: 0, time: 0 });
   navigation.select("z", 3);
   navigation.select("time", 1);
   await delay(0);
   assert.deepEqual(navigation.selection, { position: 0, z: 0, time: 0 });
   assert.deepEqual(calls, [
-    [0, 1, 0, { axis: "z", direction: 1 }],
-    [0, 3, 0, { axis: "z", direction: 1 }],
+    [0, 1, 0, { axis: "z", direction: 1 }, "none"],
+    [0, 3, 0, { axis: "z", direction: 1 }, "none"],
   ]);
 });
 
@@ -670,8 +672,8 @@ test("plane preloading follows the latest axis and direction while input is coal
   pending.resolve(true);
   await delay(0);
   assert.deepEqual(calls, [
-    [2, 3, 3, { axis: "z", direction: -1 }],
-    [2, 3, 4, { axis: "time", direction: -1 }],
+    [2, 3, 3, { axis: "z", direction: -1 }, "none"],
+    [2, 3, 4, { axis: "time", direction: -1 }, "none"],
   ]);
 });
 
@@ -785,7 +787,7 @@ test("projected axes show maximum extents while position, channel and the other 
   );
 });
 
-test("image loader forwards explicit projection changes and preserves omission for ordinary navigation", async () => {
+test("image loader forwards plane, hint and projection arguments to the native command", async () => {
   const calls: unknown[] = [];
   const image: ImageState = {
     ...state("nd2"),
@@ -820,7 +822,7 @@ test("image loader forwards explicit projection changes and preserves omission f
   await loader.selectPlane(1, 0, 2);
   await loader.selectPlane(1, 0, 2, undefined, "none");
   assert.deepEqual(calls, [
-    ["nd2", 1, 0, 2],
+    ["nd2", 1, 0, 2, undefined, undefined],
     ["1", 1, 0, 2, undefined, "none"],
   ]);
   loader.dispose();
