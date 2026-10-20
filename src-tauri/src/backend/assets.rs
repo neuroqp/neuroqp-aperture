@@ -3,7 +3,7 @@ use super::{
     cache::{tree_size, CACHE_LIMIT},
     process::{input, run},
     pyramid::{extract_plane, field},
-    Job,
+    Backend, Job,
 };
 use std::{
     ffi::OsString,
@@ -12,6 +12,7 @@ use std::{
     thread,
     time::Duration,
 };
+use tauri::Manager;
 
 const TILE_SIZE: u32 = 256;
 
@@ -236,7 +237,7 @@ pub(crate) enum Asset {
     },
 }
 
-pub(crate) fn asset(path: &str, id: &str, width: u32, height: u32) -> Option<Asset> {
+fn asset(path: &str, id: &str, width: u32, height: u32) -> Option<Asset> {
     let parts: Vec<_> = path.trim_start_matches('/').split('/').collect();
     if parts.first().copied() != Some(id) {
         return None;
@@ -414,10 +415,106 @@ fn native_tile(job: &Job, level: u32, x: u32, y: u32) -> Result<Vec<u8>, String>
     fs::read(destination).map_err(|e| e.to_string())
 }
 
+/// Serve one aperture:// request from the current image off the WebView thread.
+pub(crate) fn respond(
+    app: tauri::AppHandle,
+    request: tauri::http::Request<Vec<u8>>,
+    responder: tauri::UriSchemeResponder,
+) {
+    let backend = app.state::<Backend>();
+    if backend.closing.load(Ordering::Relaxed) {
+        responder.respond(response(503, b"Viewer shutting down.".to_vec()));
+        return;
+    }
+    let path = request.uri().path().to_string();
+    let job = backend.current.lock().unwrap().clone();
+    let Some(job) = job else {
+        responder.respond(response(404, b"No image loaded.".to_vec()));
+        return;
+    };
+    let state = job.state.lock().unwrap().clone();
+    let asset = asset(&path, &state.id, state.width, state.height).or_else(|| {
+        state
+            .channel_mode
+            .then(|| {
+                channel_asset(
+                    &path,
+                    &state.id,
+                    state.width,
+                    state.height,
+                    state.channels.len(),
+                )
+            })
+            .flatten()
+    });
+    let Some(asset) = asset else {
+        responder.respond(response(404, b"Invalid image asset.".to_vec()));
+        return;
+    };
+    if backend.requests.fetch_add(1, Ordering::Relaxed) >= 16 {
+        backend.requests.fetch_sub(1, Ordering::Relaxed);
+        responder.respond(response(503, b"Too many image requests.".to_vec()));
+        return;
+    }
+    let slots = backend.tile_slots.clone();
+    tauri::async_runtime::spawn(async move {
+        // Preview delivery must not queue behind unfinished pyramid tiles.
+        let permit = if matches!(&asset, Asset::Preview | Asset::ChannelPreview { .. }) {
+            Ok(None)
+        } else {
+            job.tile_permit(slots).await.map(Some)
+        };
+        let result = match permit.as_ref() {
+            _ if job.cancel.load(Ordering::Relaxed) => {
+                Err((410, "Image replaced or cancelled.".into()))
+            }
+            Ok(_) => {
+                let active = job.clone();
+                tauri::async_runtime::spawn_blocking(move || read_asset(&active, asset))
+                    .await
+                    .unwrap_or_else(|e| Err((500, e.to_string())))
+            }
+            Err(error) => Err(error.clone()),
+        };
+        drop(permit);
+        app.state::<Backend>()
+            .requests
+            .fetch_sub(1, Ordering::Relaxed);
+        let result = if job.cancel.load(Ordering::Relaxed) {
+            Err((410, "Image replaced or cancelled.".into()))
+        } else {
+            result
+        };
+        match result {
+            Ok(bytes) => responder.respond(response(200, bytes)),
+            Err((status, error)) => responder.respond(response(status, error.into_bytes())),
+        }
+    });
+}
+
+fn response(status: u16, bytes: Vec<u8>) -> tauri::http::Response<Vec<u8>> {
+    tauri::http::Response::builder()
+        .status(status)
+        .header(
+            "Content-Type",
+            if status == 200 && bytes.starts_with(b"\x89PNG\r\n\x1a\n") {
+                "image/png"
+            } else if status == 200 {
+                "image/jpeg"
+            } else {
+                "text/plain; charset=utf-8"
+            },
+        )
+        .header("Access-Control-Allow-Origin", "*")
+        .header("Cache-Control", "no-store")
+        .body(bytes)
+        .unwrap()
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::backend::{pyramid::dimensions, tests::wait_ready, Backend, NEXT_ID};
+    use crate::backend::{pyramid::dimensions, tests::wait_ready, NEXT_ID};
     use std::{path::Path, process::Command};
 
     #[test]
