@@ -12,11 +12,14 @@ Open CZI through Open, folder navigation, or a filename on the command line. The
 Dimensions panel works as for [ND2](ND2.md): choose Position, Z, Time or Channel
 and use its range, previous/next buttons, keyboard arrows or mouse wheel.
 
-Each image the reader exposes becomes one Position, labelled with its scene name.
-Unnamed scenes are `Scene N`. Subblocks that differ along H, I, R, V or B (for
-example SIM phases) and super-resolved renderings are separate positions, named
-with their coordinates. All positions must share Z, time, channel count and pixel
-type; otherwise opening fails with an explicit error. XY size may differ between
+Each image the reader exposes becomes one Position, labelled with its scene name
+from the metadata. Unnamed scenes are `Scene <S index>` when a file has several
+scenes, and `Position 1` otherwise. Subblocks that differ along H, I, R, V or B
+(for example SIM phases) are separate positions named with their coordinates.
+Super-resolved renderings are also separate images, but they usually differ in
+channel count from the other images and are then rejected. All positions must
+share Z, time, channel count and pixel type; otherwise opening fails with an
+explicit error. XY size may differ between
 positions, as in multi-scene mosaics whose scenes differ by a few rows. Each frame
 keeps its own geometry and display cache. The viewport is retained in
 image-relative coordinates, so a differently sized scene shows the same relative
@@ -30,8 +33,10 @@ reader decodes uncompressed, LZW, Zstd (including HiLo), chunked, JPEG and
 JPEG XR subblocks.
 
 Explicitly rejected: float, int32, double and complex pixel types; mixed pixel
-types; multi-file documents; inconsistent scenes; files without an intact
-subblock directory; and JPEG-lossless or camera/system raw subblocks, which the
+types; multi-file documents and any subblock that references another file part;
+inconsistent scenes; files without an intact subblock directory; JPEG XR
+subblocks whose codestream geometry or pixel format disagrees with the directory;
+and JPEG-lossless or camera/system raw subblocks, which the
 reader does not decode. Only full-resolution level 0 is read; stored pyramid
 levels are not used. Airyscan fast-scan subblocks stored below their logical size
 are not upsampled by the reader.
@@ -60,27 +65,31 @@ preloading follows the same order as ND2. Cache keys include the source identity
 selected coordinates and a CZI-specific decoder version.
 
 A decoded selected frame is limited to 256 MiB. Larger stitched scenes, such as
-whole-slide scans, are rejected with an error that names the frame size. Region
-or pyramid-level streaming for those scenes is future work.
+whole-slide scans, are rejected with an error that names the frame size. Browsing
+starts at the first position, so a file whose first position is too large cannot
+be opened even if later positions fit. Region or pyramid-level streaming for
+those scenes is future work.
 
 Before the reader allocates, Aperture reads the file header and checks the
 metadata XML size, the intact subblock directory, every full-resolution subblock
-header, the attachment directory and the TimeStamps/EventList attachments the
-reader interprets. Together these are capped at 32 MiB. Encoded subblock payloads
-are limited to 257 MiB, decoded subblocks to 256 MiB and images to 4096. Opening
-reserves the reader's XML, directory and segment-header workspaces, including
-copies of time stamps and events in every image, then retains compact typed
-summaries.
+header and JPEG XR codestream header, the attachment directory, the
+TimeStamps/EventList attachments the reader interprets and every segment header.
+The XML, attachment directory and interpreted attachments are capped at 32 MiB
+together; the subblock directory has its own 128 MiB cap. Encoded subblock
+payloads are limited to 257 MiB, decoded subblocks to 256 MiB and images to 4096.
+Aperture parses the XML once under a reservation to measure its strings. Opening
+then reserves the reader's XML, directory and segment-header workspaces plus, for
+every image, copies of those strings, listed channels, time stamps and expanded
+event records, and afterwards retains compact typed summaries.
 
-Frame decoding reserves the reader's reopening workspace, one payload and
-subblock mask per rayon thread, the reader's decoded tile batch (up to its
-256 MiB output batch, with conversion copies and a larger allowance for JPEG) and
-both the reader's plane and the assembled frame. This bounds accounted image data
-and conservative workspaces, not total RSS. JPEG XR tiles decode without the
-directory geometry as an upper bound, so a malformed JPEG XR stream can exceed
-this allowance up to the codec's own 1 GiB cap. The reader is reopened for each
-decoded frame and re-reads segment headers, which costs latency on files with
-many subblocks.
+Frame decoding reserves the reader's reopening workspace and its tile batch for
+the selected scene: as many tiles as the reader decodes at once (the thread count,
+limited by its 256 MiB output batch and the scene's tile count), each with its
+payload, mask and decode copies (more for JPEG and JPEG XR), plus both the
+reader's plane and the assembled frame. This bounds accounted image data and
+conservative workspaces, not total RSS. The reader is reopened for each decoded
+frame and re-reads segment headers, which costs latency on files with many
+subblocks.
 
 CZI is read-only in this iteration. Annotation loading, editing and saving are
 disabled in the UI and rejected by the backend. Vendor ROIs, attachments, full
@@ -91,9 +100,11 @@ metadata inspection, CZI writing and scientific export remain separate work.
 Mandatory Rust tests write small CZI containers in memory. They check exact
 scene/Z/time/channel addressing, 16-bit display normalization, BGR24, BGR48 and
 BGRA32 sample order, two-tile stitching, Z projection, scenes of different width
-through the backend, unchanged source bytes, and rejection of float and mixed
-pixel types, inconsistent scenes, oversized frames, multi-file parts, oversized
-XML and missing directories.
+through the backend, unchanged source bytes, per-scene decode batches, JPEG XR
+header checks, per-image XML copy admission, and rejection of float and mixed
+pixel types, inconsistent scenes, oversized frames and first positions,
+multi-file parts, overflowing segments, oversized XML or directories and missing
+directories.
 
 The optional public-file check compares decoded samples against independent
 [czifile](https://github.com/cgohlke/czifile) reference values in

@@ -272,23 +272,27 @@ on Open, folder navigation or Close. Cancellation or save failure must retain un
   preloading and shared-budget path as ND2. CZI is browsing-only; annotation
   editing and saving are disabled in the UI and rejected by the backend.
 - Each reader image is one Position labelled with its scene name, including
-  H/I/R/V/B combinations and super-resolved renderings. Positions must share Z,
-  time, channel count and pixel type. XY size may differ; each frame keeps its own
+  H/I/R/V/B combinations; unnamed scenes use their S index, or `Position 1` for a
+  single scene. Positions must share Z, time, channel count and pixel type, which
+  usually excludes super-resolved renderings. XY size may differ; each frame keeps its own
   geometry and display cache, and the retained viewport is image-relative.
 - Support unsigned 8/16-bit scalar channels, up to 32, and one RGB acquisition
   channel stored as Bgr24, Bgr48 or Bgra32, shown in R,G,B order without alpha.
   Mosaic tiles are stitched on read. Preserve channel names/colors, physical
   X/Y/Z pixel sizes and the nominal time increment.
 - Reject float/int32/double/complex and mixed pixel types, inconsistent scenes,
-  multi-file documents and files without an intact subblock directory explicitly.
-  Keep the 256 MiB selected-frame limit; reject larger stitched scenes with an
-  error naming their size. Region or pyramid-level streaming is future work.
+  multi-file documents or part references and files without an intact subblock
+  directory explicitly. Keep the 256 MiB selected-frame limit; reject larger
+  stitched scenes with an error naming their size. Browsing starts at the first
+  position, which must fit. Region or pyramid-level streaming is future work.
 - Before the reader allocates, check the file header, metadata XML, subblock and
-  attachment directories, interpreted attachments and each full-resolution
-  subblock header. Cap that metadata at 32 MiB and encoded subblocks at 257 MiB.
-  Reserve the reader's opening workspace, including per-image metadata copies.
-  Frame decoding also reserves the reader's parallel decoded tile batch alongside
-  its plane and the assembled frame.
+  attachment directories, interpreted attachments, segment headers, each
+  full-resolution subblock header and each JPEG XR codestream header against its
+  directory entry. Cap XML and attachments at 32 MiB, the subblock directory at
+  128 MiB and encoded subblocks at 257 MiB. Reserve the reader's opening
+  workspace, including per-image copies of XML strings, channels, time stamps and
+  events. Frame decoding also reserves the reader's tile batch for the selected
+  scene alongside its plane and the assembled frame.
 - Validate pixel values, dimension mapping, stitching and RGB order with synthetic
   fixtures; compare public acquisitions against independent czifile values and
   check the native UI separately. See [CZI support](docs/CZI.md).
