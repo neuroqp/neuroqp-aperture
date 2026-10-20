@@ -72,8 +72,11 @@ those scenes is future work.
 
 Before the reader allocates, Aperture reads the file header and checks the
 metadata XML size, the intact subblock directory, every full-resolution subblock
-header and JPEG XR codestream header, the attachment directory, the
-TimeStamps/EventList attachments the reader interprets and every segment header.
+header and the entry embedded in it, which must agree with the directory, every
+JPEG XR codestream header, the attachment directory, the TimeStamps/EventList
+attachments the reader interprets and every segment header. Event lists are
+walked as the reader walks them, so overlapping descriptions are counted at their
+full expanded size.
 The XML, attachment directory and interpreted attachments are capped at 32 MiB
 together; the subblock directory has its own 128 MiB cap. Encoded subblock
 payloads are limited to 257 MiB, decoded subblocks to 256 MiB and images to 4096.
@@ -84,10 +87,15 @@ event records, and afterwards retains compact typed summaries.
 
 Frame decoding reserves the reader's reopening workspace and its tile batch for
 the selected scene: as many tiles as the reader decodes at once (the thread count,
-limited by its 256 MiB output batch and the scene's tile count), each with its
-payload, mask and decode copies (more for JPEG and JPEG XR), plus both the
-reader's plane and the assembled frame. This bounds accounted image data and
-conservative workspaces, not total RSS. The reader is reopened for each decoded
+limited by its 256 MiB output batch and the most subblocks one plane can use),
+each with its payload, mask and decode copies, plus both the reader's plane and
+the assembled frame. JPEG may decode up to four times its declared size. JPEG XR
+codestreams must declare the directory's tile size and sample layout, so their
+output is bounded; each JPEG XR tile also reserves the decoder's index table (at
+most 8 bytes per payload byte), per-tile-column entropy and quantizer state for
+the column count in its header, and macroblock-row workspace for up to 16
+internal channels. This bounds accounted image data and conservative workspaces,
+not total RSS. The reader is reopened for each decoded
 frame and re-reads segment headers, which costs latency on files with many
 subblocks.
 
@@ -100,8 +108,9 @@ metadata inspection, CZI writing and scientific export remain separate work.
 Mandatory Rust tests write small CZI containers in memory. They check exact
 scene/Z/time/channel addressing, 16-bit display normalization, BGR24, BGR48 and
 BGRA32 sample order, two-tile stitching, Z projection, scenes of different width
-through the backend, unchanged source bytes, per-scene decode batches, JPEG XR
-header checks, per-image XML copy admission, and rejection of float and mixed
+through the backend, unchanged source bytes, per-plane decode batches, payload
+offsets from embedded subblock entries, JPEG XR header and tile-column checks,
+per-image XML and overlapping event-description admission, and rejection of float and mixed
 pixel types, inconsistent scenes, oversized frames and first positions,
 multi-file parts, overflowing segments, oversized XML or directories and missing
 directories.

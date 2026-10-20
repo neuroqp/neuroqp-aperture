@@ -286,13 +286,14 @@ on Open, folder navigation or Close. Cancellation or save failure must retain un
   stitched scenes with an error naming their size. Browsing starts at the first
   position, which must fit. Region or pyramid-level streaming is future work.
 - Before the reader allocates, check the file header, metadata XML, subblock and
-  attachment directories, interpreted attachments, segment headers, each
-  full-resolution subblock header and each JPEG XR codestream header against its
-  directory entry. Cap XML and attachments at 32 MiB, the subblock directory at
+  attachment directories, interpreted attachments (walking event lists as the
+  reader does), segment headers, each full-resolution subblock header and embedded
+  entry, and each JPEG XR codestream header against its directory entry. Cap XML and attachments at 32 MiB, the subblock directory at
   128 MiB and encoded subblocks at 257 MiB. Reserve the reader's opening
   workspace, including per-image copies of XML strings, channels, time stamps and
-  events. Frame decoding also reserves the reader's tile batch for the selected
-  scene alongside its plane and the assembled frame.
+  events. Frame decoding also reserves the reader's per-plane tile batch for the
+  selected scene, including JPEG XR index tables and tile-column state, alongside
+  its plane and the assembled frame.
 - Validate pixel values, dimension mapping, stitching and RGB order with synthetic
   fixtures; compare public acquisitions against independent czifile values and
   check the native UI separately. See [CZI support](docs/CZI.md).
