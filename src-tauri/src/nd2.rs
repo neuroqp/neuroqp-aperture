@@ -2,16 +2,10 @@
 
 use crate::channels::MAX_CHANNELS;
 use crate::frame_cache::{u32_at, u64_at, CheckedSource, FRAME_OVERHEAD, MIB};
-#[cfg(test)]
-use crate::frames::{self, ExtractedFrame, Selection};
 use crate::frames::{frame_bytes as checked_frame_bytes, Format, MAX_ENCODED_FRAME_BYTES};
 use crate::memory::{Budget, Reservation};
 use crate::nd2_metadata;
-#[cfg(test)]
-use openreadout_core::{Dataset, FormatReader};
 use openreadout_core::{ImageInfo, SourceFile};
-#[cfg(test)]
-use openreadout_nd2::Nd2Reader;
 use openreadout_nd2::{meta::loops_from_lv, Attributes, LegacyFile, LoopKind, Nd2File};
 use std::fs::File;
 use std::io::{BufReader, Read, Seek, SeekFrom};
@@ -570,52 +564,41 @@ impl Plan {
 }
 
 #[cfg(test)]
-type Opened = (Box<dyn Dataset>, Vec<ImageInfo>, u64);
-
-#[cfg(test)]
-fn open(path: &Path) -> Result<Opened, String> {
-    let preflight = preflight(path)?;
-    let dataset = Nd2Reader.open(path).map_err(error)?;
-    let info = dataset.info().map_err(error)?;
-    if info.images.len() > MAX_POSITIONS as usize {
-        return Err("ND2 supports at most 4096 positions.".into());
-    }
-    Ok((dataset, info.images, preflight.storage_bytes))
-}
-
-#[cfg(test)]
-fn inspect(path: &Path, selection: Selection) -> Result<frames::Dimensions, String> {
-    let (_, images, _) = open(path)?;
-    Ok(frames::description(Format::Nd2, &images, selection)?.dimensions)
-}
-
-#[cfg(test)]
-pub fn extract(
-    input: &Path,
-    output: &Path,
-    selection: Selection,
-) -> Result<ExtractedFrame, String> {
-    extract_frame(input, output, selection, false)
-}
-
-#[cfg(test)]
-fn extract_frame(
-    input: &Path,
-    output: &Path,
-    selection: Selection,
-    display: bool,
-) -> Result<ExtractedFrame, String> {
-    let (mut dataset, images, _) = open(input)?;
-    let frame = frames::decode_frame(Format::Nd2, dataset.as_mut(), &images, selection)?;
-    drop(dataset);
-    let description = frames::description(Format::Nd2, &images, selection)?;
-    frames::write_frame(&frame, description, output, display, None)
-}
-
-#[cfg(test)]
 pub(crate) mod tests {
     use super::*;
     use crate::frames::tests::{strip, temporary};
+    use crate::frames::{self, ExtractedFrame, Selection};
+    use openreadout_core::{Dataset, FormatReader};
+    use openreadout_nd2::Nd2Reader;
+
+    type Opened = (Box<dyn Dataset>, Vec<ImageInfo>, u64);
+
+    fn open(path: &Path) -> Result<Opened, String> {
+        let preflight = preflight(path)?;
+        let dataset = Nd2Reader.open(path).map_err(error)?;
+        let info = dataset.info().map_err(error)?;
+        if info.images.len() > MAX_POSITIONS as usize {
+            return Err("ND2 supports at most 4096 positions.".into());
+        }
+        Ok((dataset, info.images, preflight.storage_bytes))
+    }
+
+    fn inspect(path: &Path, selection: Selection) -> Result<frames::Dimensions, String> {
+        let (_, images, _) = open(path)?;
+        Ok(frames::description(Format::Nd2, &images, selection)?.dimensions)
+    }
+
+    fn extract(
+        input: &Path,
+        output: &Path,
+        selection: Selection,
+    ) -> Result<ExtractedFrame, String> {
+        let (mut dataset, images, _) = open(input)?;
+        let frame = frames::decode_frame(Format::Nd2, dataset.as_mut(), &images, selection)?;
+        drop(dataset);
+        let description = frames::description(Format::Nd2, &images, selection)?;
+        frames::write_frame(&frame, description, output, false, None)
+    }
 
     pub(crate) fn synthetic(bits: u32, rgb: bool) -> Vec<u8> {
         fn number(key: &str, value: u32) -> String {
