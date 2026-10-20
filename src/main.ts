@@ -27,6 +27,7 @@ import { bindTools, toolPanels } from "./tools";
 import { bindTheme } from "./theme";
 import { bindSettings, settingsPanel } from "./settings";
 import { bindUpdates, updatePanel } from "./updates";
+import { bindWindowControls } from "./window-controls";
 import { channelHistograms, loadChannelHistograms } from "./display";
 import { bindColorPanel } from "./color-panel";
 import { bindDimensionNavigation } from "./dimension-navigation";
@@ -891,33 +892,6 @@ if (windowHandle) {
       }
     })
     .catch(showError);
-  for (const prefix of ["", "settings-"]) {
-    $(`${prefix}minimize-button`).addEventListener(
-      "click",
-      () => void windowHandle.minimize().catch(showError),
-    );
-    $(`${prefix}maximize-button`).addEventListener(
-      "click",
-      () => void windowHandle.toggleMaximize().catch(showError),
-    );
-    $(
-      prefix ? "settings-window-close-button" : "close-button",
-    ).addEventListener(
-      "click",
-      () => void windowHandle.close().catch(showError),
-    );
-  }
-  const syncMaximize = async () => {
-    const maximized = await windowHandle.isMaximized();
-    for (const id of ["maximize-button", "settings-maximize-button"]) {
-      const button = $(id);
-      button.innerHTML = icon(maximized ? "restore" : "maximize");
-      button.title = maximized ? "Restore" : "Maximize";
-      button.setAttribute("aria-label", button.title);
-    }
-  };
-  void syncMaximize().catch(showError);
-  void windowHandle.onResized(() => void syncMaximize().catch(showError));
   void windowHandle
     .onDragDropEvent((event) => {
       $("viewer").classList.toggle(
@@ -934,10 +908,8 @@ if (windowHandle) {
 } else {
   $<HTMLButtonElement>("open-button").disabled = true;
   $("open-button").title = "Open images in the desktop app";
-  document
-    .querySelectorAll<HTMLButtonElement>(".window-button")
-    .forEach((button) => (button.disabled = true));
 }
+bindWindowControls(windowHandle, showError);
 
 bindUpdates(
   prepareUpdate,
