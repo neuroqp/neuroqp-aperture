@@ -1,6 +1,7 @@
 import type OpenSeadragon from "openseadragon";
 import type { ColorSettings } from "./color-settings";
 import { colorConnectionValue, copyColorSettings } from "./color-settings.ts";
+import { splitChannels } from "./display.ts";
 import type { ImageState } from "./image";
 
 export const planeType = "aperturePlanes";
@@ -115,10 +116,7 @@ async function channelPlane(url: string, signal: AbortSignal) {
     return {
       width: bitmap.width,
       height: bitmap.height,
-      plane: Uint8Array.from(
-        { length: rgba.length / 4 },
-        (_, i) => rgba[i * 4],
-      ),
+      plane: splitChannels(rgba, 1)[0],
     };
   } finally {
     bitmap.close();
@@ -166,22 +164,12 @@ export function bindColorRenderer(
         const context: CanvasRenderingContext2D =
           await event.getData("context2d");
         const { width, height } = context.canvas;
-        const rgba = context.getImageData(0, 0, width, height).data;
-        const size = width * height;
-        data = {
-          width,
-          height,
-          planes: Array.from({ length: count }, (_, channel) =>
-            Uint8Array.from(
-              { length: size },
-              (_, pixel) => rgba[pixel * 4 + channel],
-            ),
-          ),
-        };
-        alpha = Uint8Array.from(
-          { length: size },
-          (_, pixel) => rgba[pixel * 4 + 3],
+        const planes = splitChannels(
+          context.getImageData(0, 0, width, height).data,
+          4,
         );
+        data = { width, height, planes: planes.slice(0, count) };
+        alpha = planes[3];
       }
       if (
         disposed ||

@@ -17,7 +17,7 @@ import {
   type ColorChannel,
   type ColorSettings,
 } from "./color-settings";
-import { percentileRange } from "./display-settings";
+import { percentileRange } from "./display";
 import "./color-panel.css";
 
 const trash = icon("trash");

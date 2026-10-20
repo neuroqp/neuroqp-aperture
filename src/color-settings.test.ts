@@ -15,7 +15,7 @@ import {
   toHex,
   toHSV,
 } from "./color-settings.ts";
-import { defaultDisplaySettings } from "./display-settings.ts";
+import { defaultDisplaySettings } from "./display.ts";
 
 test("default connections retain RGB and grayscale identity with metadata channel IDs", () => {
   const settings = defaultColorSettings([

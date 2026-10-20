@@ -3,7 +3,7 @@ import {
   defaultDisplaySettings,
   displayValue,
   type DisplaySettings,
-} from "./display-settings.ts";
+} from "./display.ts";
 
 export interface ColorChannel {
   id: string;
