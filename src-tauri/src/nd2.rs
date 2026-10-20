@@ -201,13 +201,33 @@ fn experiment_bounds(experiment: &serde_json::Value) -> Result<u32, String> {
     Ok(positions)
 }
 
+/// A legacy JPEG2000 box's type, total length and header length at `offset`.
+fn legacy_box(
+    source: &mut (impl Read + Seek),
+    offset: u64,
+    file_len: u64,
+) -> Result<([u8; 4], u64, u64), String> {
+    source.seek(SeekFrom::Start(offset)).map_err(error)?;
+    let mut header = [0; 16];
+    source.read_exact(&mut header[..8]).map_err(error)?;
+    let (length, header_bytes) = match u32::from_be_bytes(header[..4].try_into().unwrap()) {
+        0 => (file_len - offset, 8),
+        1 => {
+            source.read_exact(&mut header[8..]).map_err(error)?;
+            (u64::from_be_bytes(header[8..].try_into().unwrap()), 16)
+        }
+        n => (u64::from(n), 8),
+    };
+    Ok((header[4..8].try_into().unwrap(), length, header_bytes))
+}
+
 fn legacy_preflight(path: &Path, source: &mut SourceFile) -> Result<Preflight, String> {
     let file = LegacyFile::open(path).map_err(error)?;
     let (height, width, channels, bits) = file.image_header(source).map_err(error)?;
     if bits > 16 || channels == 0 || u32::from(channels) > MAX_CHANNELS {
         return Err("ND2 legacy JPEG2000 requires unsigned samples of at most 16 bits and at most 32 channel samples.".into());
     }
-    frame_bytes(width, height, u32::from(channels), 2)?;
+    let mut storage_bytes = frame_bytes(width, height, u32::from(channels), 2)? as u64;
     let positions = file
         .xml(source, "AIM1", 0)
         .or_else(|| file.xml(source, "AIMD", 0))
@@ -217,22 +237,8 @@ fn legacy_preflight(path: &Path, source: &mut SourceFile) -> Result<Preflight, S
     // Check every codestream's encoded size, SIZ geometry and signedness before
     // the JPEG2000 decoder allocates its coefficient/sample planes. Its codec
     // also enforces its own fixed output and compression-ratio ceilings.
-    let mut storage_bytes = frame_bytes(width, height, u32::from(channels), 2)? as u64;
     for stream in file.codestreams() {
-        source
-            .seek(SeekFrom::Start(stream.box_offset))
-            .map_err(error)?;
-        let mut header = [0; 16];
-        source.read_exact(&mut header[..8]).map_err(error)?;
-        let length = u32::from_be_bytes(header[..4].try_into().unwrap());
-        let (length, header_bytes) = match length {
-            0 => (file.file_len - stream.box_offset, 8),
-            1 => {
-                source.read_exact(&mut header[8..]).map_err(error)?;
-                (u64::from_be_bytes(header[8..].try_into().unwrap()), 16)
-            }
-            length => (u64::from(length), 8),
-        };
+        let (_, length, header_bytes) = legacy_box(source, stream.box_offset, file.file_len)?;
         if length < header_bytes + 42 || length > MAX_ENCODED_FRAME_BYTES {
             return Err(
                 "ND2 legacy codestream is truncated or exceeds the encoded-frame limit.".into(),
@@ -308,34 +314,22 @@ impl Bounds {
         let file_len = file.metadata().map_err(error)?.len();
         let mut signature = [0; 12];
         file.read_exact(&mut signature).map_err(error)?;
-        let legacy = signature == openreadout_nd2::LEGACY_SIGNATURE;
-        if !legacy {
+        if signature != openreadout_nd2::LEGACY_SIGNATURE {
             return Self::scan_chunk_map(path, file, file_len, validate);
         }
         let mut offset = 0u64;
         let mut metadata_bytes = 0u64;
         let mut encoded_bytes = 0u64;
         let mut entries = 0u64;
-        while file_len.saturating_sub(offset) >= if legacy { 8 } else { 16 } {
-            file.seek(SeekFrom::Start(offset)).map_err(error)?;
-            let mut header = [0; 16];
-            file.read_exact(&mut header[..8]).map_err(error)?;
-            let length = match u32::from_be_bytes(header[..4].try_into().unwrap()) {
-                0 => file_len - offset,
-                1 => {
-                    file.read_exact(&mut header[8..]).map_err(error)?;
-                    let length = u64::from_be_bytes(header[8..].try_into().unwrap());
-                    if length < 16 {
-                        return Err("ND2 legacy box has an invalid extended length.".into());
-                    }
-                    length
-                }
-                n => u64::from(n),
-            };
+        while file_len.saturating_sub(offset) >= 8 {
+            let (kind, length, header_bytes) = legacy_box(&mut file, offset, file_len)?;
+            if header_bytes == 16 && length < 16 {
+                return Err("ND2 legacy box has an invalid extended length.".into());
+            }
             if length < 8 {
                 return Err("ND2 legacy box has an invalid length.".into());
             }
-            let pixels = &header[4..8] == b"jp2c";
+            let pixels = &kind == b"jp2c";
             if offset.checked_add(length).is_none_or(|end| end > file_len) {
                 return Err("ND2 chunk extends beyond its source file.".into());
             }
@@ -359,7 +353,7 @@ impl Bounds {
             expanded_bytes: metadata_bytes,
             metadata_workspace: metadata_bytes * 128 + entries * 256 + 8 * MIB,
             encoded_bytes,
-            legacy,
+            legacy: true,
         })
     }
     fn scan_chunk_map(
