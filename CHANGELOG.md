@@ -12,7 +12,8 @@
 - Remove the New window toolbar button; Ctrl+N still opens a new window.
 - Keep image memory management running after a failed update install.
 - Keep decoded frames cached when frame display is cancelled.
-- Retry once after an image decoder crashes.
+- Replace a stopped image decoder and retry once after it crashes.
+- Stop false "open in another window" and "another instance is starting" warnings while Aperture starts helper processes.
 - Keep preview, detail and annotation errors visible in the status bar.
 
 ## [0.2.1] - 2026-10-15
