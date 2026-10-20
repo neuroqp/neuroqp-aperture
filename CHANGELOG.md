@@ -2,6 +2,8 @@
 
 ## [Unreleased]
 
+## [0.3.0] - 2026-10-20
+
 - Browse Nikon ND2 files across channels, Z positions, time points and other dimensions.
 - Show ND2 Z and time maximum-intensity projections.
 - Browse Zeiss CZI files.
