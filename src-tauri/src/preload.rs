@@ -415,7 +415,7 @@ pub(crate) fn run(context: &LoadContext, foreground: &Arc<Job>) {
         let mut ready = 1;
         for selection in Candidates::new(&dimensions, selected, hint) {
             if !acquisition.available(generation, foreground)
-                || backend::tree_size(&context.root) >= backend::CACHE_LIMIT / 2
+                || backend::cache::tree_size(&context.root) >= backend::cache::CACHE_LIMIT / 2
             {
                 return;
             }
