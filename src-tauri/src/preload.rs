@@ -164,7 +164,7 @@ impl Acquisition {
     ) -> Result<Option<Reservation>, String> {
         let mut guard = self.cache()?;
         let cache = guard.as_mut().unwrap();
-        let result = cache.reserve_external(bytes, background);
+        let result = cache.reserve(bytes, background);
         self.snapshot_cache(cache);
         self.trim_cache(&mut guard)?;
         result
@@ -223,7 +223,7 @@ impl Acquisition {
             return Err("Loading cancelled.".into());
         }
         let cache = guard.as_mut().unwrap();
-        let result = cache.extract_display_with_priority(output, selection, background);
+        let result = cache.extract_display(output, selection, background, Some(cancel));
         self.snapshot_cache(cache);
         if self.trim_requested.load(Ordering::Relaxed)
             || self.clear_requested.load(Ordering::Relaxed)

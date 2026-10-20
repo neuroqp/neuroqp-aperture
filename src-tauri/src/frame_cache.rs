@@ -181,7 +181,7 @@ impl Cache {
         Ok(())
     }
 
-    fn reserve(&mut self, bytes: u64, background: bool) -> Result<Option<Reservation>, String> {
+    pub fn reserve(&mut self, bytes: u64, background: bool) -> Result<Option<Reservation>, String> {
         loop {
             if let Some(reservation) = self.budget.try_reserve(bytes, background)? {
                 return Ok(Some(reservation));
@@ -191,14 +191,6 @@ impl Cache {
             }
         }
         reserve_after_reclaim(&self.budget, bytes, background)
-    }
-
-    pub fn reserve_external(
-        &mut self,
-        bytes: u64,
-        background: bool,
-    ) -> Result<Option<Reservation>, String> {
-        self.reserve(bytes, background)
     }
 
     fn load(
@@ -251,25 +243,7 @@ impl Cache {
         }
     }
 
-    #[cfg(test)]
     pub fn extract_display(
-        &mut self,
-        output: &Path,
-        selection: Selection,
-    ) -> Result<ExtractedFrame, String> {
-        self.extract_display_with_priority(output, selection, false)
-    }
-
-    pub fn extract_display_with_priority(
-        &mut self,
-        output: &Path,
-        selection: Selection,
-        background: bool,
-    ) -> Result<ExtractedFrame, String> {
-        self.extract_display_cancellable(output, selection, background, None)
-    }
-
-    fn extract_display_cancellable(
         &mut self,
         output: &Path,
         selection: Selection,
@@ -283,26 +257,38 @@ impl Cache {
         } else {
             self.load(selection, background, true)?.ok_or_else(|| format!("{} selected frame decoding does not fit the application memory budget. Increase the limit in Settings.", self.format))?
         };
-        // Keep the raw frame's lease while normalizing its separate display copy.
+        self.convert_display(output, selection, frame, background, cancel)
+    }
+
+    /// Keep the raw frame's lease while normalizing its separate display copy,
+    /// then cache it again unless the source changed.
+    fn convert_display(
+        &mut self,
+        output: &Path,
+        selection: Selection,
+        frame: Frame,
+        background: bool,
+        cancel: Option<&AtomicBool>,
+    ) -> Result<ExtractedFrame, String> {
         let display_bytes = if frame.raw.bytes == 2 {
             frame.raw.pixels.len() as u64 / 2
         } else {
             0
         };
         let result = match self.reserve(display_bytes + FRAME_OVERHEAD + metadata_bytes(&frame.raw.metadata), background)? {
-            Some(_display) => frames::write_frame_cancellable(&frame.raw, output, true, cancel),
+            Some(_display) => frames::write_frame(&frame.raw, output, true, cancel),
             None => Err(format!("{} display conversion does not fit the application memory budget. Increase the limit in Settings.", self.format)),
         };
-        if let Err(error) = self
-            .check_source()
-            .and_then(|_| frames::check_cancel(cancel))
-        {
+        let source = self.check_source();
+        if source.is_ok() {
+            self.frames.push_back((selection, frame));
+        }
+        if let Err(error) = source.and_then(|_| frames::check_cancel(cancel)) {
             if result.is_ok() {
                 let _ = std::fs::remove_file(output);
             }
             return Err(error);
         }
-        self.frames.push_back((selection, frame));
         result
     }
 
@@ -317,8 +303,7 @@ impl Cache {
         frames::check_cancel(Some(cancel))?;
         progress(0.0);
         if projection == Projection::None {
-            let result =
-                self.extract_display_cancellable(output, selection, false, Some(cancel))?;
+            let result = self.extract_display(output, selection, false, Some(cancel))?;
             progress(0.6);
             if let Err(error) = self
                 .check_source()
@@ -408,7 +393,7 @@ impl Cache {
         let display_bytes = if bytes == 2 { frame_bytes / 2 } else { 0 };
         let _display = self.reserve(display_bytes + FRAME_OVERHEAD + metadata_bytes(&accumulator.metadata), false)?
             .ok_or_else(|| format!("{} projection display conversion does not fit the application memory budget. Increase the limit in Settings.", self.format))?;
-        let result = frames::write_frame_cancellable(&accumulator, output, true, Some(cancel));
+        let result = frames::write_frame(&accumulator, output, true, Some(cancel));
         if let Err(error) = self
             .check_source()
             .and_then(|_| frames::check_cancel(Some(cancel)))
@@ -676,7 +661,7 @@ mod tests {
         let mut cache = Cache::new(Format::Nd2, source.clone(), Arc::clone(&budget)).unwrap();
         let first = Selection::default();
         let output = temp.join("display.tif");
-        let description = cache.extract_display(&output, first).unwrap();
+        let description = cache.extract_display(&output, first, false, None).unwrap();
         assert_eq!(description.display_ranges, [[1, 3], [2, 4]]);
         assert_eq!(strip(&output), [0, 0, 255, 255]);
         let original: Vec<u8> = [1u16, 2, 3, 4]
@@ -692,8 +677,22 @@ mod tests {
         assert!(cache.contains(first));
         let raw_pointer = cache.frames[0].1.raw.pixels.as_ptr();
         let cached = temp.join("cached.tif");
-        cache.extract_display(&cached, first).unwrap();
+        cache.extract_display(&cached, first, false, None).unwrap();
         assert_eq!(strip(&cached), strip(&output));
+        assert_eq!(cache.frames[0].1.raw.pixels.as_ptr(), raw_pointer);
+        let cancelled = temp.join("cancelled.tif");
+        let cancel = AtomicBool::new(true);
+        assert!(cache
+            .extract_display(&cancelled, first, true, Some(&cancel))
+            .is_err());
+        assert!(!cancelled.exists());
+        assert!(cache.contains(first));
+        // Cancelling after the raw frame is taken out still caches it again.
+        let frame = cache.frames.pop_back().unwrap().1;
+        assert!(cache
+            .convert_display(&cancelled, first, frame, true, Some(&cancel))
+            .is_err());
+        assert!(!cancelled.exists());
         assert_eq!(cache.frames[0].1.raw.pixels.as_ptr(), raw_pointer);
 
         let next = Selection { z: 1, ..first };
@@ -708,7 +707,7 @@ mod tests {
         assert!(!cache.preload(next));
         assert!(cache.contains(first));
         let selected = temp.join("selected.tif");
-        cache.extract_display(&selected, next).unwrap();
+        cache.extract_display(&selected, next, false, None).unwrap();
         assert!(!cache.contains(first));
         assert!(cache.contains(next));
         let status = budget.status().unwrap();
@@ -749,7 +748,7 @@ mod tests {
         let budget = Budget::new(temp.join("budget")).unwrap();
         let mut cache = Cache::new(Format::Nd2, source.clone(), Arc::clone(&budget)).unwrap();
         cache
-            .extract_display(&temp.join("first.tif"), Selection::default())
+            .extract_display(&temp.join("first.tif"), Selection::default(), false, None)
             .unwrap();
         let raw_pointer = cache.frames[0].1.raw.pixels.as_ptr();
         let cancel = AtomicBool::new(false);
@@ -889,7 +888,7 @@ mod tests {
         budget.set_limit(crate::memory::MIN_LIMIT_BYTES).unwrap();
         let mut cache = Cache::new(Format::Nd2, source, Arc::clone(&budget)).unwrap();
         cache
-            .extract_display(&temp.join("first.tif"), Selection::default())
+            .extract_display(&temp.join("first.tif"), Selection::default(), false, None)
             .unwrap();
         let peak = cache
             .geometry(Selection::default())
@@ -931,7 +930,7 @@ mod tests {
         let budget = Budget::new(temp.join("budget")).unwrap();
         let mut cache = Cache::new(Format::Nd2, source, Arc::clone(&budget)).unwrap();
         cache
-            .extract_display(&temp.join("first.tif"), Selection::default())
+            .extract_display(&temp.join("first.tif"), Selection::default(), false, None)
             .unwrap();
         let before = budget.status().unwrap().used_bytes;
         let cancel = AtomicBool::new(false);
@@ -997,7 +996,7 @@ mod tests {
         let budget = Budget::new(temp.join("budget")).unwrap();
         let mut cache = Cache::new(Format::Nd2, source.clone(), Arc::clone(&budget)).unwrap();
         cache
-            .extract_display(&temp.join("first.tif"), Selection::default())
+            .extract_display(&temp.join("first.tif"), Selection::default(), false, None)
             .unwrap();
         let replacement = temp.join("replacement.nd2");
         std::fs::write(&replacement, synthetic(8, false)).unwrap();
@@ -1205,6 +1204,8 @@ mod tests {
                     z: 1,
                     time: 1,
                 },
+                false,
+                None,
             )
             .unwrap();
         assert_eq!(
@@ -1273,7 +1274,7 @@ mod tests {
         let mut cache = Cache::new(Format::Nd2, source.clone(), Arc::clone(&budget)).unwrap();
         let output = temp.join("ignored-lv0z.tif");
         let result = cache
-            .extract_display(&output, Selection::default())
+            .extract_display(&output, Selection::default(), false, None)
             .unwrap();
         assert_eq!(result.display_ranges, [[1, 3], [2, 4]]);
         assert_eq!(strip(&output), [0, 0, 255, 255]);
@@ -1331,7 +1332,7 @@ mod tests {
         let budget = Budget::new(temp.join("budget")).unwrap();
         let mut cache = Cache::new(Format::Nd2, source.clone(), Arc::clone(&budget)).unwrap();
         cache
-            .extract_display(&temp.join("first.tif"), Selection::default())
+            .extract_display(&temp.join("first.tif"), Selection::default(), false, None)
             .unwrap();
         let mut larger = synthetic(16, false);
         larger.extend([0; 4096]);
@@ -1352,7 +1353,7 @@ mod tests {
             }));
             assert_eq!(cache.cached_count(), 0);
             assert!(cache
-                .extract_display(&temp.join("stale.tif"), Selection::default())
+                .extract_display(&temp.join("stale.tif"), Selection::default(), false, None)
                 .is_err());
             assert!(!temp.join("stale.tif").exists());
             drop(cache);

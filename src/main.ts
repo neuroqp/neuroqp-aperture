@@ -144,14 +144,15 @@ const dimensionNavigation = bindDimensionNavigation(
 );
 const displayColors = () =>
   visibleChannelSettings(colorPanel.settings(), dimensionNavigation.channel());
-const colorError = (message: string) => {
+// Keep display failures across later status updates for the same image.
+const displayError = (message: string) => {
   tileError = message;
   if (currentImage) showImage(currentImage);
 };
 const GpuColorDrawer = createGpuColorDrawer(
   OpenSeadragon,
   displayColors,
-  (message) => queueMicrotask(() => colorError(message)),
+  (message) => queueMicrotask(() => displayError(message)),
 );
 const viewer = OpenSeadragon({
   element: $("viewer"),
@@ -183,7 +184,7 @@ if (new URLSearchParams(location.search).has("colorBenchmark")) {
 colorRenderer = bindColorRenderer(
   viewer,
   displayColors,
-  colorError,
+  displayError,
   (imageId, data) => {
     if (currentId === imageId)
       colorPanel.setHistograms(
@@ -554,8 +555,7 @@ function showImage(state: ImageState) {
           )
             return;
           annotationError = `Annotations could not load: ${String(error)}`;
-          $("status").textContent = annotationError;
-          $("status").classList.add("error");
+          if (currentImage) showImage(currentImage);
         },
       );
   }
@@ -701,7 +701,7 @@ function showImage(state: ImageState) {
       },
       error: () => {
         if (currentId === state.id)
-          showError("Could not display the image preview.");
+          displayError("Could not display the image preview.");
       },
     });
   }
@@ -731,7 +731,7 @@ function addPyramid(state: ImageState) {
     },
     error: () => {
       if (currentId === state.id)
-        showError("Detail could not load. Preview remains available.");
+        displayError("Detail could not load. Preview remains available.");
     },
   });
 }

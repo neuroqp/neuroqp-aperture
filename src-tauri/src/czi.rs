@@ -967,7 +967,9 @@ mod tests {
             z: 1,
             time: 0,
         };
-        let result = cache.extract_display(&output, selection).unwrap();
+        let result = cache
+            .extract_display(&output, selection, false, None)
+            .unwrap();
         let first = sample(1, 1, 0, 0, 0);
         let second = sample(1, 1, 0, 1, 0);
         assert_eq!(

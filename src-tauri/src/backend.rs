@@ -189,32 +189,7 @@ impl Backend {
         let closing = Arc::new(AtomicBool::new(false));
         let acquisition: Arc<Mutex<Option<Arc<crate::preload::Acquisition>>>> =
             Arc::new(Mutex::new(None));
-        let maintenance = {
-            let closing = Arc::downgrade(&closing);
-            let acquisition = acquisition.clone();
-            let memory = memory.clone();
-            thread::spawn(move || {
-                let mut epoch = memory.reclaim_epoch().unwrap_or(0);
-                while closing
-                    .upgrade()
-                    .is_some_and(|closing| !closing.load(Ordering::Relaxed))
-                {
-                    let next = memory.reclaim_epoch().unwrap_or(epoch);
-                    let reclaim = next != epoch;
-                    epoch = next;
-                    let current = acquisition.lock().unwrap().clone();
-                    if let Some(current) = current {
-                        if reclaim {
-                            current.foreground();
-                            current.clear_optional();
-                        } else {
-                            let _ = current.trim();
-                        }
-                    }
-                    thread::sleep(Duration::from_millis(250));
-                }
-            })
-        };
+        let maintenance = maintain(&closing, &acquisition, &memory);
         Ok(Self {
             current: Mutex::new(None),
             root,
@@ -394,13 +369,6 @@ impl Backend {
             if !job.cancel.load(Ordering::Relaxed) && job.state.lock().unwrap().phase == "ready" {
                 crate::preload::run(&context, &job);
             }
-            // Generated pyramids need no decoder once complete; native tiles do.
-            if job.native.lock().unwrap().is_empty() {
-                let decoder = job.decoder.lock().unwrap().take();
-                if let Some(decoder) = decoder {
-                    decoder.stop();
-                }
-            }
             if job.cancel.load(Ordering::Relaxed) || job.state.lock().unwrap().phase == "error" {
                 let decoder = job.decoder.lock().unwrap().clone();
                 if let Some(decoder) = decoder {
@@ -472,6 +440,44 @@ impl Backend {
             thread::sleep(Duration::from_millis(20));
         }
     }
+
+    /// Undo a shutdown whose update install failed; the user reopens the image.
+    pub fn resume(&self) {
+        let mut workers = self.workers.lock().unwrap();
+        self.closing.store(false, Ordering::Relaxed);
+        workers.push(maintain(&self.closing, &self.acquisition, &self.memory));
+    }
+}
+
+fn maintain(
+    closing: &Arc<AtomicBool>,
+    acquisition: &Arc<Mutex<Option<Arc<crate::preload::Acquisition>>>>,
+    memory: &Arc<crate::memory::Budget>,
+) -> thread::JoinHandle<()> {
+    let closing = Arc::downgrade(closing);
+    let acquisition = acquisition.clone();
+    let memory = memory.clone();
+    thread::spawn(move || {
+        let mut epoch = memory.reclaim_epoch().unwrap_or(0);
+        while closing
+            .upgrade()
+            .is_some_and(|closing| !closing.load(Ordering::Relaxed))
+        {
+            let next = memory.reclaim_epoch().unwrap_or(epoch);
+            let reclaim = next != epoch;
+            epoch = next;
+            let current = acquisition.lock().unwrap().clone();
+            if let Some(current) = current {
+                if reclaim {
+                    current.foreground();
+                    current.clear_optional();
+                } else {
+                    let _ = current.trim();
+                }
+            }
+            thread::sleep(Duration::from_millis(250));
+        }
+    })
 }
 
 impl LoadContext {
@@ -669,6 +675,7 @@ impl LoadContext {
     }
 }
 
+/// Generated pyramids need no decoder once complete; native tiles do.
 pub(crate) fn finish_decoder(job: &Job) {
     if job.native.lock().unwrap().is_empty() {
         if let Some(decoder) = job.decoder.lock().unwrap().take() {
@@ -2173,49 +2180,70 @@ fn worker_call(
     request: &crate::vips_worker::Request,
     progress: Option<(f64, f64)>,
 ) -> Result<String, String> {
-    let decoder = {
-        let mut slot = job.decoder.lock().unwrap();
-        if job.cancel.load(Ordering::Relaxed) {
-            return Err("Loading cancelled.".into());
-        }
-        let amount = decoder_workspace(job)?;
-        let mut memory = job.decoder_memory.lock().unwrap();
-        let previous = memory.as_ref().map_or(0, |memory| memory.bytes);
-        if amount > previous {
-            let reservation = reserve_workspace(job, amount - previous)?;
-            let memory = memory.get_or_insert_with(|| DecoderMemory {
-                bytes: 0,
-                reservations: Vec::new(),
-            });
-            memory.bytes = amount;
-            memory.reservations.push(reservation);
-        }
-        if slot.is_none() {
-            *slot = match crate::decoder::Decoder::start(&job.work) {
-                Ok(decoder) => Some(Arc::new(decoder)),
-                Err(error) => {
-                    memory.take();
-                    return Err(error);
+    let exceeded = std::cell::Cell::new(false);
+    let call = |decoder: &crate::decoder::Decoder| {
+        decoder.call(
+            request,
+            &job.cancel,
+            || {
+                exceeded.set(budget_exceeded(job, false));
+                exceeded.get()
+            },
+            |fraction| {
+                if let Some((start, end)) = progress {
+                    // Rough work percentage: preview 20%, pyramid 79%, final writes 1%.
+                    job.report_progress(start + (end - start) * fraction);
                 }
-            };
-        }
-        slot.as_ref().unwrap().clone()
+            },
+        )
     };
-    let output = decoder.call(
-        request,
-        &job.cancel,
-        || budget_exceeded(job, false),
-        |fraction| {
-            if let Some((start, end)) = progress {
-                // Rough work percentage: preview 20%, pyramid 79%, final writes 1%.
-                job.report_progress(start + (end - start) * fraction);
-            }
-        },
-    )?;
+    let decoder = worker(job)?;
+    let mut output = call(&decoder);
+    // A crashed decoder fails its in-flight call; retry it once with a fresh
+    // decoder. Cancellation, cache-limit stops and failed loads are not retried.
+    if output.is_err()
+        && decoder.stopped()
+        && !exceeded.get()
+        && !job.cancel.load(Ordering::Relaxed)
+        && job.state.lock().unwrap().phase != "error"
+    {
+        output = call(&*worker(job)?);
+    }
+    let output = output?;
     if budget_exceeded(job, true) {
         return Err("Display cache limit reached.".into());
     }
     Ok(output)
+}
+
+fn worker(job: &Job) -> Result<Arc<crate::decoder::Decoder>, String> {
+    let mut slot = job.decoder.lock().unwrap();
+    if job.cancel.load(Ordering::Relaxed) {
+        return Err("Loading cancelled.".into());
+    }
+    let amount = decoder_workspace(job)?;
+    let mut memory = job.decoder_memory.lock().unwrap();
+    let previous = memory.as_ref().map_or(0, |memory| memory.bytes);
+    if amount > previous {
+        let reservation = reserve_workspace(job, amount - previous)?;
+        let memory = memory.get_or_insert_with(|| DecoderMemory {
+            bytes: 0,
+            reservations: Vec::new(),
+        });
+        memory.bytes = amount;
+        memory.reservations.push(reservation);
+    }
+    // Replace a decoder that exited while idle or stopped after a failed call.
+    if slot.as_ref().is_none_or(|decoder| decoder.stopped()) {
+        *slot = match crate::decoder::Decoder::start(&job.work) {
+            Ok(decoder) => Some(Arc::new(decoder)),
+            Err(error) => {
+                memory.take();
+                return Err(error);
+            }
+        };
+    }
+    Ok(slot.as_ref().unwrap().clone())
 }
 
 pub fn max_level(width: u32, height: u32) -> u32 {
@@ -2529,6 +2557,29 @@ mod tests {
         );
         backend.shutdown();
         drop((job, bmp_job, backend));
+        fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn resume_after_shutdown_restarts_maintenance_and_opening() {
+        let (root, backend, job) = workspace_fixture();
+        backend.shutdown();
+        assert!(backend.workers.lock().unwrap().is_empty());
+        assert_eq!(
+            backend.open(&job.source).unwrap_err(),
+            "Viewer shutting down."
+        );
+        backend.resume();
+        assert!(backend
+            .workers
+            .lock()
+            .unwrap()
+            .iter()
+            .any(|worker| !worker.is_finished()));
+        backend.open(&job.source).unwrap();
+        backend.shutdown();
+        assert!(backend.workers.lock().unwrap().is_empty());
+        drop((job, backend));
         fs::remove_dir_all(root).unwrap();
     }
 
@@ -3647,6 +3698,47 @@ mod tests {
             }
         )
         .is_ok());
+        // A decoder that exited while idle is replaced for the next native tile.
+        let decoder = job.decoder.lock().unwrap().clone();
+        if let Some(decoder) = &decoder {
+            decoder.stop();
+        }
+        assert!(read_asset(
+            &job,
+            Asset::Tile {
+                level: 12,
+                x: 0,
+                y: 0
+            }
+        )
+        .is_ok());
+        if let Some(decoder) = decoder {
+            assert!(!Arc::ptr_eq(
+                &decoder,
+                job.decoder.lock().unwrap().as_ref().unwrap()
+            ));
+        }
+        // A decoder that crashes during a native tile is retried once.
+        #[cfg(unix)]
+        if job.decoder.lock().unwrap().is_some() {
+            let (crashing, work) = crate::decoder::tests::helper("pass");
+            let crashing = Arc::new(crashing);
+            *job.decoder.lock().unwrap() = Some(crashing.clone());
+            assert!(read_asset(
+                &job,
+                Asset::Tile {
+                    level: 12,
+                    x: 1,
+                    y: 0
+                }
+            )
+            .is_ok());
+            assert!(crashing.stopped());
+            let replacement = job.decoder.lock().unwrap().clone().unwrap();
+            assert!(!Arc::ptr_eq(&crashing, &replacement));
+            assert!(!replacement.stopped());
+            fs::remove_dir_all(work).unwrap();
+        }
         backend.shutdown();
         drop(job);
         fs::remove_dir_all(root).unwrap();

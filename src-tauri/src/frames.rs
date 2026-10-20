@@ -320,15 +320,6 @@ pub(crate) fn decode_frame(
     })
 }
 
-#[cfg(test)]
-pub(crate) fn write_frame(
-    frame: &RawFrame,
-    output: &Path,
-    display: bool,
-) -> Result<ExtractedFrame, String> {
-    write_frame_cancellable(frame, output, display, None)
-}
-
 pub(crate) fn check_cancel(cancel: Option<&AtomicBool>) -> Result<(), String> {
     if cancel.is_some_and(|cancel| cancel.load(Ordering::Relaxed)) {
         Err("Loading cancelled.".into())
@@ -337,7 +328,7 @@ pub(crate) fn check_cancel(cancel: Option<&AtomicBool>) -> Result<(), String> {
     }
 }
 
-pub(crate) fn write_frame_cancellable(
+pub(crate) fn write_frame(
     frame: &RawFrame,
     output: &Path,
     display: bool,
@@ -349,7 +340,7 @@ pub(crate) fn write_frame_cancellable(
     let normalized;
     let (pixels, output_bits) = if display && frame.bytes == 2 {
         let (samples, ranges) =
-            display_samples_cancellable(&frame.pixels, frame.bands as usize, frame.rgb, cancel)?;
+            display_samples(&frame.pixels, frame.bands as usize, frame.rgb, cancel)?;
         normalized = samples;
         result.display_ranges = ranges;
         (normalized.as_slice(), 8)
@@ -389,12 +380,7 @@ pub(crate) fn write_frame_cancellable(
     Ok(result)
 }
 
-#[cfg(test)]
-fn display_samples(pixels: &[u8], bands: usize, rgb: bool) -> (Vec<u8>, Vec<[u16; 2]>) {
-    display_samples_cancellable(pixels, bands, rgb, None).unwrap()
-}
-
-fn display_samples_cancellable(
+fn display_samples(
     pixels: &[u8],
     bands: usize,
     rgb: bool,
@@ -566,7 +552,7 @@ pub(crate) mod tests {
             .iter()
             .flat_map(|sample| sample.to_le_bytes())
             .collect();
-        let (display, ranges) = display_samples(&low_signal, 2, false);
+        let (display, ranges) = display_samples(&low_signal, 2, false, None).unwrap();
         assert_eq!(display, [0, 0, 128, 128, 255, 255]);
         assert_eq!(ranges, [[83, 97], [1000, 2000]]);
         let (rgb, ranges) = display_samples(
@@ -576,11 +562,19 @@ pub(crate) mod tests {
                 .collect::<Vec<_>>(),
             3,
             true,
-        );
+            None,
+        )
+        .unwrap();
         assert_eq!(rgb, [0, 128, 255]);
         assert_eq!(ranges, [[10, 30]; 3]);
-        assert_eq!(display_samples(&[0, 0, 0, 0], 1, false).0, [0, 0]);
-        assert_eq!(display_samples(&[83, 0, 83, 0], 1, false).0, [255, 255]);
+        assert_eq!(
+            display_samples(&[0, 0, 0, 0], 1, false, None).unwrap().0,
+            [0, 0]
+        );
+        assert_eq!(
+            display_samples(&[83, 0, 83, 0], 1, false, None).unwrap().0,
+            [255, 255]
+        );
         let mut pixels = vec![0; 8];
         interleave(&mut pixels, &[0x34, 0x12, 0xcd, 0xab], 2, 0, 2);
         interleave(&mut pixels, &[0xff, 0x00, 0x00, 0x80], 2, 1, 2);
