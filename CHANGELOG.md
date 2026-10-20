@@ -2,6 +2,19 @@
 
 ## [Unreleased]
 
+- Browse Nikon ND2 files across channels, Z positions, time points and other dimensions.
+- Show ND2 Z and time maximum-intensity projections.
+- Browse Zeiss CZI files.
+- Share an image-memory limit across windows, set it in Settings, and preload ND2 frames by priority.
+- Move updates and appearance into a Settings view.
+- Adjust each Color connection's brightness and drag the range graph lines directly.
+- Show the full NeuroQP logo and Aperture name in the header.
+- Remove the New window toolbar button; Ctrl+N still opens a new window.
+- Keep image memory management running after a failed update install.
+- Keep decoded frames cached when frame display is cancelled.
+- Retry once after an image decoder crashes.
+- Keep preview, detail and annotation errors visible in the status bar.
+
 ## [0.2.1] - 2026-10-15
 
 Includes the 0.2.0 candidate features for users upgrading from 0.1.1.
