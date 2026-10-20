@@ -524,14 +524,14 @@ impl Plan {
     ) -> Result<(Self, Reservation), String> {
         // First reject oversized raw blocks without reading their payloads.
         Bounds::scan(&source.stable_path())?;
-        source.check().map_err(|e| e.to_string())?;
+        source.verify()?;
         let bounds = {
             let _validation = budget.require(
                 64 * MIB,
                 "ND2 metadata validation does not fit the application memory budget.",
             )?;
             let bounds = Bounds::validated(&source.stable_path())?;
-            source.check().map_err(|e| e.to_string())?;
+            source.verify()?;
             bounds
         };
         let preflight = {
@@ -539,10 +539,10 @@ impl Plan {
                 bounds.metadata_workspace,
                 "ND2 metadata parsing does not fit the application memory budget.",
             )?;
-            source.check().map_err(|e| e.to_string())?;
+            source.verify()?;
             preflight(&source.stable_path())?
         };
-        source.check().map_err(|e| e.to_string())?;
+        source.verify()?;
         // info() clones position-specific trees as well as global metadata. Pay
         // for that opening peak before calling it, then retain only typed summaries.
         let opening_bytes = bounds.metadata_workspace

@@ -62,14 +62,14 @@ impl Plan {
         budget: &Arc<Budget>,
     ) -> Result<(Self, Reservation), String> {
         let plan = scan(&source.stable_path(), budget)?;
-        source.check().map_err(|e| e.to_string())?;
+        source.verify()?;
         let strings = {
             let _parser = budget.require(
                 plan.xml.1 * 32 + 8 * MIB,
                 "CZI metadata parsing does not fit the application memory budget.",
             )?;
             let strings = xml_strings(&source.stable_path(), plan.xml)?;
-            source.check().map_err(|e| e.to_string())?;
+            source.verify()?;
             strings
         };
         let metadata = budget.require(

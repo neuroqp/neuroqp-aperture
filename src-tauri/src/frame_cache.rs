@@ -87,7 +87,7 @@ impl Cache {
     pub fn new(format: Format, source: PathBuf, budget: Arc<Budget>) -> Result<Self, String> {
         let source = Arc::new(CheckedSource::open(source)?);
         let (plan, mut metadata) = Plan::new(format, &source, &budget)?;
-        source.check().map_err(|e| e.to_string())?;
+        source.verify()?;
         let input = Input::from_source(&source.path, source.clone());
         let dataset = plan
             .reader()
@@ -96,7 +96,7 @@ impl Cache {
         let full_images = dataset.info().map_err(|e| format!("{format}: {e}"))?.images;
         plan.check_images(&full_images)?;
         let images = compact_images(full_images);
-        source.check().map_err(|e| e.to_string())?;
+        source.verify()?;
         // Readers can retain split channel data internally; never retain one.
         drop(dataset);
         frames::description(format, &images, Selection::default()).map_err(|error| {
@@ -586,6 +586,11 @@ impl CheckedSource {
             ));
         }
         Ok(())
+    }
+
+    /// `check` with the error message reported to the user.
+    pub(crate) fn verify(&self) -> Result<(), String> {
+        self.check().map_err(|e| e.to_string())
     }
 
     pub(crate) fn stable_path(&self) -> PathBuf {
