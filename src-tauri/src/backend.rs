@@ -340,7 +340,7 @@ impl Backend {
             let mut current = self.acquisition.lock().unwrap();
             if current
                 .as_ref()
-                .is_none_or(|item| !item.matches(&source, &identity))
+                .is_none_or(|item| !item.matches(format, &source, &identity))
             {
                 if let Some(old) = current.take() {
                     old.stop();

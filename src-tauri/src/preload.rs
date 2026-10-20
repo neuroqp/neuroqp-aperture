@@ -83,8 +83,11 @@ impl Acquisition {
         })
     }
 
-    pub fn matches(&self, source: &Path, identity: &Option<Fingerprint>) -> bool {
-        self.source == source && self.identity.is_some() && &self.identity == identity
+    pub fn matches(&self, format: Format, source: &Path, identity: &Option<Fingerprint>) -> bool {
+        self.format == format
+            && self.source == source
+            && self.identity.is_some()
+            && &self.identity == identity
     }
 
     /// Never wait for the raw-cache lock on the window thread. At most the Rust
@@ -509,6 +512,24 @@ mod tests {
         assert!(!acquisition.trim_requested.load(Ordering::Relaxed));
         assert!(!acquisition.clear_requested.load(Ordering::Relaxed));
         assert!(acquisition.geometry(Selection::default()).is_err());
+        std::fs::remove_dir_all(directory).unwrap();
+    }
+
+    #[test]
+    fn aliases_with_another_format_do_not_reuse_the_acquisition() {
+        let directory = crate::frames::tests::temporary();
+        let source = directory.join("source");
+        std::fs::write(&source, b"bytes").unwrap();
+        let identity = crate::instances::fingerprint(&source).unwrap();
+        let acquisition = Acquisition::new(
+            Format::Nd2,
+            source.clone(),
+            identity.clone(),
+            Budget::new(directory.clone()).unwrap(),
+        );
+        assert!(acquisition.matches(Format::Nd2, &source, &identity));
+        assert!(!acquisition.matches(Format::Czi, &source, &identity));
+        acquisition.stop();
         std::fs::remove_dir_all(directory).unwrap();
     }
 

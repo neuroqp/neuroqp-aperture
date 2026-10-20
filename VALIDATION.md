@@ -1178,7 +1178,7 @@ was not changed.
 
 ## Initial CZI browsing, October 20, 2026
 
-The Rust-only CZI implementation passed 131 mandatory Rust tests, 90 frontend
+The Rust-only CZI implementation passed 132 mandatory Rust tests, 90 frontend
 tests, TypeScript, frontend/native builds, Prettier and rustfmt. The optional
 public CZI test compared 2720 decoded samples and per-plane ranges against
 independent czifile references, including mosaic seams, BGR24/BGR48 order and
