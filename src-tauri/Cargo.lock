@@ -71,6 +71,7 @@ dependencies = [
  "libvips",
  "openreadout-core",
  "openreadout-czi",
+ "openreadout-jpegxr",
  "openreadout-nd2",
  "rayon",
  "same-file",

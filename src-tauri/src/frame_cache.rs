@@ -50,10 +50,10 @@ impl Plan {
     }
 
     /// Includes opening the reader, encoded data, codec workspace and assembly.
-    fn decode_peak(&self, frame_bytes: u64) -> u64 {
+    fn decode_peak(&self, position: u32, frame_bytes: u64) -> u64 {
         match self {
             Self::Nd2(plan) => plan.decode_peak(frame_bytes),
-            Self::Czi(plan) => plan.decode_peak(frame_bytes),
+            Self::Czi(plan) => plan.decode_peak(position, frame_bytes),
         }
     }
 }
@@ -99,7 +99,15 @@ impl Cache {
         source.check().map_err(|e| e.to_string())?;
         // Readers can retain split channel data internally; never retain one.
         drop(dataset);
-        frames::description(format, &images, Selection::default())?;
+        frames::description(format, &images, Selection::default()).map_err(|error| {
+            if images.len() > 1 {
+                format!(
+                    "{error} Browsing starts at the first position, so this file cannot be opened."
+                )
+            } else {
+                error
+            }
+        })?;
         metadata.shrink(summary_bytes(&images, images.capacity()))?;
         Ok(Self {
             format,
@@ -127,7 +135,7 @@ impl Cache {
         Ok(Geometry {
             width: image.size_x,
             height: image.size_y,
-            decode_peak_bytes: self.plan.decode_peak(frame_bytes),
+            decode_peak_bytes: self.plan.decode_peak(selection.position, frame_bytes),
         })
     }
 

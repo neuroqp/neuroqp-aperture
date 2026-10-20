@@ -7,34 +7,47 @@ use openreadout_core::ImageInfo;
 use openreadout_czi::{
     CompressionId, DimensionEntry, DirectoryEntry, PixelTypeId, SegmentId, SEGMENT_HEADER_LEN,
 };
-use std::collections::BTreeSet;
+use openreadout_jpegxr::SampleType;
+use std::collections::BTreeMap;
 use std::fs::File;
 use std::io::{BufReader, Read, Seek, SeekFrom};
 use std::path::Path;
 use std::sync::Arc;
 
 const MAX_METADATA_BYTES: u64 = 32 * MIB;
+const MAX_DIRECTORY_BYTES: u64 = 128 * MIB;
 const MAX_IMAGES: usize = 4096;
+const JPEG_XR_HEADER_BYTES: u64 = 64 * 1024;
 // Pinned openreadout-czi 0.3.0 dataset.rs and attach.rs constants: one plane's
-// tiles decode in batches of at most this many output bytes; subblock masks and
-// TimeStamps/EventList attachments up to these sizes are read and interpreted.
+// tiles decode in batches of at most this many output bytes; subblock masks,
+// TimeStamps/EventList attachments and listed channels up to these sizes are read.
 const TILE_BATCH_BYTES: u64 = 256 * MIB;
 const MAX_SUBBLOCK_MASK: u64 = MIB;
 const MAX_INTERPRETED_ATTACHMENT: u64 = 64 * MIB;
+const MAX_LISTED_CHANNELS: u64 = 1 << 16;
 
 fn error(error: impl std::fmt::Display) -> String {
     format!("CZI: {error}")
 }
 
+/// Full-resolution subblocks of one reader image.
+#[derive(Clone, Copy)]
+struct Tiles {
+    count: u64,
+    /// The smallest decoded tile bounds the reader's largest batch.
+    min_output_bytes: u64,
+    /// Payload, mask and decode copies of the largest tile.
+    max_workspace: u64,
+}
+
 /// CZI bounds validated before the reader allocates.
 pub(crate) struct Plan {
     metadata_workspace: u64,
-    interpreted_bytes: u64,
-    images: usize,
-    /// Largest full-resolution subblock: stored, decoded by the reader, and its payload.
-    stored_tile_bytes: u64,
-    encoded_bytes: u64,
-    jpeg: bool,
+    xml: (u64, u64),
+    /// Time stamps, events and listed channels copied into every image by info().
+    image_copies: u64,
+    /// In the reader's image order: scene, H/I/R/V/B coordinates, stored ratio.
+    images: Vec<Tiles>,
 }
 
 impl Plan {
@@ -45,20 +58,32 @@ impl Plan {
     ) -> Result<(Self, Reservation), String> {
         let plan = scan(&source.stable_path())?;
         source.check().map_err(|e| e.to_string())?;
-        // info() copies interpreted time stamps and events into every image.
-        let opening_bytes =
-            plan.metadata_workspace + plan.interpreted_bytes * 16 * (plan.images as u64 + 1);
-        let metadata = reserve_after_reclaim(budget, opening_bytes, false)?
+        let strings = {
+            let _parser = reserve_after_reclaim(budget, plan.xml.1 * 32 + 8 * MIB, false)?
+                .ok_or("CZI metadata parsing does not fit the application memory budget.")?;
+            let strings = xml_strings(&source.stable_path(), plan.xml)?;
+            source.check().map_err(|e| e.to_string())?;
+            strings
+        };
+        let metadata = reserve_after_reclaim(budget, plan.opening_bytes(strings), false)?
             .ok_or("CZI metadata parsing does not fit the application memory budget.")?;
         Ok((plan, metadata))
+    }
+
+    /// info() clones XML-derived strings and interpreted attachments into every image.
+    fn opening_bytes(&self, xml_strings: u64) -> u64 {
+        let per_image = 2 * xml_strings + self.image_copies + 16 * 1024;
+        self.metadata_workspace + per_image * (self.images.len() as u64 + 1)
     }
 
     pub(crate) fn check_images(&self, images: &[ImageInfo]) -> Result<(), String> {
         let first = images
             .first()
             .ok_or("CZI contains no readable full-resolution image.")?;
-        if images.len() > self.images {
-            return Err("CZI decoded image count exceeds its validated subblock directory.".into());
+        if images.len() != self.images.len() {
+            return Err(
+                "CZI decoded images disagree with its validated subblock directory.".into(),
+            );
         }
         // Positions share the Dimensions panel's Z, time and channel controls.
         // XY sizes may differ; each frame has its own geometry and display cache.
@@ -82,20 +107,16 @@ impl Plan {
         Ok(())
     }
 
-    pub(crate) fn decode_peak(&self, frame_bytes: u64) -> u64 {
+    pub(crate) fn decode_peak(&self, position: u32, frame_bytes: u64) -> u64 {
         // Pinned openreadout-czi 0.3.0 reopens per frame, then decodes a plane's
-        // tiles on the rayon pool, at most TILE_BATCH_BYTES of output at once. Each
-        // tile in flight holds its payload, the decoded block and a converted copy
-        // (JPEG may decode up to four times its declared size before conforming).
+        // tiles on the rayon pool in batches of min(threads, TILE_BATCH_BYTES /
+        // largest plane tile), at least one and never more than the plane's tiles.
         // The reader's plane and our assembled frame coexist.
-        let threads = rayon::current_num_threads() as u64;
-        let decoded = (threads * self.stored_tile_bytes).min(TILE_BATCH_BYTES / 3 * 4);
-        let multiplier = if self.jpeg { 5 } else { 2 };
-        self.metadata_workspace
-            + threads * (self.encoded_bytes + MAX_SUBBLOCK_MASK)
-            + decoded * multiplier
-            + 2 * frame_bytes
-            + FRAME_OVERHEAD
+        let tiles = self.images[position as usize];
+        let batch = (rayon::current_num_threads() as u64)
+            .min(tiles.count)
+            .min((TILE_BATCH_BYTES / tiles.min_output_bytes.max(1)).max(1));
+        self.metadata_workspace + batch * tiles.max_workspace + 2 * frame_bytes + FRAME_OVERHEAD
     }
 }
 
@@ -128,10 +149,67 @@ fn metadata_total(total: &mut u64, bytes: u64) -> Result<(), String> {
     *total = total
         .checked_add(bytes)
         .filter(|total| *total <= MAX_METADATA_BYTES)
-        .ok_or(
-            "CZI metadata XML, subblock and attachment directories exceed the 32 MiB input limit.",
-        )?;
+        .ok_or("CZI metadata XML and attachments exceed the 32 MiB input limit.")?;
     Ok(())
+}
+
+/// Strings image_info() can copy from the parsed metadata XML into one image.
+fn xml_strings(path: &Path, (offset, bytes): (u64, u64)) -> Result<u64, String> {
+    if bytes == 0 {
+        return Ok(0);
+    }
+    let mut raw = vec![0; bytes as usize];
+    read(&mut File::open(path).map_err(error)?, offset, &mut raw)?;
+    let Some(xml) =
+        openreadout_czi::xml::parse_image_xml(String::from_utf8_lossy(&raw).trim_end_matches('\0'))
+    else {
+        return Ok(0);
+    };
+    let text = |value: &Option<String>| value.as_ref().map_or(0, |s| s.len() as u64);
+    let channels: u64 = xml
+        .channels
+        .iter()
+        .flat_map(|c| {
+            [
+                &c.id,
+                &c.channel_name,
+                &c.color_argb,
+                &c.fluor,
+                &c.acquisition_mode,
+                &c.illumination_type,
+                &c.contrast_method,
+                &c.dye_name,
+                &c.detector_id,
+            ]
+        })
+        .map(text)
+        .sum();
+    // Each image copies only its own scene's name and well.
+    let scene = xml
+        .scenes
+        .values()
+        .map(|s| text(&s.scene_name) + text(&s.well_name) + text(&s.well_id))
+        .chain(xml.scene_names.values().map(|name| name.len() as u64))
+        .max()
+        .unwrap_or(0);
+    let experiment = xml.experiment.as_ref().map_or(0, |e| {
+        text(&e.experiment_version) + e.active_setups.iter().map(|s| s.len() as u64).sum::<u64>()
+    });
+    let global = [
+        &xml.pixel_type,
+        &xml.acquisition_time,
+        &xml.objective.objective_name,
+        &xml.objective.immersion,
+        &xml.microscope_name,
+        &xml.user_name,
+        &xml.application_name,
+        &xml.application_version,
+    ]
+    .into_iter()
+    .map(text)
+    .sum::<u64>()
+        + xml.detectors.values().map(|d| d.len() as u64).sum::<u64>();
+    Ok(channels + scene + experiment + global)
 }
 
 // Mirrors pinned openreadout-czi 0.3.0 container.rs::CziFile::open_in, which loads
@@ -148,14 +226,17 @@ fn scan(path: &Path) -> Result<Plan, String> {
     let mut header = [0; 80];
     read(&mut file, SEGMENT_HEADER_LEN, &mut header)?;
     if u32_at(&header, 48) != 0 {
-        return Err("Multi-file CZI documents are unsupported. Open a single-file CZI.".into());
+        return Err(
+            "Multi-file CZI documents and part references are unsupported. Open a single-file CZI."
+                .into(),
+        );
     }
     let directory_position = u64_at(&header, 52);
     let metadata_position = u64_at(&header, 60);
     let attachment_position = u64_at(&header, 72);
     let mut metadata_bytes = 0;
 
-    let mut xml_bytes = 0;
+    let mut xml = (0, 0);
     if metadata_position != 0
         && fits(metadata_position, SEGMENT_HEADER_LEN + 8)
         && segment(&mut file, metadata_position)?.0 == SegmentId::Metadata
@@ -163,8 +244,9 @@ fn scan(path: &Path) -> Result<Plan, String> {
         let mut size = [0; 4];
         read(&mut file, metadata_position + SEGMENT_HEADER_LEN, &mut size)?;
         let size = u64::from(u32::from_le_bytes(size));
-        if fits(metadata_position + SEGMENT_HEADER_LEN + 256, size) {
-            xml_bytes = size;
+        let offset = metadata_position + SEGMENT_HEADER_LEN + 256;
+        if fits(offset, size) {
+            xml = (offset, size);
             metadata_total(&mut metadata_bytes, size)?;
         }
     }
@@ -183,7 +265,9 @@ fn scan(path: &Path) -> Result<Plan, String> {
     {
         return Err("CZI requires an intact subblock directory for bounded decoding; rescue scanning is unsupported.".into());
     }
-    metadata_total(&mut metadata_bytes, directory_bytes)?;
+    if directory_bytes > MAX_DIRECTORY_BYTES {
+        return Err("CZI subblock directory exceeds the 128 MiB input limit.".into());
+    }
     let mut directory = BufReader::new(File::open(path).map_err(error)?);
     directory
         .seek(SeekFrom::Start(directory_position + SEGMENT_HEADER_LEN))
@@ -193,8 +277,8 @@ fn scan(path: &Path) -> Result<Plan, String> {
     let count = u32_at(&prefix, 0);
     let mut consumed = 128u64;
     let mut pixel_type = None;
-    let mut images = BTreeSet::new();
-    let (mut stored_tile_bytes, mut encoded_bytes, mut jpeg) = (0u64, 0u64, false);
+    let mut images = BTreeMap::new();
+    let mut channel_spans = BTreeMap::new();
     for _ in 0..count {
         let mut raw = [0; 32];
         if consumed + 32 > directory_bytes {
@@ -230,25 +314,24 @@ fn scan(path: &Path) -> Result<Plan, String> {
             dimensions,
         };
         if entry.file_part != 0 {
-            return Err("Multi-file CZI documents are unsupported. Open a single-file CZI.".into());
+            return Err("Multi-file CZI documents and part references are unsupported. Open a single-file CZI.".into());
         }
-        if !matches!(
-            entry.pixel_type,
-            PixelTypeId::Gray8
-                | PixelTypeId::Gray16
-                | PixelTypeId::Bgr24
-                | PixelTypeId::Bgr48
-                | PixelTypeId::Bgra32
-        ) {
-            return Err(format!("CZI pixel type {} is unsupported. Aperture reads unsigned 8/16-bit grayscale and 8/16-bit BGR/BGRA subblocks.", entry.pixel_type.name()));
-        }
+        // Samples per pixel and sample type the reader returns for each tile.
+        let (samples, sample) = match entry.pixel_type {
+            PixelTypeId::Gray8 => (1, SampleType::U8),
+            PixelTypeId::Gray16 => (1, SampleType::U16),
+            PixelTypeId::Bgr24 | PixelTypeId::Bgra32 => (3, SampleType::U8),
+            PixelTypeId::Bgr48 => (3, SampleType::U16),
+            other => return Err(format!("CZI pixel type {} is unsupported. Aperture reads unsigned 8/16-bit grayscale and 8/16-bit BGR/BGRA subblocks.", other.name())),
+        };
         if pixel_type.get_or_insert(entry.pixel_type) != &entry.pixel_type {
             return Err("CZI subblocks with mixed pixel types are unsupported.".into());
         }
         if !entry.is_level0() {
             continue;
         }
-        // The reader's image grouping: scene, H/I/R/V/B coordinates and stored ratio.
+        // The reader's image grouping, in its order: scene, H/I/R/V/B coordinates
+        // and stored ratio.
         let mut extra: Vec<(char, i32)> = entry
             .dimensions
             .iter()
@@ -257,30 +340,34 @@ fn scan(path: &Path) -> Result<Plan, String> {
             .collect();
         extra.sort_unstable();
         extra.dedup_by_key(|(d, _)| *d);
-        images.insert((
+        let key = (
             entry.index('S'),
             extra,
             (entry.stored_ratio() * 1e6).round() as i64,
-        ));
-        if images.len() > MAX_IMAGES {
+        );
+        if !images.contains_key(&key) && images.len() == MAX_IMAGES {
             return Err(format!("CZI supports at most {MAX_IMAGES} scenes."));
         }
-        let stored = ['X', 'Y', 'Z', 'C', 'T']
+        let channels = entry.dim('C').map_or(1, |c| i64::from(c.size.max(1)));
+        let span = channel_spans
+            .entry(entry.index('S'))
+            .or_insert((i64::MAX, i64::MIN));
+        span.0 = span.0.min(i64::from(entry.index('C')));
+        span.1 = span.1.max(i64::from(entry.index('C')) + channels - 1);
+        let (width, height) = (
+            entry.dim('X').map_or(1, |x| x.stored_size),
+            entry.dim('Y').map_or(1, |y| y.stored_size),
+        );
+        let pixels = ['Z', 'C', 'T']
             .iter()
-            .try_fold(u64::from(entry.pixel_type.bytes_per_pixel()), |n, d| {
-                let size = entry.dim(*d).map_or(1, |x| {
-                    if matches!(d, 'X' | 'Y') {
-                        x.stored_size
-                    } else {
-                        x.size.max(1)
-                    }
-                });
-                n.checked_mul(u64::from(size))
-            })
+            .try_fold(u64::from(width) * u64::from(height), |n, d| {
+                n.checked_mul(u64::from(entry.dim(*d).map_or(1, |x| x.size.max(1))))
+            });
+        let stored = pixels
+            .and_then(|n| n.checked_mul(u64::from(entry.pixel_type.bytes_per_pixel())))
             .filter(|bytes| *bytes <= MAX_FRAME_BYTES)
             .ok_or("CZI subblock exceeds the 256 MiB decoded-tile limit.")?;
-        stored_tile_bytes = stored_tile_bytes.max(stored);
-        jpeg |= entry.compression == CompressionId::Jpeg;
+        let output = pixels.unwrap() * samples * sample.bytes() as u64;
         // The reader allocates the payload size from the subblock header.
         let mut sizes = [0; 16];
         if !fits(entry.file_position, SEGMENT_HEADER_LEN + 16)
@@ -304,10 +391,48 @@ fn scan(path: &Path) -> Result<Plan, String> {
         if !fits(data_offset, data_bytes) {
             return Err("CZI subblock extends beyond its source file.".into());
         }
-        encoded_bytes = encoded_bytes.max(data_bytes);
+        let mask = u64::from(u32_at(&sizes, 4));
+        let mask = if (32..=MAX_SUBBLOCK_MASK).contains(&mask) {
+            mask
+        } else {
+            0
+        };
+        // Decoding holds the block and a converted copy. JPEG may decode up to four
+        // times its declared size before conforming. JPEG XR is decoded at its own
+        // codestream size, so require that to match the directory entry.
+        let copies = match entry.compression {
+            CompressionId::Jpeg => 5 * stored,
+            CompressionId::JpegXr => {
+                let mut head = vec![0; data_bytes.min(JPEG_XR_HEADER_BYTES) as usize];
+                read(&mut file, data_offset, &mut head)?;
+                let info = openreadout_jpegxr::probe(&head)
+                    .map_err(|e| format!("CZI JPEG XR subblock header is unreadable: {e}"))?;
+                let layout = (info.channels, info.sample);
+                if (info.width, info.height) != (width, height)
+                    || (layout != (samples as u32, sample)
+                        && !(entry.pixel_type == PixelTypeId::Bgra32
+                            && layout == (4, SampleType::U8)))
+                {
+                    return Err("CZI JPEG XR subblock geometry or pixel format disagrees with its directory entry.".into());
+                }
+                // Decoder output, compaction and conversion, plus two macroblock
+                // rows of 32-bit coefficients for up to four channels.
+                3 * stored + (u64::from(width).div_ceil(16) + 8) * 2048 * 6
+            }
+            _ => 2 * stored,
+        };
+        let tiles = images.entry(key).or_insert(Tiles {
+            count: 0,
+            min_output_bytes: u64::MAX,
+            max_workspace: 0,
+        });
+        tiles.count += 1;
+        tiles.min_output_bytes = tiles.min_output_bytes.min(output);
+        tiles.max_workspace = tiles.max_workspace.max(data_bytes + mask + copies);
     }
 
-    let (mut attachment_bytes, mut attachments, mut interpreted_bytes) = (0, 0, 0);
+    let (mut attachment_bytes, mut attachments) = (0, 0);
+    let (mut time_stamp_bytes, mut event_bytes) = (0, 0);
     if attachment_position != 0 && fits(attachment_position, SEGMENT_HEADER_LEN) {
         let (kind, _, used) = segment(&mut file, attachment_position)?;
         if kind == SegmentId::AttachmentDirectory
@@ -334,16 +459,20 @@ fn scan(path: &Path) -> Result<Plan, String> {
                     .trim_end_matches('\0')
                     .to_ascii_uppercase();
                 let position = u64_at(&raw, 12);
+                let interpreted = match kind.as_str() {
+                    "CZTIMS" => &mut time_stamp_bytes,
+                    "CZEVL" => &mut event_bytes,
+                    _ => continue,
+                };
                 // Missing parts fall back to the master; count every candidate there.
-                if matches!(kind.as_str(), "CZTIMS" | "CZEVL")
-                    && fits(position, SEGMENT_HEADER_LEN + 4)
+                if fits(position, SEGMENT_HEADER_LEN + 4)
                     && segment(&mut file, position)?.0 == SegmentId::Attachment
                 {
                     let mut size = [0; 4];
                     read(&mut file, position + SEGMENT_HEADER_LEN, &mut size)?;
                     let size = u64::from(u32::from_le_bytes(size));
                     if size <= MAX_INTERPRETED_ATTACHMENT {
-                        interpreted_bytes += size;
+                        *interpreted += size;
                         metadata_total(&mut metadata_bytes, size)?;
                     }
                 }
@@ -360,18 +489,22 @@ fn scan(path: &Path) -> Result<Plan, String> {
             break;
         }
         segments += 1;
-        match offset
-            .checked_add(SEGMENT_HEADER_LEN + allocated)
-            .filter(|end| allocated > 0 && *end <= file_len)
-        {
-            Some(end) => offset = end,
-            None => break,
+        let end = offset
+            .checked_add(SEGMENT_HEADER_LEN)
+            .and_then(|start| start.checked_add(allocated))
+            .filter(|end| *end <= file_len)
+            .ok_or("CZI segment extends beyond its source file.")?;
+        if allocated == 0 {
+            break;
         }
+        offset = end;
     }
 
     // XML is copied and parsed into a DOM; directory entries are expanded, grouped
-    // into scenes and cloned for each plane read. Allow generous per-byte factors.
-    let metadata_workspace = xml_bytes * 32
+    // into scenes and cloned for each plane read. Interpreted attachments are kept
+    // as values. Allow generous per-byte factors.
+    let interpreted_bytes = time_stamp_bytes + event_bytes;
+    let metadata_workspace = xml.1 * 32
         + directory_bytes * 8
         + u64::from(count) * 512
         + attachment_bytes * 4
@@ -379,18 +512,23 @@ fn scan(path: &Path) -> Result<Plan, String> {
         + interpreted_bytes * 16
         + segments * 64
         + 8 * MIB;
+    // info() lists every channel of a scene's span and expands time stamps and
+    // each 20-byte event record into JSON values for every image.
+    let channels = channel_spans
+        .values()
+        .map(|(low, high)| (high - low + 1).clamp(1, MAX_LISTED_CHANNELS as i64) as u64)
+        .max()
+        .unwrap_or(1);
     Ok(Plan {
         metadata_workspace,
-        interpreted_bytes,
-        images: images.len(),
-        stored_tile_bytes,
-        encoded_bytes,
-        jpeg,
+        xml,
+        image_copies: channels * 512 + time_stamp_bytes * 8 + event_bytes * 64,
+        images: images.into_values().collect(),
     })
 }
 
 #[cfg(test)]
-pub(crate) mod tests {
+mod tests {
     use super::*;
     use crate::frame_cache::Cache;
     use crate::frames::tests::{strip, temporary};
@@ -398,21 +536,20 @@ pub(crate) mod tests {
     use openreadout_core::FormatReader;
     use std::sync::atomic::AtomicBool;
 
-    /// One subblock: directory pixel type, its dimensions (name, start, size,
-    /// stored size) and stored samples.
-    pub(crate) struct Block {
-        pub pixel_type: u32,
-        pub dimensions: Vec<(char, i32, u32, u32)>,
-        pub data: Vec<u8>,
+    /// One full-resolution subblock: directory pixel type and compression, its
+    /// dimensions (name, start, size) and stored samples.
+    struct Block {
+        pixel_type: u32,
+        compression: u32,
+        dimensions: Vec<(char, i32, u32)>,
+        data: Vec<u8>,
     }
 
-    pub(crate) fn block(pixel_type: u32, dims: &[(char, i32, u32)], data: Vec<u8>) -> Block {
+    fn block(pixel_type: u32, dims: &[(char, i32, u32)], data: Vec<u8>) -> Block {
         Block {
             pixel_type,
-            dimensions: dims
-                .iter()
-                .map(|&(d, start, size)| (d, start, size, size))
-                .collect(),
+            compression: 0,
+            dimensions: dims.to_vec(),
             data,
         }
     }
@@ -433,22 +570,22 @@ pub(crate) mod tests {
         raw.extend(block.pixel_type.to_le_bytes());
         raw.extend(position.to_le_bytes());
         raw.extend(file_part.to_le_bytes());
-        raw.extend(0u32.to_le_bytes()); // uncompressed
+        raw.extend(block.compression.to_le_bytes());
         raw.extend([0; 6]); // pyramid type and reserved bytes
         raw.extend((block.dimensions.len() as u32).to_le_bytes());
-        for &(dimension, start, size, stored) in &block.dimensions {
+        for &(dimension, start, size) in &block.dimensions {
             raw.extend([dimension as u8, 0, 0, 0]);
             raw.extend(start.to_le_bytes());
             raw.extend(size.to_le_bytes());
             raw.extend(0f32.to_le_bytes());
-            raw.extend(stored.to_le_bytes());
+            raw.extend(size.to_le_bytes());
         }
         raw
     }
 
     /// A minimal single-file ZISRAWFILE: header, metadata XML, uncompressed
     /// subblocks and their directory, laid out as pinned openreadout-czi reads them.
-    pub(crate) fn synthetic_parts(blocks: &[Block], xml: &str, file_part: u32) -> Vec<u8> {
+    fn synthetic_parts(blocks: &[Block], xml: &str, file_part: u32) -> Vec<u8> {
         let mut out = Vec::new();
         segment(&mut out, "ZISRAWFILE", &[0; 512]);
         let mut metadata = vec![0; 256];
@@ -476,11 +613,11 @@ pub(crate) mod tests {
         out
     }
 
-    pub(crate) fn synthetic(blocks: &[Block], xml: &str) -> Vec<u8> {
+    fn synthetic(blocks: &[Block], xml: &str) -> Vec<u8> {
         synthetic_parts(blocks, xml, 0)
     }
 
-    pub(crate) fn xml(channels: &[(&str, &str)], scenes: &[&str]) -> String {
+    fn xml(channels: &[(&str, &str)], scenes: &[&str]) -> String {
         let channels: String = channels
             .iter()
             .enumerate()
@@ -548,7 +685,7 @@ pub(crate) mod tests {
     }
 
     /// The validated reader path without the shared-budget cache.
-    pub(crate) fn raw(path: &Path, selection: Selection) -> Result<RawFrame, String> {
+    fn raw(path: &Path, selection: Selection) -> Result<RawFrame, String> {
         let plan = scan(path)?;
         let mut dataset = openreadout_czi::CziReader.open(path).map_err(error)?;
         let images = dataset.info().map_err(error)?.images;
@@ -827,7 +964,34 @@ pub(crate) mod tests {
             assert_eq!(budget.status().unwrap().used_bytes, 0);
             assert_eq!(std::fs::read(&source).unwrap(), bytes);
         }
-        // Oversized XML and a missing directory stop before the reader allocates.
+        // Only the first position is oversized: browsing cannot start there.
+        let first = far
+            .iter()
+            .map(|tile| {
+                let mut dimensions = tile.dimensions.clone();
+                dimensions.push(('S', 0, 1));
+                block(0, &dimensions, vec![0])
+            })
+            .chain([block(0, &[('X', 0, 1), ('Y', 0, 1), ('S', 1, 1)], vec![0])])
+            .collect::<Vec<_>>();
+        let source = temp.join("first-oversized.czi");
+        std::fs::write(&source, synthetic(&first, &xml(&[], &[]))).unwrap();
+        let budget = Budget::new(temp.join("budget-first")).unwrap();
+        let error = Cache::new(Format::Czi, source, budget).err().unwrap();
+        assert!(error.contains("starts at the first position"), "{error}");
+        // A segment whose end overflows must not wrap the header walk.
+        let mut overflowing = synthetic(&[plain(0, 0)], &xml(&[], &[]));
+        let mut deleted = [0; 32];
+        deleted[..7].copy_from_slice(b"DELETED");
+        deleted[16..24].copy_from_slice(&(u64::MAX - 31).to_le_bytes());
+        overflowing.extend(deleted);
+        let source = temp.join("overflowing-segment.czi");
+        std::fs::write(&source, overflowing).unwrap();
+        assert!(scan(&source)
+            .err()
+            .unwrap()
+            .contains("segment extends beyond"));
+        // Oversized XML and directories and a missing directory stop before the reader allocates.
         let mut bytes = synthetic(&[plain(0, 0)], &xml(&[], &[]));
         let metadata = u64_at(&bytes, SEGMENT_HEADER_LEN as usize + 60) as usize;
         let mut large = bytes.clone();
@@ -837,12 +1001,132 @@ pub(crate) mod tests {
         std::fs::write(&source, large).unwrap();
         assert!(scan(&source).err().unwrap().contains("32 MiB"));
         let header = SEGMENT_HEADER_LEN as usize;
+        let directory = u64_at(&bytes, header + 52) as usize;
+        let mut large = bytes.clone();
+        large[directory + 24..directory + 32].copy_from_slice(&(129 * MIB).to_le_bytes());
+        std::fs::write(&source, large).unwrap();
+        std::fs::OpenOptions::new()
+            .write(true)
+            .open(&source)
+            .unwrap()
+            .set_len(directory as u64 + 32 + 129 * MIB)
+            .unwrap();
+        assert!(scan(&source).err().unwrap().contains("128 MiB"));
         bytes[header + 52..header + 60].copy_from_slice(&0u64.to_le_bytes());
         std::fs::write(&source, bytes).unwrap();
         assert!(scan(&source)
             .err()
             .unwrap()
             .contains("intact subblock directory"));
+        std::fs::remove_dir_all(temp).unwrap();
+    }
+
+    /// A bare gray8 JPEG XR codestream header: no tiling, short header, DC only.
+    fn jpeg_xr_header(width: u16, height: u16) -> Vec<u8> {
+        let mut raw = b"WMPHOTO\0".to_vec();
+        raw.extend([0x10, 0x00, 0x80, 0x01]);
+        raw.extend((width - 1).to_be_bytes());
+        raw.extend((height - 1).to_be_bytes());
+        raw.extend([0x03, 0x00, 0, 0, 0, 0]);
+        raw
+    }
+
+    #[test]
+    fn decode_reservation_follows_the_readers_tile_batches() {
+        let temp = temporary();
+        let source = temp.join("large-tile.czi");
+        // One sparse 8192 × 8192 gray16 tile: 128 MiB decoded and stored.
+        let mut bytes = synthetic(
+            &[block(1, &[('X', 0, 8192), ('Y', 0, 8192)], Vec::new())],
+            &xml(&[], &[]),
+        );
+        let subblock = 544 + 32 + 256 + xml(&[], &[]).len();
+        bytes[subblock + 32 + 8..subblock + 32 + 16].copy_from_slice(&(128 * MIB).to_le_bytes());
+        std::fs::write(&source, &bytes).unwrap();
+        let file = std::fs::OpenOptions::new()
+            .write(true)
+            .open(&source)
+            .unwrap();
+        file.set_len(bytes.len() as u64 + 128 * MIB).unwrap();
+        drop(file);
+        let plan = scan(&source).unwrap();
+        assert_eq!(plan.images.len(), 1);
+        assert_eq!(plan.images[0].count, 1);
+        // Payload, decoded tile, converted copy, reader plane and assembled frame:
+        // a single tile is never multiplied by the thread count.
+        let peak = plan.decode_peak(0, 128 * MIB);
+        assert!(peak >= 5 * 128 * MIB, "{peak}");
+        assert!(
+            peak < 5 * 128 * MIB + plan.metadata_workspace + MIB,
+            "{peak}"
+        );
+        // Many small tiles batch up to the thread count, but never past the tiles.
+        let small = Tiles {
+            count: 3,
+            min_output_bytes: MIB,
+            max_workspace: 3 * MIB,
+        };
+        let many = Plan {
+            images: vec![small],
+            ..plan
+        };
+        let batch = (rayon::current_num_threads() as u64).min(3);
+        assert_eq!(
+            many.decode_peak(0, 0),
+            many.metadata_workspace + batch * 3 * MIB + FRAME_OVERHEAD
+        );
+        std::fs::remove_dir_all(temp).unwrap();
+    }
+
+    #[test]
+    fn jpeg_xr_headers_must_match_their_directory_entries() {
+        let temp = temporary();
+        let source = temp.join("jpeg-xr.czi");
+        for (header, error) in [
+            (jpeg_xr_header(2, 1), None),
+            (
+                jpeg_xr_header(4096, 4096),
+                Some("disagrees with its directory entry"),
+            ),
+            (vec![0; 16], Some("header is unreadable")),
+        ] {
+            let mut tile = block(0, &[('X', 0, 2), ('Y', 0, 1)], header);
+            tile.compression = 4;
+            std::fs::write(&source, synthetic(&[tile], &xml(&[], &[]))).unwrap();
+            match (scan(&source), error) {
+                (Ok(plan), None) => assert_eq!(plan.images[0].count, 1),
+                (Err(actual), Some(expected)) => assert!(actual.contains(expected), "{actual}"),
+                (result, _) => panic!("{:?}", result.err()),
+            }
+        }
+        std::fs::remove_dir_all(temp).unwrap();
+    }
+
+    #[test]
+    fn opening_reserves_xml_strings_copied_into_every_image() {
+        let temp = temporary();
+        let source = temp.join("long-names.czi");
+        let name = "n".repeat(2 * MIB as usize);
+        let blocks: Vec<_> = (0..64)
+            .map(|scene| block(0, &[('X', 0, 1), ('Y', 0, 1), ('S', scene, 1)], vec![0]))
+            .collect();
+        let bytes = synthetic(&blocks, &xml(&[(&name, "#FFFFFFFF")], &[]));
+        std::fs::write(&source, &bytes).unwrap();
+        let plan = scan(&source).unwrap();
+        let strings = xml_strings(&source, plan.xml).unwrap();
+        assert!(strings >= 2 * MIB);
+        assert!(plan.opening_bytes(strings) >= 65 * 2 * strings);
+        let budget = Budget::new(temp.join("budget")).unwrap();
+        budget.set_limit(crate::memory::MIN_LIMIT_BYTES).unwrap();
+        let error = Cache::new(Format::Czi, source.clone(), Arc::clone(&budget))
+            .err()
+            .unwrap();
+        assert!(
+            error.contains("does not fit the application memory budget"),
+            "{error}"
+        );
+        assert_eq!(budget.status().unwrap().used_bytes, 0);
+        assert_eq!(std::fs::read(&source).unwrap(), bytes);
         std::fs::remove_dir_all(temp).unwrap();
     }
 
