@@ -34,6 +34,7 @@ import { visibleChannelSettings } from "./color-settings";
 import { bindColorRenderer } from "./color-renderer";
 import { createGpuColorDrawer } from "./gpu-color-drawer";
 import { fitInitialImage } from "./initial-fit";
+import { statusFor } from "./status";
 import {
   ImageLoader,
   imageTileCacheCount,
@@ -135,6 +136,8 @@ const blankImage = () => ({
   cancelInitialFit: undefined as (() => void) | undefined,
 });
 let current = blankImage();
+// Shown until the next image state arrives.
+let statusMessage: { text: string; error: boolean } | null = null;
 let saving = false;
 // Freeze edits while an update stops image work and installs.
 let updating = false;
@@ -171,7 +174,7 @@ const displayColors = () =>
 // Keep display failures across later status updates for the same image.
 const displayError = (message: string) => {
   current.tileError = message;
-  if (current.image) showImage(current.image);
+  renderStatus();
 };
 const GpuColorDrawer = createGpuColorDrawer(
   OpenSeadragon,
@@ -294,6 +297,19 @@ function updatePointTool(key?: keyof AnnotationSettings) {
   $("filename").classList.toggle("unsaved", dirty);
   $<HTMLButtonElement>("save-button").disabled =
     !editable || (!dirty && !rois.some((roi) => roi.points.length > 0));
+  renderStatus();
+}
+
+function renderStatus() {
+  const { text, title, error } = statusFor({
+    ...current,
+    message: statusMessage,
+    saving,
+  });
+  const status = $("status");
+  if (status.textContent !== text) status.textContent = text;
+  status.title = title;
+  status.classList.toggle("error", error);
 }
 
 async function discardChanges() {
@@ -342,11 +358,10 @@ async function saveAnnotations() {
   )
     return;
   saving = true;
+  statusMessage = null;
   session.saveError = null;
   session.saveNotice = null;
   updatePointTool();
-  if (session.image) showImage(session.image);
-  let completed = false;
   try {
     const target = await invoke<AnnotationTarget>("annotation_target", {
       id,
@@ -375,8 +390,6 @@ async function saveAnnotations() {
       inspect: (path) =>
         invoke<AnnotationTarget>("annotation_target", { id, path }),
       write: async (path, overwrite, acknowledgment) => {
-        $("status").classList.remove("error");
-        $("status").textContent = "Saving annotations…";
         const result = await invoke<SaveResult>("save_annotations", {
           id,
           path,
@@ -391,17 +404,11 @@ async function saveAnnotations() {
     if (!path) return;
     session.savedPath = path;
     session.dirty = false;
-    completed = true;
   } catch (error) {
     session.saveError = String(error);
   } finally {
     saving = false;
     updatePointTool();
-    if (current.image) showImage(current.image);
-    if (completed && !$("status").classList.contains("error")) {
-      $("status").textContent = session.saveNotice || "Saved";
-      $("status").title = session.saveNotice || "Saved";
-    }
   }
 }
 
@@ -499,11 +506,10 @@ function resetViewer(preserveDisplay = false) {
 }
 
 function showError(message: string) {
+  statusMessage = { text: message, error: true };
   setLoading(false);
   $("viewer").dataset.phase = "error";
-  $("status").textContent = current.saveError || message;
-  $("status").title = current.saveError || message;
-  $("status").classList.add("error");
+  renderStatus();
 }
 
 function loadAnnotations(id: string) {
@@ -525,12 +531,13 @@ function loadAnnotations(id: string) {
       )
         return;
       session.annotationError = `Annotations could not load: ${String(error)}`;
-      if (session.image) showImage(session.image);
+      renderStatus();
     },
   );
 }
 
 function showImage(state: ImageState) {
+  statusMessage = null;
   if (!selectedPath && state.path) {
     selectedPath = state.path;
     folder.select(state.path);
@@ -580,37 +587,7 @@ function showImage(state: ImageState) {
   $("viewer").dataset.phase = state.phase;
   $("filename").title = state.name;
   setLoading(state.phase === "loading", state.progress);
-  const { saveError, saveNotice, annotationError, tileError } = current;
-  $("status").classList.toggle(
-    "error",
-    state.phase === "error" ||
-      saveError !== null ||
-      annotationError !== null ||
-      (tileError !== null && state.phase !== "cancelled"),
-  );
-  const errorStatus =
-    saveError ||
-    (state.phase === "error"
-      ? state.error || "Could not load image"
-      : annotationError || (state.phase !== "cancelled" ? tileError : null));
-  const status =
-    errorStatus ||
-    (saving
-      ? "Saving annotations…"
-      : state.phase === "cancelled"
-        ? "Cancelled"
-        : saveNotice ||
-          (state.phase === "loading"
-            ? state.previewReady
-              ? "Loading detail…"
-              : state.width > 0
-                ? "Building preview…"
-                : "Reading image…"
-            : state.readOnly
-              ? "Browsing only · annotations unavailable"
-              : ""));
-  if ($("status").textContent !== status) $("status").textContent = status;
-  $("status").title = errorStatus || saveNotice || state.detail || status;
+  renderStatus();
   const { degrees } = orientation(state.orientation);
   const [displayWidth, displayHeight] =
     degrees % 180 === 0
@@ -769,11 +746,11 @@ async function openPath(path: string, checked = false) {
   folderError = null;
   folder.select(path);
   resetViewer();
+  statusMessage = { text: "Opening…", error: false };
+  renderStatus();
   $("viewer").dataset.phase = "loading";
   $("filename").textContent = path.split(/[\\/]/).pop() || path;
   $("filename").title = $("filename").textContent || "";
-  $("status").textContent = "Opening…";
-  $("status").classList.remove("error");
   setLoading(true);
   await loader.open(path);
 }
@@ -802,11 +779,14 @@ async function chooseImage() {
 
 async function cancelLoad() {
   if (!loading) return;
-  $("status").textContent = "Cancelling…";
+  statusMessage = { text: "Cancelling…", error: false };
+  renderStatus();
   $<HTMLButtonElement>("cancel-button").disabled = true;
   if (await loader.cancel()) {
     setLoading(false);
-    $("status").textContent = "Cancelled";
+    // Without an image state, nothing else reports the cancellation.
+    if (!current.image) statusMessage = { text: "Cancelled", error: false };
+    renderStatus();
     $("viewer").dataset.phase = "cancelled";
   }
   $<HTMLButtonElement>("cancel-button").disabled = false;
@@ -838,10 +818,7 @@ viewer.addHandler("tile-load-failed", (event) => {
   )
     return;
   current.tileError = message;
-  if (current.saveError) return;
-  $("status").textContent = message;
-  $("status").title = message;
-  $("status").classList.add("error");
+  renderStatus();
 });
 $("zoom-in-button").addEventListener("click", () => {
   viewer.viewport.zoomBy(1.5);
