@@ -666,16 +666,16 @@ fn scan(path: &Path, budget: &Arc<Budget>) -> Result<Plan, String> {
 
     // XML is copied and parsed into a DOM; directory entries are expanded, grouped
     // into scenes and cloned for each plane read. Interpreted attachments are read
-    // whole and kept as values; lossy UTF-8 can triple description bytes, and one
-    // description's conversion temporaries can approach its payload. Allow
-    // generous factors.
+    // whole and kept as values. Lossy UTF-8 can triple description bytes; while
+    // converting, the payload, the doubled string capacity (up to 4x) and the
+    // final description (3x) can coexist. Allow generous factors.
     let metadata_workspace = xml.1 * 32
         + directory_bytes * 8
         + u64::from(count) * 512
         + attachment_bytes * 4
         + attachments * 256
         + time_stamp_bytes * 16
-        + event_bytes * 4
+        + event_bytes * 5
         + events * 64
         + descriptions * 3
         + segments * 64
@@ -1442,6 +1442,37 @@ mod tests {
             plan.image_copies
         );
         assert!(plan.opening_bytes(0) >= 2 * 3 * actual as u64);
+        std::fs::remove_dir_all(temp).unwrap();
+    }
+
+    #[test]
+    fn invalid_utf8_event_descriptions_reserve_their_conversion_peak() {
+        let temp = temporary();
+        let source = temp.join("lossy-events.czi");
+        let text = 1024 * 1024usize;
+        let mut events = vec![0; 8];
+        events[4..8].copy_from_slice(&1u32.to_le_bytes());
+        let mut record = [0; 20];
+        record[..4].copy_from_slice(&((20 + text) as i32).to_le_bytes());
+        record[16..20].copy_from_slice(&(text as i32).to_le_bytes());
+        events.extend(record);
+        events.resize(events.len() + text, 0xFF);
+        let payload = events.len() as u64;
+        let bytes = with_attachments(
+            synthetic(
+                &[block(0, &[('X', 0, 1), ('Y', 0, 1)], vec![0])],
+                &xml(&[], &[]),
+            ),
+            &[("CZEVL", events)],
+        );
+        std::fs::write(&source, bytes).unwrap();
+        // Payload, doubled lossy capacity (4x) and final description (3x) coexist.
+        let plan = planned(&source).unwrap();
+        assert!(
+            plan.metadata_workspace >= payload + 7 * text as u64 + 8 * MIB,
+            "{}",
+            plan.metadata_workspace
+        );
         std::fs::remove_dir_all(temp).unwrap();
     }
 
