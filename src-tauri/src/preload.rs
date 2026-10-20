@@ -455,7 +455,7 @@ pub(crate) fn run(context: &LoadContext, foreground: &Arc<Job>) {
                 }
                 *active = Some(Arc::downgrade(&job));
             }
-            let result = backend::load(&job);
+            let result = backend::pyramid::load(&job);
             backend::finish_decoder(&job);
             // Even a native pyramid must release its workers after preloading.
             job.cancel();

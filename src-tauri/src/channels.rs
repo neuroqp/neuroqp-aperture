@@ -1,5 +1,5 @@
 //! Explicit TIFF channel layouts. Ordinary pages never imply channels.
-use crate::backend::field;
+use crate::backend::pyramid::field;
 use serde::{Deserialize, Serialize};
 
 pub const MAX_CHANNELS: u32 = 32;

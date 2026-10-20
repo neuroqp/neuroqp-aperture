@@ -1,8 +1,8 @@
 //! Display assets served through the aperture:// protocol: previews and tiles.
 use super::{
     cache::{tree_size, CACHE_LIMIT},
-    extract_plane, field,
     process::{input, run},
+    pyramid::{extract_plane, field},
     Job,
 };
 use std::{
@@ -417,7 +417,7 @@ fn native_tile(job: &Job, level: u32, x: u32, y: u32) -> Result<Vec<u8>, String>
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::backend::{dimensions, tests::wait_ready, Backend, NEXT_ID};
+    use crate::backend::{pyramid::dimensions, tests::wait_ready, Backend, NEXT_ID};
     use std::{path::Path, process::Command};
 
     #[test]
