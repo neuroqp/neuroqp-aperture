@@ -78,6 +78,67 @@ pub fn source_path(alias: &Path) -> io::Result<PathBuf> {
     }
 }
 
+/// Resolve the same native cache directory used by Tauri before creating a WebView.
+pub fn app_cache_root(identifier: &str) -> std::io::Result<PathBuf> {
+    #[cfg(target_os = "linux")]
+    let root = std::env::var_os("XDG_CACHE_HOME")
+        .map(PathBuf::from)
+        .filter(|path| path.is_absolute())
+        .or_else(|| std::env::home_dir().map(|home| home.join(".cache")))
+        .ok_or_else(|| std::io::Error::other("Cannot locate the user cache directory."))?;
+    #[cfg(windows)]
+    let root = windows_cache_root()?;
+    Ok(root.join(identifier))
+}
+
+#[cfg(windows)]
+fn windows_cache_root() -> std::io::Result<PathBuf> {
+    use std::{
+        ffi::{c_void, OsString},
+        os::windows::ffi::OsStringExt,
+    };
+    use windows_sys::core::GUID;
+    #[link(name = "shell32")]
+    extern "system" {
+        fn SHGetKnownFolderPath(
+            folder: *const GUID,
+            flags: u32,
+            token: *mut c_void,
+            path: *mut *mut u16,
+        ) -> i32;
+    }
+    #[link(name = "ole32")]
+    extern "system" {
+        fn CoTaskMemFree(memory: *mut c_void);
+    }
+    const LOCAL_APP_DATA: GUID = GUID {
+        data1: 0xf1b32785,
+        data2: 0x6fba,
+        data3: 0x4fcf,
+        data4: [0x9d, 0x55, 0x7b, 0x8e, 0x7f, 0x15, 0x70, 0x91],
+    };
+    let mut directory = std::ptr::null_mut();
+    // The OS returns an allocated, null-terminated UTF-16 directory path.
+    unsafe {
+        let result = SHGetKnownFolderPath(&LOCAL_APP_DATA, 0, std::ptr::null_mut(), &mut directory);
+        if result < 0 || directory.is_null() {
+            CoTaskMemFree(directory.cast());
+            return Err(std::io::Error::other(format!(
+                "Cannot locate LocalAppData: HRESULT {result:#x}"
+            )));
+        }
+        let mut length = 0;
+        while *directory.add(length) != 0 {
+            length += 1;
+        }
+        let path = PathBuf::from(OsString::from_wide(std::slice::from_raw_parts(
+            directory, length,
+        )));
+        CoTaskMemFree(directory.cast());
+        Ok(path)
+    }
+}
+
 pub fn command(program: &std::ffi::OsStr) -> Command {
     #[cfg(windows)]
     let command = {
