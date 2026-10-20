@@ -52,5 +52,4 @@ const icons = {
 
 export type IconName = keyof typeof icons;
 export const icon = (name: IconName) =>
-  createElement(icons[name], { "aria-hidden": "true", "stroke-width": 1.6 })
-    .outerHTML;
+  createElement(icons[name], { "aria-hidden": "true" }).outerHTML;

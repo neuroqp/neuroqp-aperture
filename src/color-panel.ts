@@ -17,7 +17,8 @@ import {
   type ColorChannel,
   type ColorSettings,
 } from "./color-settings";
-import { percentileRange } from "./display-settings";
+import { percentileRange } from "./display";
+import { bindHelp } from "./help";
 import "./color-panel.css";
 
 const trash = icon("trash");
@@ -79,9 +80,13 @@ export function bindColorPanel(onChange: (settings: ColorSettings) => void) {
     shade = get("shade"),
     hex = get<HTMLInputElement>("hex"),
     hue = get<HTMLInputElement>("hue");
-  const help = get("help-button"),
-    helpText = get("help-text"),
-    helpWrap = help.parentElement!;
+  const helpButton = get("help-button"),
+    helpText = get("help-text");
+  const help = bindHelp(helpButton, helpText, () => {
+    const rect = helpButton.getBoundingClientRect();
+    helpText.style.left = `${Math.max(12, Math.min(rect.left, innerWidth - helpText.offsetWidth - 12))}px`;
+    helpText.style.top = `${Math.min(rect.bottom + 8, innerHeight - helpText.offsetHeight - 12)}px`;
+  });
   let channels: ColorChannel[] = [],
     settings = defaultColorSettings([]),
     enabled = false,
@@ -90,7 +95,6 @@ export function bindColorPanel(onChange: (settings: ColorSettings) => void) {
     logarithmic = false;
   let editing: string | null = null,
     hsv = { h: 0, s: 1, v: 1 },
-    helpPinned = false,
     suppressClick = false;
   type Pending = { source: string; edgeId?: number };
   let pending: Pending | null = null;
@@ -301,19 +305,6 @@ export function bindColorPanel(onChange: (settings: ColorSettings) => void) {
       .forEach((element) => element.classList.remove("pending", "drop-target"));
     draw();
   }
-  function showHelp(show: boolean) {
-    helpText.hidden = !show;
-    help.setAttribute("aria-expanded", String(show));
-    if (show) {
-      const rect = help.getBoundingClientRect();
-      helpText.showPopover();
-      helpText.style.left = `${Math.max(12, Math.min(rect.left, innerWidth - helpText.offsetWidth - 12))}px`;
-      helpText.style.top = `${Math.min(rect.bottom + 8, innerHeight - helpText.offsetHeight - 12)}px`;
-    } else {
-      helpText.hidePopover();
-      helpPinned = false;
-    }
-  }
   function closeEditor(restoreFocus = false) {
     editor.hidePopover();
     if (restoreFocus && editing)
@@ -324,7 +315,7 @@ export function bindColorPanel(onChange: (settings: ColorSettings) => void) {
     stopRangeGesture();
     cancelConnection();
     closeEditor();
-    showHelp(false);
+    help.show(false);
   }
   function selectEdge(id: number) {
     selected = id;
@@ -689,7 +680,7 @@ export function bindColorPanel(onChange: (settings: ColorSettings) => void) {
     get("hex-error").hidden = true;
   }
   function openEditor(color: string) {
-    showHelp(false);
+    help.show(false);
     editing = color;
     hsv = toHSV(settings.colors[color]);
     syncPicker();
@@ -783,8 +774,8 @@ export function bindColorPanel(onChange: (settings: ColorSettings) => void) {
       announce("Connection cancelled.");
       return true;
     }
-    if (!helpText.hidden) {
-      showHelp(false);
+    if (help.visible()) {
+      help.show(false);
       return true;
     }
     return false;
@@ -798,23 +789,6 @@ export function bindColorPanel(onChange: (settings: ColorSettings) => void) {
   });
   editor.addEventListener("toggle", () => {
     if (!editor.matches(":popover-open")) editing = null;
-  });
-  help.addEventListener("click", () => {
-    const pinned = !helpPinned;
-    showHelp(pinned);
-    helpPinned = pinned;
-  });
-  helpWrap.addEventListener("pointerenter", () => showHelp(true));
-  helpWrap.addEventListener("pointerleave", () => {
-    if (!helpPinned && !helpWrap.contains(document.activeElement))
-      showHelp(false);
-  });
-  help.addEventListener("focus", () => showHelp(true));
-  help.addEventListener("blur", () => {
-    if (!helpPinned) showHelp(false);
-  });
-  document.addEventListener("pointerdown", (event) => {
-    if (!helpWrap.contains(event.target as Node)) showHelp(false);
   });
   patch.addEventListener("pointercancel", cancelConnection);
   patch.addEventListener("lostpointercapture", () => {
@@ -849,11 +823,9 @@ export function bindColorPanel(onChange: (settings: ColorSettings) => void) {
       render();
     },
     visibility(open: boolean) {
-      if (!open) closeTransient();
-      else requestAnimationFrame(draw);
+      if (open) draw();
+      else closeTransient();
     },
-    closeTransient,
     handleEscape,
-    redraw: draw,
   };
 }

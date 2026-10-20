@@ -6,6 +6,7 @@ import {
   numberOfCounters,
   pointAppearance,
   storedToImage,
+  type AnnotationPoint,
   type ImageBounds,
   type PointRoi,
   type PointReference,
@@ -31,12 +32,15 @@ const element = (name: string, attributes: Record<string, string | number>) => {
 
 export class AnnotationViewer {
   private image: ImageBounds | null = null;
-  private rois: PointRoi[] = [];
   private overlay = element("svg", {
     "aria-label": "Point annotations",
     "data-annotations": "",
   });
   private viewer: OpenSeadragon.Viewer;
+  private markers: (PointReference & {
+    node: SVGElement;
+    point: AnnotationPoint;
+  })[] = [];
   private points: ScreenPoint[] = [];
   private pointer: OpenSeadragon.Point | null = null;
   private space = false;
@@ -320,17 +324,9 @@ export class AnnotationViewer {
     this.render();
   }
   setRois(rois: PointRoi[]) {
-    this.rois = rois;
-    this.render();
-  }
-
-  render = () => {
-    const item = this.viewer.world.getItemAt(0);
-    this.overlay.replaceChildren();
-    this.points = [];
-    if (!item || !this.image) return;
+    this.markers = [];
     const fragment = document.createDocumentFragment();
-    for (const [roiIndex, roi] of this.rois.entries()) {
+    for (const [roiIndex, roi] of rois.entries()) {
       if (!onFirstPage(roi)) continue;
       const radius =
         [...Object.values(pointSizes), 12, 16][roi.size] ?? pointSizes.Medium;
@@ -338,21 +334,7 @@ export class AnnotationViewer {
       for (const [index, point] of roi.points.entries()) {
         const { color, label } = pointAppearance(roi, index, multiple);
         if (point.position > 1) continue;
-        const stored = storedToImage(point, this.image.width, item.getFlip());
-        const viewportPoint = item.imageToViewportCoordinates(
-          stored.x,
-          stored.y,
-          true,
-        );
-        const screen = this.viewer.viewport.pixelFromPoint(viewportPoint, true);
-        this.points.push({
-          roiIndex,
-          pointIndex: index,
-          x: screen.x,
-          y: screen.y,
-        });
         const group = element("g", {
-          transform: `translate(${screen.x} ${screen.y})`,
           stroke: color,
           "stroke-width": 1.5,
           fill: "none",
@@ -388,36 +370,30 @@ export class AnnotationViewer {
           text.textContent = label;
           group.append(text);
         }
+        this.markers.push({ roiIndex, pointIndex: index, node: group, point });
         fragment.append(group);
       }
     }
-    this.overlay.append(fragment);
+    this.overlay.replaceChildren(fragment);
+    this.render();
+  }
+
+  // Viewport changes only move the existing markers.
+  render = () => {
+    const item = this.viewer.world.getItemAt(0);
+    const image = this.image;
+    this.points = [];
+    this.overlay.style.display = item && image ? "" : "none";
+    if (item && image)
+      for (const { node, point, ...reference } of this.markers) {
+        const stored = storedToImage(point, image.width, item.getFlip());
+        const screen = this.viewer.viewport.pixelFromPoint(
+          item.imageToViewportCoordinates(stored.x, stored.y, true),
+          true,
+        );
+        node.setAttribute("transform", `translate(${screen.x} ${screen.y})`);
+        this.points.push({ ...reference, x: screen.x, y: screen.y });
+      }
     this.updateInteraction();
   };
-
-  dispose() {
-    this.viewer.removeHandler("canvas-press", this.press);
-    this.viewer.removeHandler("canvas-drag", this.drag);
-    this.viewer.removeHandler("canvas-drag-end", this.dragEnd);
-    this.viewer.removeHandler("canvas-release", this.release);
-    this.viewer.removeHandler("canvas-click", this.click);
-    this.viewer.removeHandler("canvas-exit", this.exit);
-    this.viewer.removeHandler("canvas-nonprimary-press", this.buttonsChange);
-    this.viewer.removeHandler("canvas-nonprimary-release", this.buttonsChange);
-    this.viewer.canvas.removeEventListener("pointermove", this.pointerMove);
-    this.viewer.canvas.removeEventListener("pointerenter", this.enter);
-    document.removeEventListener("pointerdown", this.controlPress, true);
-    this.mouseControl = null;
-    this.viewer.canvas.removeEventListener(
-      "pointercancel",
-      this.resetInteraction,
-    );
-    document.removeEventListener("keydown", this.keyDown, true);
-    document.removeEventListener("keyup", this.keyUp, true);
-    window.removeEventListener("blur", this.resetInteraction);
-    for (const event of ["animation", "resize", "open"] as const)
-      this.viewer.removeHandler(event, this.render);
-    this.viewer.world.removeHandler("add-item", this.render);
-    this.overlay.remove();
-  }
 }

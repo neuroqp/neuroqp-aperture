@@ -4,7 +4,23 @@ import {
   adjustDisplay,
   channelHistograms,
   defaultDisplaySettings as defaults,
-} from "./display-settings.ts";
+  component,
+  splitChannels,
+} from "./display.ts";
+
+test("RGBA pixels split into one plane per requested component", () => {
+  const rgba = Uint8ClampedArray.of(1, 2, 3, 4, 5, 6, 7, 8);
+  assert.deepEqual(
+    splitChannels(rgba, 4).map((plane) => [...plane]),
+    [
+      [1, 5],
+      [2, 6],
+      [3, 7],
+      [4, 8],
+    ],
+  );
+  assert.deepEqual([...component(rgba, 3)], [4, 8]);
+});
 
 test("channel histograms retain independent original samples and ignore transparency", () => {
   const planes = [
@@ -42,7 +58,7 @@ test("display adjustments round, ignore invalid values and leave defaults unchan
 });
 
 test("display transfer clips the selected range and resets to identity", async () => {
-  const { displayValue } = await import("./display-settings.ts");
+  const { displayValue } = await import("./display.ts");
   for (let value = 0; value < 256; value++)
     assert.equal(displayValue(value, defaults), value / 255);
   const range = { minimum: 50, maximum: 150 };
@@ -54,7 +70,7 @@ test("display transfer clips the selected range and resets to identity", async (
 });
 
 test("percentile presets clip the requested tails and handle uniform and empty images", async () => {
-  const { percentileRange } = await import("./display-settings.ts");
+  const { percentileRange } = await import("./display.ts");
   const bins = Array(256).fill(0);
   bins[0] = 10;
   bins[20] = 40;
@@ -80,7 +96,7 @@ test("percentile presets clip the requested tails and handle uniform and empty i
 });
 
 test("0–100 uses occupied histogram endpoints without clipping rare intensities", async () => {
-  const { percentileRange } = await import("./display-settings.ts");
+  const { percentileRange } = await import("./display.ts");
   const bins = Array(256).fill(0);
   bins[30] = 1;
   bins[100] = 10000;

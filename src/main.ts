@@ -27,14 +27,15 @@ import { bindTools, toolPanels } from "./tools";
 import { bindTheme } from "./theme";
 import { bindSettings, settingsPanel } from "./settings";
 import { bindUpdates, updatePanel } from "./updates";
-import { loadChannelHistograms } from "./display";
-import { channelHistograms } from "./display-settings";
+import { bindWindowControls } from "./window-controls";
+import { channelHistograms, loadChannelHistograms } from "./display";
 import { bindColorPanel } from "./color-panel";
 import { bindDimensionNavigation } from "./dimension-navigation";
 import { visibleChannelSettings } from "./color-settings";
 import { bindColorRenderer } from "./color-renderer";
 import { createGpuColorDrawer } from "./gpu-color-drawer";
 import { fitInitialImage } from "./initial-fit";
+import { statusFor } from "./status";
 import {
   ImageLoader,
   imageTileCacheCount,
@@ -115,28 +116,55 @@ document.querySelector<HTMLDivElement>("#app")!.innerHTML = `
 
 const $ = <T extends HTMLElement = HTMLElement>(id: string) =>
   document.getElementById(id)! as T;
-const tools = bindTools(updatePointTool, {
-  visibility: (open) => {
-    if (open) colorPanel.redraw();
-    else colorPanel.closeTransient();
-  },
-  handleEscape: () => colorPanel.handleEscape(),
+
+// Everything tied to one native image id; a new id starts from a fresh value.
+const blankImage = () => ({
+  id: null as string | null,
+  image: null as ImageState | null,
+  rois: [] as PointRoi[],
+  annotationsReady: false,
+  dirty: false,
+  savedPath: null as string | null,
+  annotationError: null as string | null,
+  tileError: null as string | null,
+  saveError: null as string | null,
+  saveNotice: null as string | null,
+  previewAdded: false,
+  previewDisplayed: false,
+  pendingPreview: null as OpenSeadragon.TiledImage | null,
+  pyramidAdded: false,
+  histogramLoad: null as AbortController | null,
+  cancelInitialFit: undefined as (() => void) | undefined,
 });
+let current = blankImage();
+// Shown until the next image state arrives.
+let statusMessage: { text: string; error: boolean } | null = null;
+let saving = false;
+// Freeze edits while an update stops image work and installs.
+let updating = false;
+let dialogOpen = false;
+let loading = false;
+let selectedPath: string | null = null;
+let folderError: string | null = null;
+let pendingViewportBounds: OpenSeadragon.Rect | null = null;
+const downloads = new Set<OpenSeadragon.ImageJob>();
+const loadedImages = new WeakSet<OpenSeadragon.TiledImage>();
+const saveDialog = $<HTMLDialogElement>("save-dialog");
+const settingsDialog = $<HTMLDialogElement>("settings-dialog");
+const frozen = () => saving || updating;
+const blocked = () => frozen() || dialogOpen || settingsDialog.open;
+const tileUrl = (id: string) => convertFileSrc(id, "aperture");
+
+let colorRenderer: ReturnType<typeof bindColorRenderer> | undefined;
+const colorPanel = bindColorPanel(() => colorRenderer?.refresh());
+const tools = bindTools(updatePointTool, colorPanel);
 const settings = bindSettings();
 bindTheme();
 const native = isTauri();
 const windowHandle = native ? getCurrentWindow() : null;
-let colorRenderer: ReturnType<typeof bindColorRenderer> | undefined;
-const colorPanel = bindColorPanel(() => colorRenderer?.refresh());
 const dimensionNavigation = bindDimensionNavigation(
   async (position, z, time, hint, projection) => {
-    if (
-      !native ||
-      saving ||
-      dialogOpen ||
-      $("settings-dialog").hasAttribute("open")
-    )
-      return false;
+    if (!native || blocked()) return false;
     setLoading(true);
     return loader.selectPlane(position, z, time, hint, projection);
   },
@@ -146,8 +174,8 @@ const displayColors = () =>
   visibleChannelSettings(colorPanel.settings(), dimensionNavigation.channel());
 // Keep display failures across later status updates for the same image.
 const displayError = (message: string) => {
-  tileError = message;
-  if (currentImage) showImage(currentImage);
+  current.tileError = message;
+  renderStatus();
 };
 const GpuColorDrawer = createGpuColorDrawer(
   OpenSeadragon,
@@ -180,163 +208,170 @@ const viewer = OpenSeadragon({
 if (new URLSearchParams(location.search).has("colorBenchmark")) {
   Object.assign(window, { __apertureViewer: viewer });
 }
+viewer.addHandler("tile-loaded", (event) => {
+  loadedImages.add(event.tiledImage);
+});
 
 colorRenderer = bindColorRenderer(
   viewer,
   displayColors,
   displayError,
   (imageId, data) => {
-    if (currentId === imageId)
+    if (current.id === imageId)
       colorPanel.setHistograms(
         channelHistograms(data.planes, data.width, data.height),
       );
   },
 );
 
-let currentImage: ImageState | null = null;
-let rois: PointRoi[] = [];
-let annotationsReady = false;
-let annotationError: string | null = null;
-let saveError: string | null = null;
-let saveNotice: string | null = null;
-let dirty = false;
-let saving = false;
-let savedPath: string | null = null;
-const saveDialog = $<HTMLDialogElement>("save-dialog");
-function editAnnotations(next: PointRoi[] | null) {
-  if (!next || next === rois || !annotationsReady || saving) return;
-  rois = next;
-  dirty = true;
-  annotationViewer.setRois(rois);
-  updatePointTool();
-}
-
 const annotationViewer = new AnnotationViewer(viewer, {
   add: (point) => {
-    if (currentImage)
+    if (current.image)
       editAnnotations(
-        addPoint(rois, point, tools.pointSettings(), currentImage),
+        addPoint(current.rois, point, tools.pointSettings(), current.image),
       );
   },
   move: (reference, point) => {
-    if (currentImage)
-      editAnnotations(movePoint(rois, reference, point, currentImage));
+    if (current.image)
+      editAnnotations(movePoint(current.rois, reference, point, current.image));
   },
-  delete: (reference) => editAnnotations(deletePoint(rois, reference)),
+  delete: (reference) => editAnnotations(deletePoint(current.rois, reference)),
   active: () => tools.pointsActive(),
-  editable: () => annotationsReady && !saving,
+  editable: () => current.annotationsReady && !frozen(),
 });
 
+async function withDialog<T>(show: () => Promise<T>) {
+  dialogOpen = true;
+  try {
+    return await show();
+  } finally {
+    dialogOpen = false;
+  }
+}
+
+function showModal(dialog: HTMLDialogElement) {
+  dialog.returnValue = "cancel";
+  return new Promise<string>((resolve) => {
+    dialog.addEventListener("close", () => resolve(dialog.returnValue), {
+      once: true,
+    });
+    dialog.showModal();
+  });
+}
+
+function setRois(rois: PointRoi[], edited: boolean) {
+  current.rois = rois;
+  if (edited) {
+    current.dirty = true;
+    // A save confirmation or warning no longer applies once points change again.
+    current.saveNotice = null;
+    if (statusMessage && !statusMessage.error) statusMessage = null;
+  }
+  annotationViewer.setRois(rois);
+}
+
+function editAnnotations(next: PointRoi[] | null) {
+  if (!next || next === current.rois || !current.annotationsReady || frozen())
+    return;
+  setRois(next, true);
+  updatePointTool();
+}
+
 function updatePointTool(key?: keyof AnnotationSettings) {
-  if (key === "counter" && annotationsReady && !saving) {
-    rois = selectCounter(rois, tools.pointSettings().counter);
-    annotationViewer.setRois(rois);
-  } else if (
-    key &&
-    annotationsReady &&
-    !saving &&
-    key !== "allSlices" &&
-    key !== "counter"
-  ) {
-    const settings = tools.pointSettings();
-    const next = updatePointRois(rois, key, settings[key]);
-    if (next !== rois) {
-      rois = next;
-      dirty = true;
-      annotationViewer.setRois(rois);
-    }
+  const editable = current.annotationsReady && !frozen();
+  if (key === "counter" && editable) {
+    setRois(selectCounter(current.rois, tools.pointSettings().counter), false);
+  } else if (key && editable && key !== "allSlices" && key !== "counter") {
+    const next = updatePointRois(current.rois, key, tools.pointSettings()[key]);
+    if (next !== current.rois) setRois(next, true);
   }
   document
     .querySelectorAll<HTMLButtonElement | HTMLInputElement | HTMLSelectElement>(
       ".point-choice, #point-labels, #point-all-slices, #point-counter, #point-counter-options button[data-counter]",
     )
     .forEach((control) => {
-      control.disabled = saving || !annotationsReady;
+      control.disabled = !editable;
     });
-  const active = tools.pointsActive();
   annotationViewer.updateInteraction();
-  $("pan-button").classList.toggle("selected", !active);
-  const count = counterCount(rois, tools.pointSettings().counter);
-  $("point-count").textContent = String(count);
+  $("pan-button").classList.toggle("selected", !tools.pointsActive());
+  const { rois, dirty } = current;
+  $("point-count").textContent = String(
+    counterCount(rois, tools.pointSettings().counter),
+  );
   $("point-count").title =
     `${rois.reduce((sum, roi) => sum + roi.points.length, 0)} points total`;
   $("filename").classList.toggle("unsaved", dirty);
   $<HTMLButtonElement>("save-button").disabled =
-    !annotationsReady ||
-    (!dirty && !rois.some((roi) => roi.points.length > 0)) ||
-    saving;
+    !editable || (!dirty && !rois.some((roi) => roi.points.length > 0));
+  renderStatus();
+}
+
+function renderStatus() {
+  const { text, title, error } = statusFor({
+    ...current,
+    message: statusMessage,
+    saving,
+  });
+  const status = $("status");
+  if (status.textContent !== text) status.textContent = text;
+  status.title = title;
+  status.classList.toggle("error", error);
 }
 
 async function discardChanges() {
-  if (saving || dialogOpen || $<HTMLDialogElement>("settings-dialog").open)
-    return false;
-  if (!dirty) return true;
-  dialogOpen = true;
-  try {
-    return await confirm(
-      "Discard unsaved point annotations? Save first to keep them.",
-      {
+  if (blocked()) return false;
+  return (
+    !current.dirty ||
+    withDialog(() =>
+      confirm("Discard unsaved point annotations? Save first to keep them.", {
         title: "Unsaved annotations",
         kind: "warning",
         okLabel: "Discard",
         cancelLabel: "Cancel",
-      },
-    );
-  } finally {
-    dialogOpen = false;
-  }
+      }),
+    )
+  );
 }
 
 async function prepareUpdate() {
-  if (saving || dialogOpen) return false;
-  if (dirty) {
-    dialogOpen = true;
-    const dialog = $<HTMLDialogElement>("update-unsaved-dialog");
-    dialog.returnValue = "cancel";
-    const choice = await new Promise<string>((resolve) => {
-      dialog.addEventListener("close", () => resolve(dialog.returnValue), {
-        once: true,
-      });
-      dialog.showModal();
-    });
-    dialogOpen = false;
+  if (blocked()) return false;
+  if (current.dirty) {
+    const choice = await withDialog(() =>
+      showModal($<HTMLDialogElement>("update-unsaved-dialog")),
+    );
     if (choice === "save") {
       await saveAnnotations();
-      if (dirty) return false;
+      if (current.dirty) return false;
     } else if (choice !== "discard") return false;
     // Keep discarded edits marked unsaved until exit; installation can still fail.
   }
   // Freeze edits before stopping image requests and joining native workers.
-  saving = true;
-  dialogOpen = true;
-  histogramLoad?.abort();
-  for (const job of downloads) job.abort();
-  downloads.clear();
+  updating = true;
+  current.histogramLoad?.abort();
+  abortDownloads();
   updatePointTool();
   return true;
 }
 
 async function saveAnnotations() {
+  const session = current;
+  const id = session.id;
   if (
     !native ||
-    saving ||
-    dialogOpen ||
-    $<HTMLDialogElement>("settings-dialog").open ||
-    !currentId ||
+    blocked() ||
+    !id ||
     $<HTMLButtonElement>("save-button").disabled
   )
     return;
-  dialogOpen = true;
   saving = true;
-  saveError = null;
-  saveNotice = null;
+  statusMessage = null;
+  session.saveError = null;
+  session.saveNotice = null;
   updatePointTool();
-  if (currentImage) showImage(currentImage);
-  let completed = false;
   try {
     const target = await invoke<AnnotationTarget>("annotation_target", {
-      id: currentId,
-      path: savedPath,
+      id,
+      path: session.savedPath,
     });
     const path = await saveAnnotationFile(target, {
       choose: async (target) => {
@@ -350,15 +385,7 @@ async function saveAnnotations() {
         $("save-overwrite-button").textContent = target.warning
           ? "Overwrite anyway"
           : "Overwrite";
-        saveDialog.returnValue = "cancel";
-        return new Promise<string>((resolve) => {
-          saveDialog.addEventListener(
-            "close",
-            () => resolve(saveDialog.returnValue),
-            { once: true },
-          );
-          saveDialog.showModal();
-        });
+        return showModal(saveDialog);
       },
       pick: (defaultPath) =>
         save({
@@ -367,56 +394,32 @@ async function saveAnnotations() {
           filters: [{ name: "TIFF image", extensions: ["tif", "tiff"] }],
         }),
       inspect: (path) =>
-        invoke<AnnotationTarget>("annotation_target", { id: currentId, path }),
+        invoke<AnnotationTarget>("annotation_target", { id, path }),
       write: async (path, overwrite, acknowledgment) => {
-        $("status").classList.remove("error");
-        $("status").textContent = "Saving annotations…";
         const result = await invoke<SaveResult>("save_annotations", {
-          id: currentId,
+          id,
           path,
-          rois,
+          rois: session.rois,
           overwrite,
           acknowledgment,
         });
-        if (result.saved) saveNotice = result.warning;
+        if (result.saved) session.saveNotice = result.warning;
         return result;
       },
     });
     if (!path) return;
-    savedPath = path;
-    dirty = false;
-    completed = true;
+    session.savedPath = path;
+    session.dirty = false;
+    // Confirm the save now, even while detail is still loading.
+    if (current === session)
+      statusMessage = { text: session.saveNotice || "Saved", error: false };
   } catch (error) {
-    saveError = String(error);
+    session.saveError = String(error);
   } finally {
     saving = false;
-    dialogOpen = false;
     updatePointTool();
-    if (currentImage) showImage(currentImage);
-    if (completed && !$("status").classList.contains("error")) {
-      $("status").textContent = saveNotice || "Saved";
-      $("status").title = saveNotice || "Saved";
-    }
   }
 }
-
-let currentId: string | null = null;
-let previewAdded = false;
-let previewDisplayed = false;
-let pendingPreview: OpenSeadragon.TiledImage | null = null;
-const loadedImages = new WeakSet<OpenSeadragon.TiledImage>();
-viewer.addHandler("tile-loaded", (event) => {
-  loadedImages.add(event.tiledImage);
-});
-let pyramidAdded = false;
-let dialogOpen = false;
-let loading = false;
-let tileError: string | null = null;
-let histogramLoad: AbortController | null = null;
-let cancelInitialFit: (() => void) | undefined;
-let pendingViewportBounds: OpenSeadragon.Rect | null = null;
-const downloads = new Set<OpenSeadragon.ImageJob>();
-const tileUrl = (id: string) => convertFileSrc(id, "aperture");
 
 function trackDownloads(
   source: OpenSeadragon.TileSourceOptions & {
@@ -445,6 +448,30 @@ function trackDownloads(
   };
 }
 
+function abortDownloads() {
+  for (const job of downloads) job.abort();
+  downloads.clear();
+}
+
+const tileSource = (state: ImageState, isPreview: boolean) =>
+  trackDownloads(
+    colorRenderer!.wrapSource(
+      (isPreview ? preview : pyramid)(state, tileUrl),
+      state,
+      isPreview,
+      tileUrl(state.id),
+    ),
+  );
+
+// OSD passes the added item to addTiledImage callbacks without typing it.
+const addedItem = (event: unknown) =>
+  (event as { item: OpenSeadragon.TiledImage }).item;
+
+const setImageControls = (enabled: boolean) =>
+  document
+    .querySelectorAll<HTMLButtonElement>("[data-image-control]")
+    .forEach((button) => (button.disabled = !enabled));
+
 function setLoading(active: boolean, progress: number | null = null) {
   loading = active;
   $("cancel-button").hidden = !active;
@@ -467,107 +494,90 @@ function setLoading(active: boolean, progress: number | null = null) {
 }
 
 function resetViewer(preserveDisplay = false) {
-  cancelInitialFit?.();
-  cancelInitialFit = undefined;
-  histogramLoad?.abort();
-  histogramLoad = null;
-  currentId = null;
-  currentImage = null;
-  savedPath = null;
-  rois = [];
+  current.cancelInitialFit?.();
+  current.histogramLoad?.abort();
+  if (current.pendingPreview) viewer.world.removeItem(current.pendingPreview);
+  current = blankImage();
   tools.setPointSettings(settingsForRois([], 0));
-  annotationsReady = false;
-  annotationError = null;
-  saveError = null;
-  saveNotice = null;
-  dirty = false;
   annotationViewer.setImage(null);
   annotationViewer.setRois([]);
   updatePointTool();
-  previewAdded = false;
-  previewDisplayed = false;
-  if (pendingPreview) viewer.world.removeItem(pendingPreview);
-  pendingPreview = null;
-  pyramidAdded = false;
-  tileError = null;
   if (!preserveDisplay) viewer.close();
-  for (const job of downloads) job.abort();
-  downloads.clear();
+  abortDownloads();
   if (!preserveDisplay) {
     pendingViewportBounds = null;
     colorPanel.setChannels([]);
     dimensionNavigation.setImage(null);
   }
   colorPanel.setEnabled(false);
-  document
-    .querySelectorAll<HTMLButtonElement>("[data-image-control]")
-    .forEach((button) => (button.disabled = true));
+  setImageControls(false);
   $("dimensions").textContent = "";
 }
 
 function showError(message: string) {
+  statusMessage = { text: message, error: true };
   setLoading(false);
   $("viewer").dataset.phase = "error";
-  $("status").textContent = saveError || message;
-  $("status").title = saveError || message;
-  $("status").classList.add("error");
+  renderStatus();
+}
+
+function loadAnnotations(id: string) {
+  const session = current;
+  void invoke<PointRoi[]>("load_annotations", { id }).then(
+    (loaded) => {
+      if (current !== session) return;
+      tools.setPointSettings(
+        settingsForRois(loaded, tools.pointSettings().counter),
+      );
+      session.annotationsReady = true;
+      setRois(loaded, false);
+      updatePointTool();
+    },
+    (error) => {
+      if (
+        current !== session ||
+        String(error) === "Image replaced or cancelled."
+      )
+        return;
+      session.annotationError = `Annotations could not load: ${String(error)}`;
+      renderStatus();
+    },
+  );
 }
 
 function showImage(state: ImageState) {
+  statusMessage = null;
   if (!selectedPath && state.path) {
     selectedPath = state.path;
     folder.select(state.path);
   }
-  const previousImage = currentImage;
+  const previous = current.image;
   const sameDimensions = Boolean(
     state.dimensions &&
-    previousImage?.dimensions &&
+    previous?.dimensions &&
     state.path &&
-    state.path === previousImage.path,
+    state.path === previous.path,
   );
-  const preservedBounds =
-    currentId !== state.id && sameDimensions
+  // Plane changes within one file keep the viewport, channels and dimensions.
+  const preserve = sameDimensions || previous?.id === state.id;
+  if (current.id !== state.id) {
+    const bounds = sameDimensions
       ? viewer.world.getItemCount() > 0
         ? viewer.viewport.getBounds()
         : pendingViewportBounds
       : null;
-  if (currentId !== state.id) {
     resetViewer(sameDimensions);
-    pendingViewportBounds = preservedBounds;
-    currentId = state.id;
+    pendingViewportBounds = bounds;
+    current.id = state.id;
     if (state.readOnly) tools.deactivatePoints();
-    else
-      void invoke<PointRoi[]>("load_annotations", { id: state.id }).then(
-        (loaded) => {
-          if (currentId !== state.id) return;
-          rois = loaded;
-          tools.setPointSettings(
-            settingsForRois(rois, tools.pointSettings().counter),
-          );
-          annotationsReady = true;
-          annotationViewer.setRois(rois);
-          updatePointTool();
-        },
-        (error) => {
-          if (
-            currentId !== state.id ||
-            String(error) === "Image replaced or cancelled."
-          )
-            return;
-          annotationError = `Annotations could not load: ${String(error)}`;
-          if (currentImage) showImage(currentImage);
-        },
-      );
+    else loadAnnotations(state.id);
   }
-  currentImage = state;
+  current.image = state;
   // OSD has no public setter. This is its eviction target; visible tiles stay resident.
   (
     viewer.tileCache as OpenSeadragon.TileCache & { _maxCacheItemCount: number }
   )._maxCacheItemCount = imageTileCacheCount(state.channels?.length || 3);
-  dimensionNavigation.setImage(
-    state,
-    sameDimensions || previousImage?.id === state.id,
-  );
+  dimensionNavigation.setImage(state, preserve);
   $("points-button").setAttribute(
     "title",
     state.readOnly ? "Browsing only · annotations unavailable" : "Multi-point",
@@ -578,159 +588,112 @@ function showImage(state: ImageState) {
       id: String(index),
       ...channel,
     })),
-    sameDimensions || previousImage?.id === state.id,
+    preserve,
   );
   if (state.width > 0) annotationViewer.setImage(state);
   $("filename").textContent = state.name;
-  $("filename").classList.toggle("unsaved", dirty);
+  $("filename").classList.toggle("unsaved", current.dirty);
   $("viewer").dataset.phase = state.phase;
   $("filename").title = state.name;
   setLoading(state.phase === "loading", state.progress);
-  $("status").classList.toggle(
-    "error",
-    state.phase === "error" ||
-      saveError !== null ||
-      annotationError !== null ||
-      (tileError !== null && state.phase !== "cancelled"),
-  );
-  const errorStatus =
-    saveError ||
-    (state.phase === "error"
-      ? state.error || "Could not load image"
-      : annotationError || (state.phase !== "cancelled" ? tileError : null));
-  const status =
-    errorStatus ||
-    (saving
-      ? "Saving annotations…"
-      : state.phase === "cancelled"
-        ? "Cancelled"
-        : saveNotice ||
-          (state.phase === "loading"
-            ? state.previewReady
-              ? "Loading detail…"
-              : state.width > 0
-                ? "Building preview…"
-                : "Reading image…"
-            : state.readOnly
-              ? "Browsing only · annotations unavailable"
-              : ""));
-  if ($("status").textContent !== status) $("status").textContent = status;
-  $("status").title = errorStatus || saveNotice || state.detail || status;
-  const transform = orientation(state.orientation);
+  renderStatus();
+  const { degrees } = orientation(state.orientation);
   const [displayWidth, displayHeight] =
-    transform.degrees % 180 === 0
+    degrees % 180 === 0
       ? [state.width, state.height]
       : [state.height, state.width];
   if (state.width > 0 && state.height > 0)
     $("dimensions").textContent =
       `${displayWidth.toLocaleString()} × ${displayHeight.toLocaleString()}`;
 
-  if (state.previewReady && !previewAdded) {
-    previewAdded = true;
-    if (!state.channelMode && state.channels?.length) {
-      histogramLoad = new AbortController();
-      void loadChannelHistograms(
-        `${tileUrl(state.id)}/preview.jpg`,
-        state.channels.length,
-        histogramLoad.signal,
-      ).then(
-        (bins) => {
-          if (currentId === state.id) colorPanel.setHistograms(bins);
-        },
-        () => {},
-      );
-    }
-    const viewportBounds = pendingViewportBounds;
-    pendingViewportBounds = null;
-    viewer.addTiledImage({
-      tileSource: trackDownloads(
-        colorRenderer!.wrapSource(
-          preview(state, tileUrl),
-          state,
-          true,
-          tileUrl(state.id),
-        ),
-      ),
-      ...transform,
-      width: 1,
-      index: viewer.world.getItemCount(),
-      opacity: sameDimensions ? 0 : 1,
-      preload: true,
-      success: (event) => {
-        if (currentId !== state.id) {
-          viewer.world.removeItem(
-            (event as unknown as { item: OpenSeadragon.TiledImage }).item,
-          );
+  if (state.previewReady && !current.previewAdded)
+    addPreview(state, sameDimensions);
+  if (state.tilesReady && current.previewDisplayed) addPyramid(state);
+}
+
+function addPreview(state: ImageState, sameDimensions: boolean) {
+  const session = current;
+  session.previewAdded = true;
+  if (!state.channelMode && state.channels?.length) {
+    session.histogramLoad = new AbortController();
+    void loadChannelHistograms(
+      `${tileUrl(state.id)}/preview.jpg`,
+      state.channels.length,
+      session.histogramLoad.signal,
+    ).then(
+      (bins) => {
+        if (current === session) colorPanel.setHistograms(bins);
+      },
+      () => {},
+    );
+  }
+  const viewportBounds = pendingViewportBounds;
+  pendingViewportBounds = null;
+  viewer.addTiledImage({
+    tileSource: tileSource(state, true),
+    ...orientation(state.orientation),
+    width: 1,
+    index: viewer.world.getItemCount(),
+    opacity: sameDimensions ? 0 : 1,
+    preload: true,
+    success: (event) => {
+      const item = addedItem(event);
+      if (current !== session) {
+        viewer.world.removeItem(item);
+        return;
+      }
+      session.pendingPreview = item;
+      if (!sameDimensions || viewer.world.getItemCount() === 1) {
+        if (viewportBounds) viewer.viewport.fitBounds(viewportBounds, true);
+        else session.cancelInitialFit = fitInitialImage(viewer);
+      }
+      const display = () => {
+        // OSD can report fully loaded after its only tile failed.
+        if (!item.getFullyLoaded() || !loadedImages.has(item)) return;
+        item.removeHandler("fully-loaded-change", display);
+        if (current !== session) {
+          viewer.world.removeItem(item);
           return;
         }
-        const item = (event as unknown as { item: OpenSeadragon.TiledImage })
-          .item;
-        pendingPreview = item;
-        if (!sameDimensions || viewer.world.getItemCount() === 1) {
-          if (viewportBounds) viewer.viewport.fitBounds(viewportBounds, true);
-          else cancelInitialFit = fitInitialImage(viewer);
-        }
-        const display = () => {
-          // OSD can report fully loaded after its only tile failed.
-          if (!item.getFullyLoaded() || !loadedImages.has(item)) return;
-          item.removeHandler("fully-loaded-change", display);
-          if (currentId !== state.id) {
-            viewer.world.removeItem(item);
-            return;
-          }
-          pendingPreview = null;
-          // Keep the previous plane visible until all channels of this preview are ready.
-          const previous = Array.from(
-            { length: viewer.world.getItemCount() },
-            (_, index) => viewer.world.getItemAt(index),
-          );
-          item.setOpacity(1);
-          for (const old of previous)
-            if (old !== item) viewer.world.removeItem(old);
-          previewDisplayed = true;
-          colorPanel.setEnabled(Boolean(state.channels?.length));
-          document
-            .querySelectorAll<HTMLButtonElement>("[data-image-control]")
-            .forEach((button) => (button.disabled = false));
-          updatePointTool();
-          if (currentImage?.id === state.id && currentImage.tilesReady)
-            addPyramid(currentImage);
-        };
-        item.addHandler("fully-loaded-change", display);
-        display();
-      },
-      error: () => {
-        if (currentId === state.id)
-          displayError("Could not display the image preview.");
-      },
-    });
-  }
-  if (state.tilesReady && previewDisplayed) addPyramid(state);
+        session.pendingPreview = null;
+        // Keep the previous plane visible until all channels of this preview are ready.
+        const previous = Array.from(
+          { length: viewer.world.getItemCount() },
+          (_, index) => viewer.world.getItemAt(index),
+        );
+        item.setOpacity(1);
+        for (const old of previous)
+          if (old !== item) viewer.world.removeItem(old);
+        session.previewDisplayed = true;
+        colorPanel.setEnabled(Boolean(state.channels?.length));
+        setImageControls(true);
+        updatePointTool();
+        if (session.image?.tilesReady) addPyramid(session.image);
+      };
+      item.addHandler("fully-loaded-change", display);
+      display();
+    },
+    error: () => {
+      if (current === session)
+        displayError("Could not display the image preview.");
+    },
+  });
 }
 
 function addPyramid(state: ImageState) {
-  if (pyramidAdded || state.width <= 0 || state.height <= 0) return;
-  pyramidAdded = true;
+  const session = current;
+  if (session.pyramidAdded || state.width <= 0 || state.height <= 0) return;
+  session.pyramidAdded = true;
   viewer.addTiledImage({
-    tileSource: trackDownloads(
-      colorRenderer!.wrapSource(
-        pyramid(state, tileUrl),
-        state,
-        false,
-        tileUrl(state.id),
-      ),
-    ),
+    tileSource: tileSource(state, false),
     ...orientation(state.orientation),
     width: 1,
     index: 1,
     success: (event) => {
-      if (currentId !== state.id)
-        viewer.world.removeItem(
-          (event as unknown as { item: OpenSeadragon.TiledImage }).item,
-        );
+      if (current !== session) viewer.world.removeItem(addedItem(event));
     },
     error: () => {
-      if (currentId === state.id)
+      if (current === session)
         displayError("Detail could not load. Preview remains available.");
     },
   });
@@ -760,8 +723,6 @@ const loader = new ImageLoader(
   showError,
 );
 
-let selectedPath: string | null = null;
-let folderError: string | null = null;
 const folder = new FolderNavigation(
   (path) => invoke<string[]>("folder_images", { path }),
   updateNavigation,
@@ -783,8 +744,7 @@ function updateNavigation() {
 }
 
 async function navigateImage(direction: -1 | 1) {
-  if (!native || saving || dialogOpen) return;
-  if (dirty && !(await discardChanges())) return;
+  if (!native || !(await discardChanges())) return;
   const path = folder.adjacent(direction);
   if (path) await openPath(path, true);
 }
@@ -795,45 +755,47 @@ async function openPath(path: string, checked = false) {
   folderError = null;
   folder.select(path);
   resetViewer();
+  statusMessage = { text: "Opening…", error: false };
+  renderStatus();
   $("viewer").dataset.phase = "loading";
   $("filename").textContent = path.split(/[\\/]/).pop() || path;
   $("filename").title = $("filename").textContent || "";
-  $("status").textContent = "Opening…";
-  $("status").classList.remove("error");
   setLoading(true);
   await loader.open(path);
 }
 
 async function chooseImage() {
-  if (!native || dialogOpen || !(await discardChanges())) return;
-  dialogOpen = true;
+  if (!native || !(await discardChanges())) return;
   let path: string | string[] | null = null;
   try {
-    path = await open({
-      multiple: false,
-      directory: false,
-      filters: [
-        {
-          name: "Images",
-          extensions: await invoke<string[]>("image_extensions"),
-        },
-      ],
-    });
+    path = await withDialog(async () =>
+      open({
+        multiple: false,
+        directory: false,
+        filters: [
+          {
+            name: "Images",
+            extensions: await invoke<string[]>("image_extensions"),
+          },
+        ],
+      }),
+    );
   } catch (error) {
     showError(String(error));
-  } finally {
-    dialogOpen = false;
   }
   if (typeof path === "string") await openPath(path, true);
 }
 
 async function cancelLoad() {
   if (!loading) return;
-  $("status").textContent = "Cancelling…";
+  statusMessage = { text: "Cancelling…", error: false };
+  renderStatus();
   $<HTMLButtonElement>("cancel-button").disabled = true;
   if (await loader.cancel()) {
     setLoading(false);
-    $("status").textContent = "Cancelled";
+    // Without an image state, nothing else reports the cancellation.
+    if (!current.image) statusMessage = { text: "Cancelled", error: false };
+    renderStatus();
     $("viewer").dataset.phase = "cancelled";
   }
   $<HTMLButtonElement>("cancel-button").disabled = false;
@@ -854,21 +816,18 @@ $("pan-button").addEventListener("click", () => {
 });
 viewer.addHandler("tile-load-failed", (event) => {
   const message = tileFailure(
-    currentId ? tileUrl(currentId) : null,
+    current.id ? tileUrl(current.id) : null,
     $("viewer").dataset.phase,
     event.tile.url,
   );
   if (
     !message ||
-    tileError === message ||
-    tileError === "Could not display the image preview."
+    current.tileError === message ||
+    current.tileError === "Could not display the image preview."
   )
     return;
-  tileError = message;
-  if (saveError) return;
-  $("status").textContent = message;
-  $("status").title = message;
-  $("status").classList.add("error");
+  current.tileError = message;
+  renderStatus();
 });
 $("zoom-in-button").addEventListener("click", () => {
   viewer.viewport.zoomBy(1.5);
@@ -879,8 +838,7 @@ $("zoom-out-button").addEventListener("click", () => {
   viewer.viewport.applyConstraints();
 });
 document.addEventListener("keydown", (event) => {
-  if (dialogOpen || saving || $<HTMLDialogElement>("settings-dialog").open)
-    return;
+  if (blocked()) return;
   if ((event.ctrlKey || event.metaKey) && event.key.toLowerCase() === "n") {
     event.preventDefault();
     if (native) void invoke("new_window").catch(showError);
@@ -926,49 +884,22 @@ document.addEventListener("keydown", (event) => {
 if (windowHandle) {
   void windowHandle
     .onCloseRequested(async (event) => {
-      if ($<HTMLDialogElement>("settings-dialog").open) {
-        if ($<HTMLButtonElement>("settings-close").disabled) {
+      if (settingsDialog.open) {
+        if (settings.busy()) {
           event.preventDefault();
           return;
         }
         settings.close();
       }
-      if (dirty || saving || dialogOpen) {
+      if (current.dirty || blocked()) {
         event.preventDefault();
         if (await discardChanges()) {
-          dirty = false;
+          current.dirty = false;
           await windowHandle.close();
         }
       }
     })
     .catch(showError);
-  for (const prefix of ["", "settings-"]) {
-    $(`${prefix}minimize-button`).addEventListener(
-      "click",
-      () => void windowHandle.minimize().catch(showError),
-    );
-    $(`${prefix}maximize-button`).addEventListener(
-      "click",
-      () => void windowHandle.toggleMaximize().catch(showError),
-    );
-    $(
-      prefix ? "settings-window-close-button" : "close-button",
-    ).addEventListener(
-      "click",
-      () => void windowHandle.close().catch(showError),
-    );
-  }
-  const syncMaximize = async () => {
-    const maximized = await windowHandle.isMaximized();
-    for (const id of ["maximize-button", "settings-maximize-button"]) {
-      const button = $(id);
-      button.innerHTML = icon(maximized ? "restore" : "maximize");
-      button.title = maximized ? "Restore" : "Maximize";
-      button.setAttribute("aria-label", button.title);
-    }
-  };
-  void syncMaximize().catch(showError);
-  void windowHandle.onResized(() => void syncMaximize().catch(showError));
   void windowHandle
     .onDragDropEvent((event) => {
       $("viewer").classList.toggle(
@@ -985,24 +916,17 @@ if (windowHandle) {
 } else {
   $<HTMLButtonElement>("open-button").disabled = true;
   $("open-button").title = "Open images in the desktop app";
-  document
-    .querySelectorAll<HTMLButtonElement>(".window-button")
-    .forEach((button) => (button.disabled = true));
 }
+bindWindowControls(windowHandle, showError);
 
 bindUpdates(
   prepareUpdate,
   () => {
-    saving = false;
-    dialogOpen = false;
+    updating = false;
     updatePointTool();
   },
   settings,
 );
 
-window.addEventListener("beforeunload", () => {
-  loader.dispose();
-  annotationViewer.dispose();
-  colorRenderer?.dispose();
-  viewer.destroy();
-});
+// Stop the native image-state listener; page listeners end with the document.
+window.addEventListener("beforeunload", () => loader.dispose());

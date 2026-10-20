@@ -1,6 +1,7 @@
 import { icon } from "./icons";
 import { colorPanelMarkup } from "./color-panel";
 import { dimensionPanelMarkup } from "./dimension-navigation";
+import { bindHelp } from "./help";
 import type { AnnotationSettings } from "./annotations";
 import {
   defaultPointSettings,
@@ -67,8 +68,8 @@ export const toolPanels = `
   </aside>`;
 
 export function bindTools(
-  onPointsChange: (key?: keyof AnnotationSettings) => void = () => {},
-  color?: { visibility: (open: boolean) => void; handleEscape: () => boolean },
+  onPointsChange: (key?: keyof AnnotationSettings) => void,
+  color: { visibility: (open: boolean) => void; handleEscape: () => boolean },
 ) {
   const container = document.querySelector<HTMLElement>("#tool-panels")!;
   const counter = document.getElementById("point-counter") as HTMLButtonElement;
@@ -86,40 +87,20 @@ export function bindTools(
   const helps = ["counter", "points"].map((name) => {
     const button = document.getElementById(`${name}-help-button`)!;
     const text = document.getElementById(`${name}-help-text`)!;
-    const wrapper = button.parentElement!;
-    let pinned = false;
-    const show = (visible: boolean) => {
-      text.hidden = !visible;
-      if (visible) {
-        closeCounter();
-        for (const other of helps) if (other.text !== text) other.show(false);
-        const below =
-          name === "points"
-            ? button.closest("header")!.getBoundingClientRect().bottom
-            : null;
-        if (below !== null)
-          text.style.maxHeight = `${window.innerHeight - below - 12}px`;
-        text.showPopover();
-        positionPopup(text, button);
-        if (below !== null) text.style.top = `${below}px`;
-      } else text.hidePopover();
-      button.setAttribute("aria-expanded", String(visible));
-      if (!visible) pinned = false;
-    };
-    wrapper.addEventListener("mouseenter", () => show(true));
-    wrapper.addEventListener("mouseleave", () => {
-      if (!pinned && document.activeElement !== button) show(false);
+    const help = bindHelp(button, text, () => {
+      closeCounter();
+      for (const other of helps) if (other !== help) other.show(false);
+      // The long multi-point help opens below the panel heading.
+      const below =
+        name === "points"
+          ? button.closest("header")!.getBoundingClientRect().bottom
+          : null;
+      if (below !== null)
+        text.style.maxHeight = `${window.innerHeight - below - 12}px`;
+      positionPopup(text, button);
+      if (below !== null) text.style.top = `${below}px`;
     });
-    button.addEventListener("focus", () => show(true));
-    button.addEventListener("blur", () => {
-      if (!pinned) show(false);
-    });
-    button.addEventListener("click", () => {
-      const pin = !pinned;
-      show(pin);
-      pinned = pin;
-    });
-    return { text, wrapper, show };
+    return help;
   });
   const hideHelp = () => helps.forEach((help) => help.show(false));
   const closeCounter = (restoreFocus = false) => {
@@ -210,10 +191,7 @@ export function bindTools(
       closeCounter();
   });
   document.addEventListener("pointerdown", (event) => {
-    const target = event.target as Node;
-    if (!counter.parentElement!.contains(target)) closeCounter();
-    for (const help of helps)
-      if (!help.wrapper.contains(target)) help.show(false);
+    if (!counter.parentElement!.contains(event.target as Node)) closeCounter();
   });
   const names = ["color", "navigator", "points"] as const;
   type PanelName = (typeof names)[number];
@@ -226,7 +204,7 @@ export function bindTools(
     button.setAttribute("aria-pressed", String(open));
     button.setAttribute("aria-expanded", String(open));
     document.getElementById(`${name}-panel`)!.hidden = !open;
-    if (name === "color") color?.visibility(open);
+    if (name === "color") color.visibility(open);
     if (name === "points" && !open) {
       closeCounter();
       hideHelp();
@@ -234,12 +212,12 @@ export function bindTools(
     if (name === "points") onPointsChange();
   };
   const close = () => {
-    if (color?.handleEscape()) return true;
+    if (color.handleEscape()) return true;
     if (!counterOptions.hidden) {
       closeCounter(true);
       return true;
     }
-    if (helps.some((help) => !help.text.hidden)) {
+    if (helps.some((help) => help.visible())) {
       hideHelp();
       return true;
     }

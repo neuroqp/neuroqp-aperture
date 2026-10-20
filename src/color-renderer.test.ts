@@ -115,7 +115,7 @@ test("route display ranges are independent and clip before color mixing", () => 
 });
 
 test("clipping precedes tinting and additive mixing, and reset restores identity", async () => {
-  const { defaultDisplaySettings } = await import("./display-settings.ts");
+  const { defaultDisplaySettings } = await import("./display.ts");
   const { setColorConnectionRange } = await import("./color-settings.ts");
   const display: ColorSettings = {
     colors: { tint: "#102030" },
