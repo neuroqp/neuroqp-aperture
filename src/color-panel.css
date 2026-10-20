@@ -23,11 +23,6 @@
 .color-editor-heading svg {
   width: 15px;
   height: 15px;
-  fill: none;
-  stroke: currentColor;
-  stroke-width: 1.6;
-  stroke-linecap: round;
-  stroke-linejoin: round;
 }
 .color-patch {
   position: relative;
