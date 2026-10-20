@@ -13,6 +13,15 @@ use std::sync::{atomic::AtomicBool, Arc};
 pub(crate) const MIB: u64 = 1024 * 1024;
 pub(crate) const FRAME_OVERHEAD: u64 = 64 * 1024;
 
+/// Little-endian container header fields.
+pub(crate) fn u32_at(bytes: &[u8], offset: usize) -> u32 {
+    u32::from_le_bytes(bytes[offset..offset + 4].try_into().unwrap())
+}
+
+pub(crate) fn u64_at(bytes: &[u8], offset: usize) -> u64 {
+    u64::from_le_bytes(bytes[offset..offset + 8].try_into().unwrap())
+}
+
 /// Format-specific bounds checked before the pinned reader allocates.
 enum Plan {
     Nd2(nd2::Plan),

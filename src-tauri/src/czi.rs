@@ -1,7 +1,7 @@
 //! Zeiss CZI checks before the pinned reader allocates, and CZI decode accounting.
 
-use crate::frame_cache::{CheckedSource, FRAME_OVERHEAD, MIB};
-use crate::frames::MAX_FRAME_BYTES;
+use crate::frame_cache::{u32_at, u64_at, CheckedSource, FRAME_OVERHEAD, MIB};
+use crate::frames::{MAX_ENCODED_FRAME_BYTES, MAX_FRAME_BYTES};
 use crate::memory::{Budget, Reservation};
 use openreadout_core::ImageInfo;
 use openreadout_czi::{
@@ -135,14 +135,6 @@ fn read(file: &mut File, offset: u64, bytes: &mut [u8]) -> Result<(), String> {
     file.seek(SeekFrom::Start(offset))
         .and_then(|_| file.read_exact(bytes))
         .map_err(error)
-}
-
-fn u32_at(bytes: &[u8], offset: usize) -> u32 {
-    u32::from_le_bytes(bytes[offset..offset + 4].try_into().unwrap())
-}
-
-fn u64_at(bytes: &[u8], offset: usize) -> u64 {
-    u64::from_le_bytes(bytes[offset..offset + 8].try_into().unwrap())
 }
 
 /// The segment kind, allocated size and used size at `offset`.
@@ -504,7 +496,7 @@ fn scan(path: &Path, budget: &Arc<Budget>) -> Result<Plan, String> {
             + SEGMENT_HEADER_LEN
             + (16 + embedded_bytes as u64).max(256)
             + u64::from(u32_at(&sizes, 0));
-        if data_bytes > MAX_FRAME_BYTES + MIB {
+        if data_bytes > MAX_ENCODED_FRAME_BYTES {
             return Err("CZI encoded subblock exceeds the 257 MiB input-buffer limit.".into());
         }
         if !fits(data_offset, data_bytes) {
