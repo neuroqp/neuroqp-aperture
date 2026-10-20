@@ -1,103 +1,32 @@
-//! Selected ND2 acquisition frames, decoded in Rust into a lossless cache TIFF.
+//! Nikon ND2 checks before the pinned reader allocates, and ND2 decode accounting.
 
-use crate::channels::{Channel, MAX_CHANNELS};
+use crate::channels::MAX_CHANNELS;
+use crate::frame_cache::{reserve_after_reclaim, CheckedSource, FRAME_OVERHEAD, MIB};
 #[cfg(test)]
-use openreadout_core::FormatReader;
-use openreadout_core::{Dataset, ImageInfo, PixelType, PlaneIndex, SourceFile};
+use crate::frames::{self, ExtractedFrame, Selection};
+use crate::frames::{frame_bytes as checked_frame_bytes, Format, MAX_FRAME_BYTES};
+use crate::memory::{Budget, Reservation};
+use crate::nd2_metadata;
+#[cfg(test)]
+use openreadout_core::{Dataset, FormatReader};
+use openreadout_core::{ImageInfo, SourceFile};
 #[cfg(test)]
 use openreadout_nd2::Nd2Reader;
 use openreadout_nd2::{meta::loops_from_lv, Attributes, LegacyFile, LoopKind, Nd2File};
-use serde::{Deserialize, Serialize};
-use std::fs::OpenOptions;
-use std::io::{Read, Seek, SeekFrom, Write};
+use std::fs::File;
+use std::io::{BufReader, Read, Seek, SeekFrom};
 use std::path::Path;
-use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::Arc;
 
-pub(crate) const MAX_FRAME_BYTES: u64 = 256 * 1024 * 1024;
 const MAX_POSITIONS: u32 = 4096;
-
-#[derive(Clone, Copy, Debug, Default, Deserialize, Serialize, PartialEq, Eq, Hash)]
-pub struct Selection {
-    pub position: u32,
-    pub z: u32,
-    pub time: u32,
-}
-
-#[derive(Clone, Copy, Debug, Default, Deserialize, Serialize, PartialEq, Eq, Hash)]
-pub enum Projection {
-    #[default]
-    #[serde(rename = "none")]
-    None,
-    #[serde(rename = "z")]
-    Z,
-    #[serde(rename = "time")]
-    Time,
-    #[serde(rename = "zTime")]
-    ZTime,
-}
-
-impl Projection {
-    pub fn projects_z(self) -> bool {
-        matches!(self, Self::Z | Self::ZTime)
-    }
-    pub fn projects_time(self) -> bool {
-        matches!(self, Self::Time | Self::ZTime)
-    }
-    pub fn canonical(self, selection: Selection) -> Selection {
-        Selection {
-            z: if self.projects_z() { 0 } else { selection.z },
-            time: if self.projects_time() {
-                0
-            } else {
-                selection.time
-            },
-            ..selection
-        }
-    }
-}
-
-#[derive(Clone, Debug, Deserialize, Serialize, PartialEq, Eq)]
-#[serde(rename_all = "camelCase")]
-pub struct Dimensions {
-    pub positions: Vec<String>,
-    pub z: u32,
-    pub time: u32,
-    pub position: u32,
-    pub z_index: u32,
-    pub time_index: u32,
-}
-
-#[derive(Clone, Debug, Deserialize, Serialize)]
-pub struct ExtractedNd2 {
-    pub dimensions: Dimensions,
-    pub channels: Vec<Channel>,
-    #[serde(default)]
-    pub calibration: Option<Calibration>,
-    #[serde(default)]
-    pub display_ranges: Vec<[u16; 2]>,
-}
-
-#[derive(Clone, Debug, Deserialize, Serialize)]
-#[serde(rename_all = "camelCase")]
-pub struct Calibration {
-    pub pixel_width_um: Option<f64>,
-    pub pixel_height_um: Option<f64>,
-    pub z_step_um: Option<f64>,
-    pub time_increment_seconds: Option<f64>,
-}
+const MAX_METADATA_BYTES: u64 = 32 * MIB;
 
 fn error(error: impl std::fmt::Display) -> String {
     format!("ND2: {error}")
 }
 
 fn frame_bytes(width: u32, height: u32, bands: u32, bytes: usize) -> Result<usize, String> {
-    u64::from(width)
-        .checked_mul(u64::from(height))
-        .and_then(|n| n.checked_mul(u64::from(bands)))
-        .and_then(|n| n.checked_mul(bytes as u64))
-        .filter(|n| *n > 0 && *n <= MAX_FRAME_BYTES)
-        .and_then(|n| usize::try_from(n).ok())
-        .ok_or_else(|| "ND2 selected frame exceeds the 256 MiB decoded-frame limit or has invalid dimensions. Export a smaller frame as TIFF.".into())
+    checked_frame_bytes(Format::Nd2, width, height, bands, bytes)
 }
 
 pub(crate) struct Preflight {
@@ -336,112 +265,317 @@ fn legacy_preflight(path: &Path, source: &mut SourceFile) -> Result<Preflight, S
     })
 }
 
-pub(crate) fn description(
-    images: &[ImageInfo],
-    selection: Selection,
-) -> Result<ExtractedNd2, String> {
-    let image = images
-        .get(selection.position as usize)
-        .ok_or("ND2 position is out of range.")?;
-    if selection.z >= image.size_z || selection.time >= image.size_t {
-        return Err("ND2 Z slice or timepoint is out of range.".into());
+// Pinned openreadout-nd2 0.3.0 dataset.rs::open_chunked parses these through
+// lv()/decode_any(). Its XML-only fallbacks never inflate LV data. Keep this
+// list aligned when updating the reader; other chunks still count toward raw caps.
+fn parsed_metadata_chunk(name: &[u8]) -> bool {
+    matches!(
+        name,
+        b"ImageAttributesLV!"
+            | b"ImageMetadataLV!"
+            | b"ImageMetadataSeqLV|0!"
+            | b"ImageCalibrationLV|0!"
+            | b"ImageTextInfoLV!"
+            | b"ImageEventsLV!"
+            | b"ImageEvents!"
+            | b"CustomData|ExperimentEventsV1_0!"
+            | b"CustomData|RoiMetadata_v1!"
+            | b"CustomDataVar|CustomDataV2_0!"
+            | b"CustomDataVar|AppInfo_V1_0!"
+    )
+}
+
+pub(crate) struct Bounds {
+    pub(crate) expanded_bytes: u64,
+    pub(crate) metadata_workspace: u64,
+    pub(crate) encoded_bytes: u64,
+    pub(crate) legacy: bool,
+}
+
+impl Bounds {
+    // Walk legacy boxes or stream the modern chunk map before allocating the
+    // reader's parsed metadata. Pixel payloads are skipped, never read here.
+    pub(crate) fn scan(path: &Path) -> Result<Self, String> {
+        Self::scan_inner(path, false)
     }
-    if !matches!(image.pixel_type, PixelType::Uint8 | PixelType::Uint16) {
-        return Err("ND2 supports only unsigned 8-bit and 16-bit samples.".into());
+
+    pub(crate) fn validated(path: &Path) -> Result<Self, String> {
+        Self::scan_inner(path, true)
     }
-    if image.size_c == 0 || image.size_c > MAX_CHANNELS {
-        return Err(format!("ND2 supports 1–{MAX_CHANNELS} channels."));
-    }
-    let rgb = image.samples_per_pixel == 3;
-    if !matches!(image.samples_per_pixel, 1 | 3) || (rgb && image.size_c != 1) {
-        return Err("ND2 mixed RGB acquisition channels and non-grayscale/non-RGB sample layouts are unsupported. Export individual channels as TIFF.".into());
-    }
-    let bands = if rgb { 3 } else { image.size_c };
-    frame_bytes(
-        image.size_x,
-        image.size_y,
-        bands,
-        image.pixel_type.bytes_per_sample(),
-    )?;
-    let channels = if rgb {
-        [
-            ("Red", "#ff0000"),
-            ("Green", "#00ff00"),
-            ("Blue", "#0000ff"),
-        ]
-        .into_iter()
-        .map(|(name, color)| Channel {
-            name: name.into(),
-            color: color.into(),
-        })
-        .collect()
-    } else {
-        let colors = [
-            "#ff0000", "#00ff00", "#0000ff", "#ff00ff", "#00ffff", "#ffff00",
-        ];
-        (0..image.size_c)
-            .map(|c| {
-                let channel = image.channels.get(c as usize);
-                Channel {
-                    name: channel
-                        .and_then(|c| c.name.as_deref())
-                        .filter(|s| !s.trim().is_empty())
-                        .map(|name| name.chars().take(256).collect())
-                        .unwrap_or_else(|| format!("Channel {}", c + 1)),
-                    color: channel
-                        .and_then(|c| c.color.as_deref())
-                        .filter(|s| {
-                            s.len() == 7
-                                && s.starts_with('#')
-                                && s.as_bytes()[1..].iter().all(u8::is_ascii_hexdigit)
-                        })
-                        .unwrap_or(if image.size_c == 1 {
-                            "#ffffff"
-                        } else {
-                            colors[c as usize % colors.len()]
-                        })
-                        .into(),
+
+    fn scan_inner(path: &Path, validate: bool) -> Result<Self, String> {
+        let mut file = File::open(path).map_err(|e| format!("ND2: {e}"))?;
+        let file_len = file.metadata().map_err(|e| format!("ND2: {e}"))?.len();
+        let mut signature = [0; 12];
+        file.read_exact(&mut signature)
+            .map_err(|e| format!("ND2: {e}"))?;
+        let legacy = signature == openreadout_nd2::LEGACY_SIGNATURE;
+        if !legacy {
+            return Self::scan_chunk_map(path, file, file_len, validate);
+        }
+        let mut offset = 0u64;
+        let mut metadata_bytes = 0u64;
+        let mut encoded_bytes = 0u64;
+        let mut entries = 0u64;
+        while file_len.saturating_sub(offset) >= if legacy { 8 } else { 16 } {
+            file.seek(SeekFrom::Start(offset))
+                .map_err(|e| format!("ND2: {e}"))?;
+            let mut header = [0; 16];
+            file.read_exact(&mut header[..8])
+                .map_err(|e| format!("ND2: {e}"))?;
+            let length = match u32::from_be_bytes(header[..4].try_into().unwrap()) {
+                0 => file_len - offset,
+                1 => {
+                    file.read_exact(&mut header[8..])
+                        .map_err(|e| format!("ND2: {e}"))?;
+                    let length = u64::from_be_bytes(header[8..].try_into().unwrap());
+                    if length < 16 {
+                        return Err("ND2 legacy box has an invalid extended length.".into());
+                    }
+                    length
                 }
-            })
-            .collect()
-    };
-    let calibrated = image.physical_size.x.is_some()
-        || image.physical_size.y.is_some()
-        || image.physical_size.z.is_some()
-        || image.time_increment_s.is_some();
-    let result = ExtractedNd2 {
-        dimensions: Dimensions {
-            positions: images
-                .iter()
-                .enumerate()
-                .map(|(p, image)| {
-                    image
-                        .name
-                        .as_deref()
-                        .filter(|s| !s.trim().is_empty())
-                        .map(|name| name.chars().take(256).collect())
-                        .unwrap_or_else(|| format!("Position {}", p + 1))
-                })
-                .collect(),
-            z: image.size_z,
-            time: image.size_t,
-            position: selection.position,
-            z_index: selection.z,
-            time_index: selection.time,
-        },
-        channels,
-        calibration: calibrated.then_some(Calibration {
-            pixel_width_um: image.physical_size.x,
-            pixel_height_um: image.physical_size.y,
-            z_step_um: image.physical_size.z,
-            time_increment_seconds: image.time_increment_s,
-        }),
-        display_ranges: Vec::new(),
-    };
-    if serde_json::to_vec(&result).map_err(error)?.len() > 48 * 1024 {
-        return Err("ND2 position/channel names exceed the 48 KiB metadata limit.".into());
+                n => u64::from(n),
+            };
+            if length < 8 {
+                return Err("ND2 legacy box has an invalid length.".into());
+            }
+            let pixels = &header[4..8] == b"jp2c";
+            if offset.checked_add(length).is_none_or(|end| end > file_len) {
+                return Err("ND2 chunk extends beyond its source file.".into());
+            }
+            if pixels {
+                if length > MAX_FRAME_BYTES + MIB + 65552 {
+                    return Err("ND2 encoded frame exceeds the 257 MiB input-buffer limit.".into());
+                }
+                encoded_bytes = encoded_bytes.max(length);
+            } else {
+                metadata_bytes = metadata_bytes
+                    .checked_add(length)
+                    .ok_or("ND2 metadata length overflows.")?;
+                if metadata_bytes > MAX_METADATA_BYTES {
+                    return Err("ND2 metadata and chunk map exceed the 32 MiB input limit.".into());
+                }
+            }
+            entries += 1;
+            offset += length;
+        }
+        Ok(Self {
+            expanded_bytes: metadata_bytes,
+            metadata_workspace: metadata_bytes * 128 + entries * 256 + 8 * MIB,
+            encoded_bytes,
+            legacy,
+        })
     }
-    Ok(result)
+    fn scan_chunk_map(
+        path: &Path,
+        mut file: File,
+        file_len: u64,
+        validate: bool,
+    ) -> Result<Self, String> {
+        fn read(file: &mut File, offset: u64, bytes: &mut [u8]) -> Result<(), String> {
+            file.seek(SeekFrom::Start(offset))
+                .and_then(|_| file.read_exact(bytes))
+                .map_err(|e| format!("ND2: {e}"))
+        }
+        fn header(
+            file: &mut File,
+            offset: u64,
+            file_len: u64,
+        ) -> Result<(Vec<u8>, u64, u64), String> {
+            let mut raw = [0; 16];
+            read(file, offset, &mut raw)?;
+            if raw[..4] != openreadout_nd2::CHUNK_MAGIC_BYTES {
+                return Err("ND2 chunk header has invalid magic.".into());
+            }
+            let name_len = u32::from_le_bytes(raw[4..8].try_into().unwrap()) as usize;
+            let length = u64::from_le_bytes(raw[8..].try_into().unwrap());
+            if name_len > 65536
+                || offset
+                    .checked_add(16 + name_len as u64)
+                    .and_then(|n| n.checked_add(length))
+                    .is_none_or(|n| n > file_len)
+            {
+                return Err(
+                    "ND2 chunk extends beyond its source file or has an excessive name.".into(),
+                );
+            }
+            let mut name = vec![0; name_len];
+            file.read_exact(&mut name)
+                .map_err(|e| format!("ND2: {e}"))?;
+            Ok((name, offset + 16 + name_len as u64, length))
+        }
+        let mut tail = [0; 8];
+        read(
+            &mut file,
+            file_len.checked_sub(8).ok_or("ND2 is truncated.")?,
+            &mut tail,
+        )?;
+        let (name, map_start, map_bytes) = header(&mut file, u64::from_le_bytes(tail), file_len)?;
+        if name.split(|b| *b == 0).next() != Some(openreadout_nd2::FILE_MAP_NAME.as_bytes()) {
+            return Err("ND2 requires an intact chunk map for bounded memory decoding.".into());
+        }
+        if map_bytes > MAX_METADATA_BYTES {
+            return Err("ND2 chunk map exceeds the 32 MiB input limit.".into());
+        }
+        let mut map = BufReader::new(File::open(path).map_err(|e| format!("ND2: {e}"))?);
+        map.seek(SeekFrom::Start(map_start))
+            .map_err(|e| format!("ND2: {e}"))?;
+        let mut cursor = map_start;
+        let map_end = map_start + map_bytes;
+        let mut metadata_bytes = map_bytes;
+        let mut expanded_bytes = map_bytes;
+        let mut encoded_bytes = 0u64;
+        let mut entries = 0u64;
+        let mut has_attributes = false;
+        let mut name = Vec::new();
+        while cursor < map_end {
+            name.clear();
+            loop {
+                if cursor >= map_end || name.len() >= 65536 {
+                    return Err("ND2 chunk map name is truncated or excessive.".into());
+                }
+                let mut byte = [0];
+                map.read_exact(&mut byte).map_err(|e| format!("ND2: {e}"))?;
+                cursor += 1;
+                name.push(byte[0]);
+                if byte[0] == b'!' {
+                    break;
+                }
+            }
+            if name == openreadout_nd2::CHUNK_MAP_SIGNATURE.as_bytes() {
+                break;
+            }
+            if cursor + 16 > map_end {
+                return Err("ND2 chunk map entry is truncated.".into());
+            }
+            let mut item = [0; 16];
+            map.read_exact(&mut item).map_err(|e| format!("ND2: {e}"))?;
+            cursor += 16;
+            let (mut actual_name, payload_start, length) = header(
+                &mut file,
+                u64::from_le_bytes(item[..8].try_into().unwrap()),
+                file_len,
+            )?;
+            while actual_name.last() == Some(&0) {
+                actual_name.pop();
+            }
+            if actual_name != name {
+                return Err("ND2 chunk map name disagrees with its referenced header.".into());
+            }
+            has_attributes |=
+                matches!(name.as_slice(), b"ImageAttributes!" | b"ImageAttributesLV!");
+            let pixels = actual_name.starts_with(b"ImageDataSeq|");
+            if pixels {
+                if length > MAX_FRAME_BYTES + MIB {
+                    return Err("ND2 encoded frame exceeds the 257 MiB input-buffer limit.".into());
+                }
+                encoded_bytes = encoded_bytes.max(length);
+            } else {
+                metadata_bytes = metadata_bytes
+                    .checked_add(length)
+                    .ok_or("ND2 metadata length overflows.")?;
+                if metadata_bytes > MAX_METADATA_BYTES {
+                    return Err("ND2 metadata and chunk map exceed the 32 MiB input limit.".into());
+                }
+                let expanded = if validate && parsed_metadata_chunk(&actual_name) {
+                    let mut raw = vec![0; length as usize];
+                    read(&mut file, payload_start, &mut raw)?;
+                    nd2_metadata::expanded_size(&raw).map_err(|error| {
+                        let name: String = String::from_utf8_lossy(&actual_name)
+                            .chars()
+                            .take(256)
+                            .collect();
+                        format!("ND2 metadata chunk {name}: {error}")
+                    })?
+                } else {
+                    length
+                };
+                expanded_bytes = expanded_bytes
+                    .checked_add(expanded)
+                    .filter(|count| *count <= MAX_METADATA_BYTES)
+                    .ok_or("ND2 metadata and chunk map exceed the 32 MiB expanded input limit.")?;
+            }
+            entries += 1;
+        }
+        if entries == 0 || !has_attributes {
+            return Err("ND2 requires a nonempty chunk map containing image attributes; rescue scanning is unsupported by bounded decoding.".into());
+        }
+        Ok(Self {
+            expanded_bytes,
+            metadata_workspace: expanded_bytes * 128 + entries * 256 + 8 * MIB,
+            encoded_bytes,
+            legacy: false,
+        })
+    }
+}
+
+/// ND2 bounds validated before the reader allocates.
+pub(crate) struct Plan {
+    bounds: Bounds,
+    storage_bytes: u64,
+    positions: u32,
+}
+
+impl Plan {
+    /// Returns the plan and a reservation covering the reader's opening peak.
+    pub(crate) fn new(
+        source: &CheckedSource,
+        budget: &Arc<Budget>,
+    ) -> Result<(Self, Reservation), String> {
+        // First reject oversized raw blocks without reading their payloads.
+        Bounds::scan(&source.stable_path())?;
+        source.check().map_err(|e| e.to_string())?;
+        let bounds = {
+            let _validation = reserve_after_reclaim(budget, 64 * MIB, false)?
+                .ok_or("ND2 metadata validation does not fit the application memory budget.")?;
+            let bounds = Bounds::validated(&source.stable_path())?;
+            source.check().map_err(|e| e.to_string())?;
+            bounds
+        };
+        let preflight = {
+            let _parser = reserve_after_reclaim(budget, bounds.metadata_workspace, false)?
+                .ok_or("ND2 metadata parsing does not fit the application memory budget.")?;
+            source.check().map_err(|e| e.to_string())?;
+            preflight(&source.stable_path())?
+        };
+        source.check().map_err(|e| e.to_string())?;
+        // info() clones position-specific trees as well as global metadata. Pay
+        // for that opening peak before calling it, then retain only typed summaries.
+        let opening_bytes = bounds.metadata_workspace
+            + bounds.expanded_bytes * 128 * (u64::from(preflight.positions) + 1);
+        let metadata = reserve_after_reclaim(budget, opening_bytes, false)?
+            .ok_or("ND2 position metadata expansion does not fit the application memory budget.")?;
+        Ok((
+            Self {
+                bounds,
+                storage_bytes: preflight.storage_bytes,
+                positions: preflight.positions,
+            },
+            metadata,
+        ))
+    }
+
+    pub(crate) fn check_images(&self, images: &[ImageInfo]) -> Result<(), String> {
+        if images.len() > self.positions as usize {
+            return Err(
+                "ND2 decoded position count exceeds its validated experiment loops.".into(),
+            );
+        }
+        Ok(())
+    }
+
+    pub(crate) fn decode_peak(&self, frame_bytes: u64) -> u64 {
+        // Pinned openreadout 0.3.0: modern decoding has a padded input, zlib Vec
+        // growth and split channel planes alongside our assembled frame. Legacy
+        // JPEG2000 additionally keeps i32 coefficient, reconstruction and sample
+        // planes; allow 32 bytes of codec storage per 16-bit storage byte.
+        let multiplier = if self.bounds.legacy { 32 } else { 4 };
+        self.bounds.metadata_workspace
+            + self.bounds.encoded_bytes
+            + self.storage_bytes.max(frame_bytes) * multiplier
+            + frame_bytes
+            + FRAME_OVERHEAD
+    }
 }
 
 #[cfg(test)]
@@ -459,73 +593,18 @@ fn open(path: &Path) -> Result<Opened, String> {
 }
 
 #[cfg(test)]
-fn inspect(path: &Path, selection: Selection) -> Result<Dimensions, String> {
+fn inspect(path: &Path, selection: Selection) -> Result<frames::Dimensions, String> {
     let (_, images, _) = open(path)?;
-    Ok(description(&images, selection)?.dimensions)
+    Ok(frames::description(Format::Nd2, &images, selection)?.dimensions)
 }
 
 #[cfg(test)]
-pub fn extract(input: &Path, output: &Path, selection: Selection) -> Result<ExtractedNd2, String> {
-    extract_frame(input, output, selection, false)
-}
-
-pub(crate) struct RawFrame {
-    pub width: u32,
-    pub height: u32,
-    pub bands: u32,
-    pub bytes: usize,
-    pub rgb: bool,
-    pub pixels: Vec<u8>,
-    pub metadata: ExtractedNd2,
-}
-
-pub(crate) fn decode_frame(
-    dataset: &mut dyn Dataset,
-    images: &[ImageInfo],
+pub fn extract(
+    input: &Path,
+    output: &Path,
     selection: Selection,
-) -> Result<RawFrame, String> {
-    let metadata = description(images, selection)?;
-    let image = &images[selection.position as usize];
-    let bytes = image.pixel_type.bytes_per_sample();
-    let bands = metadata.channels.len() as u32;
-    let length = frame_bytes(image.size_x, image.size_y, bands, bytes)?;
-    // ponytail: bounded whole-frame assembly until the reader offers bounded regions.
-    let mut pixels = vec![0u8; length];
-    for c in 0..image.size_c {
-        let plane = dataset
-            .read_plane(
-                selection.position,
-                PlaneIndex {
-                    c,
-                    z: selection.z,
-                    t: selection.time,
-                },
-            )
-            .map_err(error)?;
-        if plane.width != image.size_x
-            || plane.height != image.size_y
-            || plane.pixel_type != image.pixel_type
-            || plane.samples_per_pixel != image.samples_per_pixel
-            || plane.data.len()
-                != frame_bytes(plane.width, plane.height, plane.samples_per_pixel, bytes)?
-        {
-            return Err("ND2 decoded plane does not match its image metadata.".into());
-        }
-        if image.samples_per_pixel == 3 {
-            pixels = plane.data;
-        } else {
-            interleave(&mut pixels, &plane.data, bands as usize, c as usize, bytes);
-        }
-    }
-    Ok(RawFrame {
-        width: image.size_x,
-        height: image.size_y,
-        bands,
-        bytes,
-        rgb: image.samples_per_pixel == 3,
-        pixels,
-        metadata,
-    })
+) -> Result<ExtractedFrame, String> {
+    extract_frame(input, output, selection, false)
 }
 
 #[cfg(test)]
@@ -534,221 +613,17 @@ fn extract_frame(
     output: &Path,
     selection: Selection,
     display: bool,
-) -> Result<ExtractedNd2, String> {
+) -> Result<ExtractedFrame, String> {
     let (mut dataset, images, _) = open(input)?;
-    let frame = decode_frame(dataset.as_mut(), &images, selection)?;
+    let frame = frames::decode_frame(Format::Nd2, dataset.as_mut(), &images, selection)?;
     drop(dataset);
-    write_frame(&frame, output, display)
-}
-
-#[cfg(test)]
-pub(crate) fn write_frame(
-    frame: &RawFrame,
-    output: &Path,
-    display: bool,
-) -> Result<ExtractedNd2, String> {
-    write_frame_cancellable(frame, output, display, None)
-}
-
-pub(crate) fn check_cancel(cancel: Option<&AtomicBool>) -> Result<(), String> {
-    if cancel.is_some_and(|cancel| cancel.load(Ordering::Relaxed)) {
-        Err("Loading cancelled.".into())
-    } else {
-        Ok(())
-    }
-}
-
-pub(crate) fn write_frame_cancellable(
-    frame: &RawFrame,
-    output: &Path,
-    display: bool,
-    cancel: Option<&AtomicBool>,
-) -> Result<ExtractedNd2, String> {
-    check_cancel(cancel)?;
-    let mut result = frame.metadata.clone();
-    // Normalize only the disposable display cache; original frame samples stay intact.
-    let normalized;
-    let (pixels, output_bits) = if display && frame.bytes == 2 {
-        let (samples, ranges) =
-            display_samples_cancellable(&frame.pixels, frame.bands as usize, frame.rgb, cancel)?;
-        normalized = samples;
-        result.display_ranges = ranges;
-        (normalized.as_slice(), 8)
-    } else {
-        (frame.pixels.as_slice(), (frame.bytes * 8) as u16)
-    };
-    check_cancel(cancel)?;
-    let header = tiff_header(
-        frame.width,
-        frame.height,
-        frame.bands as u16,
-        output_bits,
-        frame.rgb,
-        pixels.len() as u32,
-    );
-    // Never truncate an existing path, particularly a source accidentally passed
-    // as the cache destination. The caller owns this worker's cache directory.
-    let mut file = OpenOptions::new()
-        .write(true)
-        .create_new(true)
-        .open(output)
-        .map_err(error)?;
-    let written = (|| {
-        file.write_all(&header).map_err(error)?;
-        for block in pixels.chunks(65536 * usize::from(output_bits / 8)) {
-            check_cancel(cancel)?;
-            file.write_all(block).map_err(error)?;
-        }
-        check_cancel(cancel)
-    })();
-    if let Err(failure) = written {
-        drop(file);
-        let _ = std::fs::remove_file(output);
-        return Err(failure);
-    }
-    Ok(result)
-}
-
-#[cfg(test)]
-fn display_samples(pixels: &[u8], bands: usize, rgb: bool) -> (Vec<u8>, Vec<[u16; 2]>) {
-    display_samples_cancellable(pixels, bands, rgb, None).unwrap()
-}
-
-fn display_samples_cancellable(
-    pixels: &[u8],
-    bands: usize,
-    rgb: bool,
-    cancel: Option<&AtomicBool>,
-) -> Result<(Vec<u8>, Vec<[u16; 2]>), String> {
-    let mut ranges = vec![[u16::MAX, 0]; if rgb { 1 } else { bands }];
-    for (index, sample) in pixels.as_chunks::<2>().0.iter().enumerate() {
-        if index % 65536 == 0 {
-            check_cancel(cancel)?;
-        }
-        let value = u16::from_le_bytes(*sample);
-        let range = &mut ranges[if rgb { 0 } else { index % bands }];
-        range[0] = range[0].min(value);
-        range[1] = range[1].max(value);
-    }
-    let mut display = Vec::with_capacity(pixels.len() / 2);
-    for (index, sample) in pixels.as_chunks::<2>().0.iter().enumerate() {
-        if index % 65536 == 0 {
-            check_cancel(cancel)?;
-        }
-        let value = u32::from(u16::from_le_bytes(*sample));
-        let [minimum, maximum] = ranges[if rgb { 0 } else { index % bands }].map(u32::from);
-        display.push(if maximum == minimum {
-            if value == 0 {
-                0
-            } else {
-                255
-            }
-        } else {
-            (((value - minimum) * 255 + (maximum - minimum) / 2) / (maximum - minimum)) as u8
-        });
-    }
-    check_cancel(cancel)?;
-    if rgb {
-        ranges = vec![ranges[0]; bands];
-    }
-    Ok((display, ranges))
-}
-
-fn interleave(output: &mut [u8], plane: &[u8], bands: usize, channel: usize, bytes: usize) {
-    for (pixel, sample) in output
-        .chunks_exact_mut(bands * bytes)
-        .zip(plane.chunks_exact(bytes))
-    {
-        pixel[channel * bytes..(channel + 1) * bytes].copy_from_slice(sample);
-    }
-}
-
-// The cache is a classic, little-endian, uncompressed TIFF. Its single strip is
-// bounded by MAX_FRAME_BYTES. Display samples and scientific source pixels stay separate.
-fn tiff_header(width: u32, height: u32, bands: u16, bits: u16, rgb: bool, length: u32) -> Vec<u8> {
-    let extra = if rgb { 0 } else { bands - 1 };
-    let count = if extra > 0 { 12 } else { 11 };
-    let value_start = 8 + 2 + count * 12 + 4;
-    let mut values = Vec::<u8>::new();
-    let mut shorts = |value: u16, count: u16| {
-        if count <= 2 {
-            u32::from(value)
-                | if count == 2 {
-                    u32::from(value) << 16
-                } else {
-                    0
-                }
-        } else {
-            let offset = value_start + values.len() as u32;
-            for _ in 0..count {
-                values.extend(value.to_le_bytes());
-            }
-            offset
-        }
-    };
-    let bits_value = shorts(bits, bands);
-    let format_value = shorts(1, bands);
-    let extras_value = shorts(0, extra);
-    let offset = value_start + values.len() as u32;
-    let mut tags = vec![
-        (256u16, 4u16, 1u32, width),
-        (257, 4, 1, height),
-        (258, 3, u32::from(bands), bits_value),
-        (259, 3, 1, 1),
-        (262, 3, 1, if rgb { 2 } else { 1 }),
-        (273, 4, 1, offset),
-        (277, 3, 1, u32::from(bands)),
-        (278, 4, 1, height),
-        (279, 4, 1, length),
-        (284, 3, 1, 1),
-        (339, 3, u32::from(bands), format_value),
-    ];
-    if extra > 0 {
-        tags.push((338, 3, u32::from(extra), extras_value));
-    }
-    tags.sort_by_key(|tag| tag.0);
-    let mut header = b"II\x2a\0\x08\0\0\0".to_vec();
-    header.extend((tags.len() as u16).to_le_bytes());
-    for (tag, kind, count, value) in tags {
-        header.extend(tag.to_le_bytes());
-        header.extend(kind.to_le_bytes());
-        header.extend(count.to_le_bytes());
-        header.extend(value.to_le_bytes());
-    }
-    header.extend(0u32.to_le_bytes());
-    header.extend(values);
-    header
+    frames::write_frame(&frame, output, display)
 }
 
 #[cfg(test)]
 pub(crate) mod tests {
     use super::*;
-
-    pub(crate) fn temporary() -> std::path::PathBuf {
-        let path = std::env::temp_dir().join(format!(
-            "aperture-nd2-{}-{}",
-            std::process::id(),
-            std::time::SystemTime::now()
-                .duration_since(std::time::UNIX_EPOCH)
-                .unwrap()
-                .as_nanos()
-        ));
-        std::fs::create_dir(&path).unwrap();
-        path
-    }
-
-    pub(crate) fn strip(path: &Path) -> Vec<u8> {
-        let bytes = std::fs::read(path).unwrap();
-        let count = u16::from_le_bytes(bytes[8..10].try_into().unwrap()) as usize;
-        let entry = bytes[10..10 + count * 12]
-            .as_chunks::<12>()
-            .0
-            .iter()
-            .find(|entry| entry[..2] == 273u16.to_le_bytes())
-            .unwrap();
-        let offset = u32::from_le_bytes(entry[8..12].try_into().unwrap()) as usize;
-        bytes[offset..].to_vec()
-    }
+    use crate::frames::tests::{strip, temporary};
 
     pub(crate) fn synthetic(bits: u32, rgb: bool) -> Vec<u8> {
         fn number(key: &str, value: u32) -> String {
@@ -851,37 +726,6 @@ pub(crate) mod tests {
         }
         bytes
     }
-
-    #[test]
-    fn projection_modes_have_stable_names_and_canonical_coordinates() {
-        let selection = Selection {
-            position: 7,
-            z: 3,
-            time: 5,
-        };
-        for (projection, name, z, time) in [
-            (Projection::None, "none", 3, 5),
-            (Projection::Z, "z", 0, 5),
-            (Projection::Time, "time", 3, 0),
-            (Projection::ZTime, "zTime", 0, 0),
-        ] {
-            assert_eq!(serde_json::to_value(projection).unwrap(), name);
-            assert_eq!(
-                serde_json::from_value::<Projection>(serde_json::json!(name)).unwrap(),
-                projection
-            );
-            assert_eq!(
-                projection.canonical(selection),
-                Selection {
-                    position: 7,
-                    z,
-                    time
-                }
-            );
-        }
-        assert_eq!(Projection::default(), Projection::None);
-    }
-
     #[test]
     fn extracts_selected_pzt_all_channels_and_rgb_without_changing_source() {
         let temp = temporary();
@@ -1160,75 +1004,5 @@ pub(crate) mod tests {
             }
         }
         std::fs::remove_dir_all(temp).unwrap();
-    }
-
-    #[test]
-    fn preserves_unsigned_samples_and_rejects_invalid_dimensions() {
-        let low_signal: Vec<u8> = [83u16, 1000, 90, 1500, 97, 2000]
-            .iter()
-            .flat_map(|sample| sample.to_le_bytes())
-            .collect();
-        let (display, ranges) = display_samples(&low_signal, 2, false);
-        assert_eq!(display, [0, 0, 128, 128, 255, 255]);
-        assert_eq!(ranges, [[83, 97], [1000, 2000]]);
-        let (rgb, ranges) = display_samples(
-            &[10u16, 20, 30]
-                .iter()
-                .flat_map(|v| v.to_le_bytes())
-                .collect::<Vec<_>>(),
-            3,
-            true,
-        );
-        assert_eq!(rgb, [0, 128, 255]);
-        assert_eq!(ranges, [[10, 30]; 3]);
-        assert_eq!(display_samples(&[0, 0, 0, 0], 1, false).0, [0, 0]);
-        assert_eq!(display_samples(&[83, 0, 83, 0], 1, false).0, [255, 255]);
-        let mut pixels = vec![0; 8];
-        interleave(&mut pixels, &[0x34, 0x12, 0xcd, 0xab], 2, 0, 2);
-        interleave(&mut pixels, &[0xff, 0x00, 0x00, 0x80], 2, 1, 2);
-        assert_eq!(pixels, [0x34, 0x12, 0xff, 0, 0xcd, 0xab, 0, 0x80]);
-        assert!(frame_bytes(u32::MAX, u32::MAX, 32, 2).is_err());
-        assert!(frame_bytes(0, 32, 1, 1).is_err());
-        assert!(frame_bytes(16384, 16384, 2, 1).is_err());
-        let mut image = ImageInfo::new(0, 2, 1, PixelType::Uint16);
-        image.size_c = 2;
-        image.size_z = 3;
-        image.size_t = 4;
-        let images = vec![image];
-        assert!(description(
-            &images,
-            Selection {
-                position: 1,
-                ..Selection::default()
-            }
-        )
-        .is_err());
-        assert!(description(
-            &images,
-            Selection {
-                z: 3,
-                ..Selection::default()
-            }
-        )
-        .is_err());
-        assert!(description(
-            &images,
-            Selection {
-                time: 4,
-                ..Selection::default()
-            }
-        )
-        .is_err());
-        let header = tiff_header(2, 1, 2, 16, false, 8);
-        let strip = header[10..]
-            .as_chunks::<12>()
-            .0
-            .iter()
-            .find(|entry| entry[..2] == 273u16.to_le_bytes())
-            .unwrap();
-        assert_eq!(
-            u32::from_le_bytes(strip[8..12].try_into().unwrap()) as usize,
-            header.len()
-        );
     }
 }

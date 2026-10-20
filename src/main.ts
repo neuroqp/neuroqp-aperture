@@ -570,7 +570,7 @@ function showImage(state: ImageState) {
   );
   $("points-button").setAttribute(
     "title",
-    state.readOnly ? "Annotations unavailable for ND2" : "Multi-point",
+    state.readOnly ? "Browsing only · annotations unavailable" : "Multi-point",
   );
   $<HTMLButtonElement>("points-button").disabled = Boolean(state.readOnly);
   colorPanel.setChannels(
@@ -612,7 +612,7 @@ function showImage(state: ImageState) {
                 ? "Building preview…"
                 : "Reading image…"
             : state.readOnly
-              ? "ND2 browsing only · annotations unavailable"
+              ? "Browsing only · annotations unavailable"
               : ""));
   if ($("status").textContent !== status) $("status").textContent = status;
   $("status").title = errorStatus || saveNotice || state.detail || status;

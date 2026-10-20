@@ -70,7 +70,10 @@ dependencies = [
  "image",
  "libvips",
  "openreadout-core",
+ "openreadout-czi",
+ "openreadout-jpegxr",
  "openreadout-nd2",
+ "rayon",
  "same-file",
  "serde",
  "serde_json",
@@ -2899,6 +2902,19 @@ dependencies = [
  "serde_json",
  "thiserror 2.0.21",
  "xxhash-rust",
+]
+
+[[package]]
+name = "openreadout-czi"
+version = "0.3.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "064b8ea95b8812f4ed9880658432ae1c07bcb71f5bf15fc57c520aaac922bfb6"
+dependencies = [
+ "openreadout-codecs",
+ "openreadout-core",
+ "rayon",
+ "roxmltree",
+ "serde_json",
 ]
 
 [[package]]

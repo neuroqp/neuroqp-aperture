@@ -2,12 +2,14 @@
 mod annotation_io;
 mod backend;
 mod channels;
+mod czi;
 mod decoder;
+mod frame_cache;
+mod frames;
 mod instances;
 mod memory;
 mod native;
 mod nd2;
-mod nd2_cache;
 mod nd2_metadata;
 mod platform;
 mod preload;
@@ -178,7 +180,7 @@ async fn select_plane(
     position: u32,
     z: u32,
     time: u32,
-    projection: Option<nd2::Projection>,
+    projection: Option<frames::Projection>,
     navigation_axis: Option<String>,
     navigation_direction: Option<i8>,
     backend: State<'_, Backend>,
@@ -186,7 +188,7 @@ async fn select_plane(
 ) -> Result<ImageState, String> {
     let _opening = session.opening.lock().unwrap();
     backend.navigation_hint(navigation_axis.as_deref(), navigation_direction);
-    let state = backend.select_view(&id, nd2::Selection { position, z, time }, projection)?;
+    let state = backend.select_view(&id, frames::Selection { position, z, time }, projection)?;
     if let Some(loaded) = session.loaded.lock().unwrap().as_mut() {
         loaded.id = state.id.clone();
     }
@@ -210,7 +212,7 @@ fn annotation_job(backend: &Backend, id: &str) -> Result<std::sync::Arc<backend:
     }
     if state.read_only {
         return Err(
-            "ND2 browsing is read-only. Annotation editing and export are not supported yet."
+            "This image is browsing-only (read-only). Annotation editing and export are not supported yet."
                 .into(),
         );
     }

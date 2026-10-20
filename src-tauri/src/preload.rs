@@ -2,10 +2,10 @@
 
 use crate::{
     backend::{self, Job, LoadContext},
+    frame_cache::{Cache, Geometry},
+    frames::{Dimensions, ExtractedFrame, Format, Projection, Selection},
     instances::Fingerprint,
     memory::{Budget, Reservation},
-    nd2::{Dimensions, ExtractedNd2, Projection, Selection},
-    nd2_cache::{Cache, Geometry},
 };
 use serde::Serialize;
 use std::{
@@ -35,6 +35,7 @@ struct Hint {
 }
 
 pub struct Acquisition {
+    format: Format,
     source: PathBuf,
     identity: Option<Fingerprint>,
     memory: Arc<Budget>,
@@ -53,8 +54,14 @@ pub struct Acquisition {
 }
 
 impl Acquisition {
-    pub fn new(source: PathBuf, identity: Option<Fingerprint>, memory: Arc<Budget>) -> Arc<Self> {
+    pub fn new(
+        format: Format,
+        source: PathBuf,
+        identity: Option<Fingerprint>,
+        memory: Arc<Budget>,
+    ) -> Arc<Self> {
         Arc::new(Self {
+            format,
             source,
             identity,
             memory,
@@ -76,8 +83,11 @@ impl Acquisition {
         })
     }
 
-    pub fn matches(&self, source: &Path, identity: &Option<Fingerprint>) -> bool {
-        self.source == source && self.identity.is_some() && &self.identity == identity
+    pub fn matches(&self, format: Format, source: &Path, identity: &Option<Fingerprint>) -> bool {
+        self.format == format
+            && self.source == source
+            && self.identity.is_some()
+            && &self.identity == identity
     }
 
     /// Never wait for the raw-cache lock on the window thread. At most the Rust
@@ -136,7 +146,7 @@ impl Acquisition {
         match self.cache.try_lock() {
             Ok(mut cache) => self.trim_cache(&mut cache),
             Err(TryLockError::WouldBlock) => Ok(()),
-            Err(TryLockError::Poisoned(_)) => Err("ND2 cache lock failed.".into()),
+            Err(TryLockError::Poisoned(_)) => Err("Frame cache lock failed.".into()),
         }
     }
 
@@ -181,13 +191,17 @@ impl Acquisition {
         if self.stopped.load(Ordering::SeqCst) {
             return Err("Loading cancelled.".into());
         }
-        let mut cache = self.cache.lock().map_err(|_| "ND2 cache lock failed.")?;
+        let mut cache = self.cache.lock().map_err(|_| "Frame cache lock failed.")?;
         if self.stopped.load(Ordering::SeqCst) {
             self.trim_cache(&mut cache)?;
             return Err("Loading cancelled.".into());
         }
         if cache.is_none() {
-            *cache = Some(Cache::new(self.source.clone(), self.memory.clone())?);
+            *cache = Some(Cache::new(
+                self.format,
+                self.source.clone(),
+                self.memory.clone(),
+            )?);
         }
         if self.trim_requested.load(Ordering::Relaxed)
             || self.clear_requested.load(Ordering::Relaxed)
@@ -203,7 +217,7 @@ impl Acquisition {
         selection: Selection,
         background: bool,
         cancel: &AtomicBool,
-    ) -> Result<ExtractedNd2, String> {
+    ) -> Result<ExtractedFrame, String> {
         let mut guard = self.cache()?;
         if cancel.load(Ordering::Relaxed) || self.stopped.load(Ordering::Relaxed) {
             return Err("Loading cancelled.".into());
@@ -229,7 +243,7 @@ impl Acquisition {
         projection: Projection,
         cancel: &AtomicBool,
         progress: impl FnMut(f64),
-    ) -> Result<ExtractedNd2, String> {
+    ) -> Result<ExtractedFrame, String> {
         let mut guard = self.cache()?;
         if cancel.load(Ordering::Relaxed) || self.stopped.load(Ordering::Relaxed) {
             return Err("Loading cancelled.".into());
@@ -480,8 +494,9 @@ mod tests {
 
     #[test]
     fn maintenance_and_stop_defer_without_waiting_for_a_decode_lock() {
-        let directory = crate::nd2::tests::temporary();
+        let directory = crate::frames::tests::temporary();
         let acquisition = Acquisition::new(
+            Format::Nd2,
             directory.join("unopened.nd2"),
             None,
             Budget::new(directory.clone()).unwrap(),
@@ -497,6 +512,24 @@ mod tests {
         assert!(!acquisition.trim_requested.load(Ordering::Relaxed));
         assert!(!acquisition.clear_requested.load(Ordering::Relaxed));
         assert!(acquisition.geometry(Selection::default()).is_err());
+        std::fs::remove_dir_all(directory).unwrap();
+    }
+
+    #[test]
+    fn aliases_with_another_format_do_not_reuse_the_acquisition() {
+        let directory = crate::frames::tests::temporary();
+        let source = directory.join("source");
+        std::fs::write(&source, b"bytes").unwrap();
+        let identity = crate::instances::fingerprint(&source).unwrap();
+        let acquisition = Acquisition::new(
+            Format::Nd2,
+            source.clone(),
+            identity.clone(),
+            Budget::new(directory.clone()).unwrap(),
+        );
+        assert!(acquisition.matches(Format::Nd2, &source, &identity));
+        assert!(!acquisition.matches(Format::Czi, &source, &identity));
+        acquisition.stop();
         std::fs::remove_dir_all(directory).unwrap();
     }
 
