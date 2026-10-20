@@ -226,51 +226,59 @@ fn xml_strings(path: &Path, (offset, bytes): (u64, u64)) -> Result<u64, String> 
 
 /// Records and description bytes of a `CZEVL` payload, walked exactly as pinned
 /// openreadout-czi 0.3.0 attach.rs::parse_event_list does. Descriptions may overlap,
-/// so their sum can exceed the payload. None when the reader rejects the list.
-fn event_list(b: &[u8]) -> Option<(u64, u64)> {
-    let field = |at: usize| Some(u32_at(b.get(at..at.checked_add(4)?)?, 0));
-    let count = field(4)?;
-    let (mut pos, mut descriptions) = (8usize, 0u64);
-    for _ in 0..count {
-        let entry_size = field(pos)? as i32;
-        field(pos.checked_add(16)?)?;
-        let size = usize::try_from(field(pos + 16)? as i32).ok()?;
-        b.get(pos + 20..(pos + 20).checked_add(size)?)?;
-        descriptions += size as u64;
-        let step = usize::try_from(entry_size)
-            .ok()
-            .filter(|step| *step >= 20)
-            .unwrap_or(20 + size);
-        pos = pos.checked_add(step)?;
-    }
-    Some((u64::from(count), descriptions))
+/// so their sum can exceed the payload. The reader copies every description before
+/// it meets a malformed record, so reject any list it would fail on.
+fn event_list(b: &[u8]) -> Result<(u64, u64), String> {
+    let walk = || {
+        let field = |at: usize| Some(u32_at(b.get(at..at.checked_add(4)?)?, 0));
+        let count = field(4)?;
+        let (mut pos, mut descriptions) = (8usize, 0u64);
+        for _ in 0..count {
+            let entry_size = field(pos)? as i32;
+            let size = usize::try_from(field(pos.checked_add(16)?)? as i32).ok()?;
+            b.get(pos + 20..(pos + 20).checked_add(size)?)?;
+            descriptions += size as u64;
+            let step = usize::try_from(entry_size)
+                .ok()
+                .filter(|step| *step >= 20)
+                .unwrap_or(20 + size);
+            pos = pos.checked_add(step)?;
+        }
+        Some((u64::from(count), descriptions))
+    };
+    walk().ok_or_else(|| "CZI event list attachment is malformed.".into())
 }
 
 /// Tile columns of a JPEG XR stream whose headers probe() accepted: the decoder
 /// keeps entropy contexts and quantizers per column, up to 4096.
-fn jpeg_xr_columns(head: &[u8]) -> u64 {
+fn jpeg_xr_columns(head: &[u8]) -> Result<u64, String> {
     let stream = if head.starts_with(b"WMPHOTO") {
         Some(head)
     } else {
-        // The II BC container's image-offset tag locates the codestream.
+        // The II BC container's image-offset tag locates the codestream. The
+        // decoder takes the last such tag; refuse ambiguous containers.
         let ifd = u32_at(head, 4) as usize;
         let count = head
             .get(ifd..ifd + 2)
             .map_or(0, |b| u16::from_le_bytes([b[0], b[1]]));
-        (0..usize::from(count))
-            .find_map(|i| {
+        let offsets: Vec<usize> = (0..usize::from(count))
+            .filter_map(|i| {
                 let at = ifd + 2 + 12 * i;
                 (head.get(at..at + 2)? == [0xC0, 0xBC])
                     .then(|| head.get(at + 8..at + 12).map(|v| u32_at(v, 0) as usize))
                     .flatten()
             })
-            .and_then(|offset| head.get(offset..))
+            .collect();
+        if offsets.len() > 1 {
+            return Err("CZI JPEG XR container has duplicate image-offset tags.".into());
+        }
+        offsets.first().and_then(|offset| head.get(*offset..))
     };
     let Some(stream) = stream else {
-        return 4096;
+        return Ok(4096);
     };
     if stream.get(9).is_some_and(|flags| flags & 0x80 == 0) {
-        return 1;
+        return Ok(1);
     }
     // Width and height follow the 12-byte signature and flags, then 12-bit nv.
     let start = 96
@@ -284,7 +292,7 @@ fn jpeg_xr_columns(head: &[u8]) -> u64 {
             let byte = stream.get(bit / 8)?;
             Some(value << 1 | u64::from(byte >> (7 - bit % 8) & 1))
         })
-        .map_or(4096, |nv| nv + 1)
+        .map_or(Ok(4096), |nv| Ok(nv + 1))
 }
 
 // Mirrors pinned openreadout-czi 0.3.0 container.rs::CziFile::open_in, which loads
@@ -542,7 +550,7 @@ fn scan(path: &Path, budget: &Arc<Budget>) -> Result<Plan, String> {
                 // to 16 internal channels, with windowing margins.
                 3 * stored
                     + 8 * data_bytes
-                    + jpeg_xr_columns(&head) * 12 * 1024
+                    + jpeg_xr_columns(&head)? * 12 * 1024
                     + (u64::from(width).div_ceil(16) + 8) * 34 * 1024
             }
             _ => 2 * stored,
@@ -578,7 +586,7 @@ fn scan(path: &Path, budget: &Arc<Budget>) -> Result<Plan, String> {
     }
 
     let (mut attachment_bytes, mut attachments) = (0, 0);
-    let (mut time_stamp_bytes, mut events, mut descriptions) = (0, 0, 0);
+    let (mut time_stamp_bytes, mut event_bytes, mut events, mut descriptions) = (0, 0, 0, 0);
     if attachment_position != 0 && fits(attachment_position, SEGMENT_HEADER_LEN) {
         let (kind, _, used) = segment(&mut file, attachment_position)?;
         if kind == SegmentId::AttachmentDirectory
@@ -627,10 +635,10 @@ fn scan(path: &Path, budget: &Arc<Budget>) -> Result<Plan, String> {
                     )?;
                     let mut payload = vec![0; size as usize];
                     read(&mut file, position + SEGMENT_HEADER_LEN + 256, &mut payload)?;
-                    if let Some((count, bytes)) = event_list(&payload) {
-                        events += count;
-                        descriptions += bytes;
-                    }
+                    let (count, bytes) = event_list(&payload)?;
+                    event_bytes += size;
+                    events += count;
+                    descriptions += bytes;
                 }
             }
         }
@@ -657,14 +665,17 @@ fn scan(path: &Path, budget: &Arc<Budget>) -> Result<Plan, String> {
     }
 
     // XML is copied and parsed into a DOM; directory entries are expanded, grouped
-    // into scenes and cloned for each plane read. Interpreted attachments are kept
-    // as values; lossy UTF-8 can triple description bytes. Allow generous factors.
+    // into scenes and cloned for each plane read. Interpreted attachments are read
+    // whole and kept as values; lossy UTF-8 can triple description bytes, and one
+    // description's conversion temporaries can approach its payload. Allow
+    // generous factors.
     let metadata_workspace = xml.1 * 32
         + directory_bytes * 8
         + u64::from(count) * 512
         + attachment_bytes * 4
         + attachments * 256
         + time_stamp_bytes * 16
+        + event_bytes * 4
         + events * 64
         + descriptions * 3
         + segments * 64
@@ -1321,8 +1332,17 @@ mod tests {
     fn jpeg_xr_tile_columns_are_read_from_the_codestream_header() {
         let tiled = jpeg_xr_stream(64, 16, 4, 0x80);
         assert!(openreadout_jpegxr::probe(&tiled).is_ok());
-        assert_eq!(jpeg_xr_columns(&tiled), 4);
-        assert_eq!(jpeg_xr_columns(&jpeg_xr_header(2, 1)), 1);
+        assert_eq!(jpeg_xr_columns(&tiled), Ok(4));
+        assert_eq!(jpeg_xr_columns(&jpeg_xr_header(2, 1)), Ok(1));
+        // An II BC container whose two image-offset tags disagree is ambiguous.
+        let mut container = b"II\xBC\x01\x08\0\0\0\x02\0".to_vec();
+        for offset in [64u32, 96] {
+            container.extend([0xC0, 0xBC, 4, 0, 1, 0, 0, 0]);
+            container.extend(offset.to_le_bytes());
+        }
+        container.resize(128, 0);
+        let error = jpeg_xr_columns(&container).err().unwrap();
+        assert!(error.contains("duplicate image-offset tags"), "{error}");
     }
 
     #[test]
@@ -1405,7 +1425,7 @@ mod tests {
         assert_eq!((parsed.len(), actual), (records, records * text));
         assert_eq!(
             event_list(&events),
-            Some((records as u64, (records * text) as u64))
+            Ok((records as u64, (records * text) as u64))
         );
         let bytes = with_attachments(
             synthetic(
@@ -1422,6 +1442,37 @@ mod tests {
             plan.image_copies
         );
         assert!(plan.opening_bytes(0) >= 2 * 3 * actual as u64);
+        std::fs::remove_dir_all(temp).unwrap();
+    }
+
+    #[test]
+    fn malformed_event_lists_are_rejected_before_the_reader_copies_them() {
+        let temp = temporary();
+        let source = temp.join("bad-events.czi");
+        // Two valid records, then a third whose description runs past the payload.
+        let mut events = vec![0; 8];
+        events[4..8].copy_from_slice(&3u32.to_le_bytes());
+        for size in [4i32, 4, 1024] {
+            let mut record = [0; 20];
+            record[..4].copy_from_slice(&(20 + size.min(4)).to_le_bytes());
+            record[16..20].copy_from_slice(&size.to_le_bytes());
+            events.extend(record);
+            events.extend(b"text");
+        }
+        assert!(openreadout_czi::parse_event_list(&events).is_err());
+        let bytes = with_attachments(
+            synthetic(
+                &[block(0, &[('X', 0, 1), ('Y', 0, 1)], vec![0])],
+                &xml(&[], &[]),
+            ),
+            &[("CZEVL", events)],
+        );
+        std::fs::write(&source, &bytes).unwrap();
+        let error = planned(&source).err().unwrap();
+        assert!(
+            error.contains("event list attachment is malformed"),
+            "{error}"
+        );
         std::fs::remove_dir_all(temp).unwrap();
     }
 
