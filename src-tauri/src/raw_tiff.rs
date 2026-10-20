@@ -1,6 +1,7 @@
 //! Bounded, full-coverage area preview for ordinary uncompressed/LZW/Deflate TIFFs.
 //! Unsupported layouts are deliberately left to the general TIFF decoder.
 
+use crate::tiff_ifd::{self, number};
 use std::collections::BTreeMap;
 use std::fs::File;
 use std::io;
@@ -132,14 +133,6 @@ fn invalid() -> io::Error {
     io::Error::new(io::ErrorKind::InvalidData, "invalid TIFF preview layout")
 }
 
-fn number(bytes: &[u8], little: bool) -> u64 {
-    if little {
-        bytes.iter().rev().fold(0, |n, b| (n << 8) | u64::from(*b))
-    } else {
-        bytes.iter().fold(0, |n, b| (n << 8) | u64::from(*b))
-    }
-}
-
 fn read_at(file: &File, offset: u64, bytes: &mut [u8], len: u64) -> io::Result<()> {
     if offset
         .checked_add(bytes.len() as u64)
@@ -178,22 +171,12 @@ fn parse(file: &File) -> io::Result<Option<Layout>> {
     }
     let mut header = [0; 16];
     read_at(file, 0, &mut header[..8], len)?;
-    let little = match &header[..2] {
-        b"II" => true,
-        b"MM" => false,
-        _ => return Ok(None),
+    let Ok((little, big)) = tiff_ifd::header(&header) else {
+        return Ok(None);
     };
-    let big = match number(&header[2..4], little) {
-        42 => false,
-        43 => {
-            if number(&header[4..6], little) != 8 || number(&header[6..8], little) != 0 {
-                return Ok(None);
-            }
-            read_at(file, 8, &mut header[8..], len)?;
-            true
-        }
-        _ => return Ok(None),
-    };
+    if big {
+        read_at(file, 8, &mut header[8..], len)?;
+    }
     let word = if big { 8 } else { 4 };
     let count_size = if big { 8 } else { 2 };
     let entry_size = if big { 20 } else { 12 };

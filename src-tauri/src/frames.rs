@@ -9,6 +9,8 @@ use std::path::Path;
 use std::sync::atomic::{AtomicBool, Ordering};
 
 pub(crate) const MAX_FRAME_BYTES: u64 = 256 * 1024 * 1024;
+/// Largest encoded frame payload read into memory: a decoded frame plus 1 MiB.
+pub(crate) const MAX_ENCODED_FRAME_BYTES: u64 = MAX_FRAME_BYTES + 1024 * 1024;
 /// Samples processed between cancellation checks.
 pub(crate) const CANCEL_CHUNK_SAMPLES: usize = 65536;
 const MAX_NAME_CHARS: usize = 256;

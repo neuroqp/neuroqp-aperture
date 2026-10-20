@@ -16,6 +16,7 @@ mod preload;
 mod raw_tiff;
 mod roi;
 mod tiff_annotations;
+mod tiff_ifd;
 mod updates;
 mod vips_worker;
 

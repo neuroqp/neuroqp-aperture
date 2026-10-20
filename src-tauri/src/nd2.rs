@@ -1,17 +1,11 @@
 //! Nikon ND2 checks before the pinned reader allocates, and ND2 decode accounting.
 
 use crate::channels::MAX_CHANNELS;
-use crate::frame_cache::{CheckedSource, FRAME_OVERHEAD, MIB};
-#[cfg(test)]
-use crate::frames::{self, ExtractedFrame, Selection};
-use crate::frames::{frame_bytes as checked_frame_bytes, Format, MAX_FRAME_BYTES};
+use crate::frame_cache::{u32_at, u64_at, CheckedSource, FRAME_OVERHEAD, MIB};
+use crate::frames::{frame_bytes as checked_frame_bytes, Format, MAX_ENCODED_FRAME_BYTES};
 use crate::memory::{Budget, Reservation};
 use crate::nd2_metadata;
-#[cfg(test)]
-use openreadout_core::{Dataset, FormatReader};
 use openreadout_core::{ImageInfo, SourceFile};
-#[cfg(test)]
-use openreadout_nd2::Nd2Reader;
 use openreadout_nd2::{meta::loops_from_lv, Attributes, LegacyFile, LoopKind, Nd2File};
 use std::fs::File;
 use std::io::{BufReader, Read, Seek, SeekFrom};
@@ -109,6 +103,8 @@ pub(crate) fn preflight(path: &Path) -> Result<Preflight, String> {
         .unwrap_or(1);
     // The decoder allocates from the on-disk header, not the map's advertised
     // length. Check that actual length even when the two intentionally differ.
+    // Bounds covers the intact map; this also covers chunks the reader rescans
+    // when it rejects that map, e.g. a map name with bytes after its NUL.
     for chunk in file
         .map
         .iter()
@@ -122,9 +118,9 @@ pub(crate) fn preflight(path: &Path) -> Result<Preflight, String> {
         if header[..4] != openreadout_nd2::CHUNK_MAGIC_BYTES {
             return Err("ND2 image chunk header has invalid magic.".into());
         }
-        let name_bytes = u32::from_le_bytes(header[4..8].try_into().unwrap());
-        let data_bytes = u64::from_le_bytes(header[8..].try_into().unwrap());
-        if data_bytes > MAX_FRAME_BYTES + 1024 * 1024 {
+        let name_bytes = u32_at(&header, 4);
+        let data_bytes = u64_at(&header, 8);
+        if data_bytes > MAX_ENCODED_FRAME_BYTES {
             return Err("ND2 encoded frame exceeds the 257 MiB input-buffer limit.".into());
         }
         if name_bytes > 65536
@@ -201,13 +197,33 @@ fn experiment_bounds(experiment: &serde_json::Value) -> Result<u32, String> {
     Ok(positions)
 }
 
+/// A legacy JPEG2000 box's type, total length and header length at `offset`.
+fn legacy_box(
+    source: &mut (impl Read + Seek),
+    offset: u64,
+    file_len: u64,
+) -> Result<([u8; 4], u64, u64), String> {
+    source.seek(SeekFrom::Start(offset)).map_err(error)?;
+    let mut header = [0; 16];
+    source.read_exact(&mut header[..8]).map_err(error)?;
+    let (length, header_bytes) = match u32::from_be_bytes(header[..4].try_into().unwrap()) {
+        0 => (file_len - offset, 8),
+        1 => {
+            source.read_exact(&mut header[8..]).map_err(error)?;
+            (u64::from_be_bytes(header[8..].try_into().unwrap()), 16)
+        }
+        n => (u64::from(n), 8),
+    };
+    Ok((header[4..8].try_into().unwrap(), length, header_bytes))
+}
+
 fn legacy_preflight(path: &Path, source: &mut SourceFile) -> Result<Preflight, String> {
     let file = LegacyFile::open(path).map_err(error)?;
     let (height, width, channels, bits) = file.image_header(source).map_err(error)?;
     if bits > 16 || channels == 0 || u32::from(channels) > MAX_CHANNELS {
         return Err("ND2 legacy JPEG2000 requires unsigned samples of at most 16 bits and at most 32 channel samples.".into());
     }
-    frame_bytes(width, height, u32::from(channels), 2)?;
+    let mut storage_bytes = frame_bytes(width, height, u32::from(channels), 2)? as u64;
     let positions = file
         .xml(source, "AIM1", 0)
         .or_else(|| file.xml(source, "AIMD", 0))
@@ -217,23 +233,9 @@ fn legacy_preflight(path: &Path, source: &mut SourceFile) -> Result<Preflight, S
     // Check every codestream's encoded size, SIZ geometry and signedness before
     // the JPEG2000 decoder allocates its coefficient/sample planes. Its codec
     // also enforces its own fixed output and compression-ratio ceilings.
-    let mut storage_bytes = frame_bytes(width, height, u32::from(channels), 2)? as u64;
     for stream in file.codestreams() {
-        source
-            .seek(SeekFrom::Start(stream.box_offset))
-            .map_err(error)?;
-        let mut header = [0; 16];
-        source.read_exact(&mut header[..8]).map_err(error)?;
-        let length = u32::from_be_bytes(header[..4].try_into().unwrap());
-        let (length, header_bytes) = match length {
-            0 => (file.file_len - stream.box_offset, 8),
-            1 => {
-                source.read_exact(&mut header[8..]).map_err(error)?;
-                (u64::from_be_bytes(header[8..].try_into().unwrap()), 16)
-            }
-            length => (u64::from(length), 8),
-        };
-        if length < header_bytes + 42 || length > MAX_FRAME_BYTES + 1024 * 1024 {
+        let (_, length, header_bytes) = legacy_box(source, stream.box_offset, file.file_len)?;
+        if length < header_bytes + 42 || length > MAX_ENCODED_FRAME_BYTES {
             return Err(
                 "ND2 legacy codestream is truncated or exceeds the encoded-frame limit.".into(),
             );
@@ -304,47 +306,31 @@ impl Bounds {
     }
 
     fn scan_inner(path: &Path, validate: bool) -> Result<Self, String> {
-        let mut file = File::open(path).map_err(|e| format!("ND2: {e}"))?;
-        let file_len = file.metadata().map_err(|e| format!("ND2: {e}"))?.len();
+        let mut file = File::open(path).map_err(error)?;
+        let file_len = file.metadata().map_err(error)?.len();
         let mut signature = [0; 12];
-        file.read_exact(&mut signature)
-            .map_err(|e| format!("ND2: {e}"))?;
-        let legacy = signature == openreadout_nd2::LEGACY_SIGNATURE;
-        if !legacy {
+        file.read_exact(&mut signature).map_err(error)?;
+        if signature != openreadout_nd2::LEGACY_SIGNATURE {
             return Self::scan_chunk_map(path, file, file_len, validate);
         }
         let mut offset = 0u64;
         let mut metadata_bytes = 0u64;
         let mut encoded_bytes = 0u64;
         let mut entries = 0u64;
-        while file_len.saturating_sub(offset) >= if legacy { 8 } else { 16 } {
-            file.seek(SeekFrom::Start(offset))
-                .map_err(|e| format!("ND2: {e}"))?;
-            let mut header = [0; 16];
-            file.read_exact(&mut header[..8])
-                .map_err(|e| format!("ND2: {e}"))?;
-            let length = match u32::from_be_bytes(header[..4].try_into().unwrap()) {
-                0 => file_len - offset,
-                1 => {
-                    file.read_exact(&mut header[8..])
-                        .map_err(|e| format!("ND2: {e}"))?;
-                    let length = u64::from_be_bytes(header[8..].try_into().unwrap());
-                    if length < 16 {
-                        return Err("ND2 legacy box has an invalid extended length.".into());
-                    }
-                    length
-                }
-                n => u64::from(n),
-            };
+        while file_len.saturating_sub(offset) >= 8 {
+            let (kind, length, header_bytes) = legacy_box(&mut file, offset, file_len)?;
+            if header_bytes == 16 && length < 16 {
+                return Err("ND2 legacy box has an invalid extended length.".into());
+            }
             if length < 8 {
                 return Err("ND2 legacy box has an invalid length.".into());
             }
-            let pixels = &header[4..8] == b"jp2c";
+            let pixels = &kind == b"jp2c";
             if offset.checked_add(length).is_none_or(|end| end > file_len) {
                 return Err("ND2 chunk extends beyond its source file.".into());
             }
             if pixels {
-                if length > MAX_FRAME_BYTES + MIB + 65552 {
+                if length > MAX_ENCODED_FRAME_BYTES + 65552 {
                     return Err("ND2 encoded frame exceeds the 257 MiB input-buffer limit.".into());
                 }
                 encoded_bytes = encoded_bytes.max(length);
@@ -363,7 +349,7 @@ impl Bounds {
             expanded_bytes: metadata_bytes,
             metadata_workspace: metadata_bytes * 128 + entries * 256 + 8 * MIB,
             encoded_bytes,
-            legacy,
+            legacy: true,
         })
     }
     fn scan_chunk_map(
@@ -375,7 +361,7 @@ impl Bounds {
         fn read(file: &mut File, offset: u64, bytes: &mut [u8]) -> Result<(), String> {
             file.seek(SeekFrom::Start(offset))
                 .and_then(|_| file.read_exact(bytes))
-                .map_err(|e| format!("ND2: {e}"))
+                .map_err(error)
         }
         fn header(
             file: &mut File,
@@ -387,8 +373,8 @@ impl Bounds {
             if raw[..4] != openreadout_nd2::CHUNK_MAGIC_BYTES {
                 return Err("ND2 chunk header has invalid magic.".into());
             }
-            let name_len = u32::from_le_bytes(raw[4..8].try_into().unwrap()) as usize;
-            let length = u64::from_le_bytes(raw[8..].try_into().unwrap());
+            let name_len = u32_at(&raw, 4) as usize;
+            let length = u64_at(&raw, 8);
             if name_len > 65536
                 || offset
                     .checked_add(16 + name_len as u64)
@@ -400,8 +386,7 @@ impl Bounds {
                 );
             }
             let mut name = vec![0; name_len];
-            file.read_exact(&mut name)
-                .map_err(|e| format!("ND2: {e}"))?;
+            file.read_exact(&mut name).map_err(error)?;
             Ok((name, offset + 16 + name_len as u64, length))
         }
         let mut tail = [0; 8];
@@ -417,9 +402,8 @@ impl Bounds {
         if map_bytes > MAX_METADATA_BYTES {
             return Err("ND2 chunk map exceeds the 32 MiB input limit.".into());
         }
-        let mut map = BufReader::new(File::open(path).map_err(|e| format!("ND2: {e}"))?);
-        map.seek(SeekFrom::Start(map_start))
-            .map_err(|e| format!("ND2: {e}"))?;
+        let mut map = BufReader::new(File::open(path).map_err(error)?);
+        map.seek(SeekFrom::Start(map_start)).map_err(error)?;
         let mut cursor = map_start;
         let map_end = map_start + map_bytes;
         let mut metadata_bytes = map_bytes;
@@ -435,7 +419,7 @@ impl Bounds {
                     return Err("ND2 chunk map name is truncated or excessive.".into());
                 }
                 let mut byte = [0];
-                map.read_exact(&mut byte).map_err(|e| format!("ND2: {e}"))?;
+                map.read_exact(&mut byte).map_err(error)?;
                 cursor += 1;
                 name.push(byte[0]);
                 if byte[0] == b'!' {
@@ -449,13 +433,10 @@ impl Bounds {
                 return Err("ND2 chunk map entry is truncated.".into());
             }
             let mut item = [0; 16];
-            map.read_exact(&mut item).map_err(|e| format!("ND2: {e}"))?;
+            map.read_exact(&mut item).map_err(error)?;
             cursor += 16;
-            let (mut actual_name, payload_start, length) = header(
-                &mut file,
-                u64::from_le_bytes(item[..8].try_into().unwrap()),
-                file_len,
-            )?;
+            let (mut actual_name, payload_start, length) =
+                header(&mut file, u64_at(&item, 0), file_len)?;
             while actual_name.last() == Some(&0) {
                 actual_name.pop();
             }
@@ -466,7 +447,7 @@ impl Bounds {
                 matches!(name.as_slice(), b"ImageAttributes!" | b"ImageAttributesLV!");
             let pixels = actual_name.starts_with(b"ImageDataSeq|");
             if pixels {
-                if length > MAX_FRAME_BYTES + MIB {
+                if length > MAX_ENCODED_FRAME_BYTES {
                     return Err("ND2 encoded frame exceeds the 257 MiB input-buffer limit.".into());
                 }
                 encoded_bytes = encoded_bytes.max(length);
@@ -585,52 +566,41 @@ impl Plan {
 }
 
 #[cfg(test)]
-type Opened = (Box<dyn Dataset>, Vec<ImageInfo>, u64);
-
-#[cfg(test)]
-fn open(path: &Path) -> Result<Opened, String> {
-    let preflight = preflight(path)?;
-    let dataset = Nd2Reader.open(path).map_err(error)?;
-    let info = dataset.info().map_err(error)?;
-    if info.images.len() > MAX_POSITIONS as usize {
-        return Err("ND2 supports at most 4096 positions.".into());
-    }
-    Ok((dataset, info.images, preflight.storage_bytes))
-}
-
-#[cfg(test)]
-fn inspect(path: &Path, selection: Selection) -> Result<frames::Dimensions, String> {
-    let (_, images, _) = open(path)?;
-    Ok(frames::description(Format::Nd2, &images, selection)?.dimensions)
-}
-
-#[cfg(test)]
-pub fn extract(
-    input: &Path,
-    output: &Path,
-    selection: Selection,
-) -> Result<ExtractedFrame, String> {
-    extract_frame(input, output, selection, false)
-}
-
-#[cfg(test)]
-fn extract_frame(
-    input: &Path,
-    output: &Path,
-    selection: Selection,
-    display: bool,
-) -> Result<ExtractedFrame, String> {
-    let (mut dataset, images, _) = open(input)?;
-    let frame = frames::decode_frame(Format::Nd2, dataset.as_mut(), &images, selection)?;
-    drop(dataset);
-    let description = frames::description(Format::Nd2, &images, selection)?;
-    frames::write_frame(&frame, description, output, display, None)
-}
-
-#[cfg(test)]
 pub(crate) mod tests {
     use super::*;
     use crate::frames::tests::{strip, temporary};
+    use crate::frames::{self, ExtractedFrame, Selection};
+    use openreadout_core::{Dataset, FormatReader};
+    use openreadout_nd2::Nd2Reader;
+
+    type Opened = (Box<dyn Dataset>, Vec<ImageInfo>, u64);
+
+    fn open(path: &Path) -> Result<Opened, String> {
+        let preflight = preflight(path)?;
+        let dataset = Nd2Reader.open(path).map_err(error)?;
+        let info = dataset.info().map_err(error)?;
+        if info.images.len() > MAX_POSITIONS as usize {
+            return Err("ND2 supports at most 4096 positions.".into());
+        }
+        Ok((dataset, info.images, preflight.storage_bytes))
+    }
+
+    fn inspect(path: &Path, selection: Selection) -> Result<frames::Dimensions, String> {
+        let (_, images, _) = open(path)?;
+        Ok(frames::description(Format::Nd2, &images, selection)?.dimensions)
+    }
+
+    fn extract(
+        input: &Path,
+        output: &Path,
+        selection: Selection,
+    ) -> Result<ExtractedFrame, String> {
+        let (mut dataset, images, _) = open(input)?;
+        let frame = frames::decode_frame(Format::Nd2, dataset.as_mut(), &images, selection)?;
+        drop(dataset);
+        let description = frames::description(Format::Nd2, &images, selection)?;
+        frames::write_frame(&frame, description, output, false, None)
+    }
 
     pub(crate) fn synthetic(bits: u32, rgb: bool) -> Vec<u8> {
         fn number(key: &str, value: u32) -> String {
@@ -801,7 +771,7 @@ pub(crate) mod tests {
         let name = b"ImageDataSeq|0!";
         let name_offset = bytes.windows(name.len()).position(|v| v == name).unwrap();
         bytes[name_offset - 8..name_offset]
-            .copy_from_slice(&(MAX_FRAME_BYTES + 1024 * 1024 + 1).to_le_bytes());
+            .copy_from_slice(&(MAX_ENCODED_FRAME_BYTES + 1).to_le_bytes());
         std::fs::write(&source, &bytes).unwrap();
         assert!(extract(&source, &output, Selection::default())
             .unwrap_err()

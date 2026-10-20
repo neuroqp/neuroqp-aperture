@@ -51,11 +51,7 @@ struct Tiff {
 
 impl Tiff {
     fn number(&self, b: &[u8]) -> u64 {
-        if self.little {
-            b.iter().rev().fold(0, |v, b| (v << 8) | u64::from(*b))
-        } else {
-            b.iter().fold(0, |v, b| (v << 8) | u64::from(*b))
-        }
+        crate::tiff_ifd::number(b, self.little)
     }
     fn bytes(&self, n: u64, size: usize) -> Result<Vec<u8>, String> {
         if size < 8 && n >= (1u64 << (size * 8)) {
@@ -98,22 +94,12 @@ impl Tiff {
             directory: 0,
         };
         let h = t.at(0, 8)?;
-        t.little = match &h[..2] {
-            b"II" => true,
-            b"MM" => false,
-            _ => return Err("Not a TIFF file".into()),
-        };
-        let first = match t.number(&h[2..4]) {
-            42 => t.number(&h[4..8]),
-            43 => {
-                t.big = true;
-                if t.number(&h[4..6]) != 8 || t.number(&h[6..8]) != 0 {
-                    return Err("Unsupported BigTIFF header".into());
-                }
-                let p = t.at(8, 8)?;
-                t.number(&p)
-            }
-            _ => return Err("Unsupported TIFF header".into()),
+        (t.little, t.big) = crate::tiff_ifd::header(&h)?;
+        let first = if t.big {
+            let p = t.at(8, 8)?;
+            t.number(&p)
+        } else {
+            t.number(&h[4..8])
         };
         t.load_directory(first, LIMIT)?;
         Ok(t)
@@ -549,12 +535,13 @@ pub fn stage_copy(
         .ok_or("TIFF file size overflow")?
         / alignment
         * alignment;
-    let entry_count = t
+    let mut entries: Vec<_> = t
         .entries
         .iter()
         .filter(|e| ![COUNTS, METADATA].contains(&t.tag(e)))
-        .count()
-        + 2;
+        .cloned()
+        .collect();
+    let entry_count = entries.len() + 2;
     let final_size = ifd_offset
         .checked_add(if t.big {
             8 + entry_count as u64 * 20 + 8
@@ -589,44 +576,23 @@ pub fn stage_copy(
         if copied != t.len {
             return Err("Source TIFF changed while saving".into());
         }
-        let alignment = if t.big { 8u64 } else { 2u64 };
-        let padded = t
-            .len
-            .checked_add(alignment - 1)
-            .ok_or("TIFF file size overflow")?
-            / alignment
-            * alignment;
         out.write_all(&vec![0; (padded - t.len) as usize])
             .map_err(|e| e.to_string())?;
-        let counts_offset = padded;
         out.write_all(&counts).map_err(|e| e.to_string())?;
-        let data_offset = out.stream_position().map_err(|e| e.to_string())?;
         out.write_all(&data).map_err(|e| e.to_string())?;
-        let position = out.stream_position().map_err(|e| e.to_string())?;
-        let ifd_offset = position
-            .checked_add(alignment - 1)
-            .ok_or("TIFF file size overflow")?
-            / alignment
-            * alignment;
-        out.write_all(&vec![0; (ifd_offset - position) as usize])
+        out.write_all(&vec![0; (ifd_offset - metadata_end) as usize])
             .map_err(|e| e.to_string())?;
         let offset_width = if t.big { 8 } else { 4 };
         let counts_value = if counts.len() <= offset_width {
             counts.clone()
         } else {
-            t.bytes(counts_offset, offset_width)?
+            t.bytes(padded, offset_width)?
         };
         let data_value = if data.len() <= offset_width {
             data.clone()
         } else {
-            t.bytes(data_offset, offset_width)?
+            t.bytes(padded + counts.len() as u64, offset_width)?
         };
-        let mut entries: Vec<_> = t
-            .entries
-            .iter()
-            .filter(|e| ![COUNTS, METADATA].contains(&t.tag(e)))
-            .cloned()
-            .collect();
         entries.push(t.entry(COUNTS, 4, counts.len() as u64 / 4, &counts_value)?);
         entries.push(t.entry(METADATA, 1, data.len() as u64, &data_value)?);
         entries.sort_by_key(|e| t.tag(e));
@@ -636,9 +602,6 @@ pub fn stage_copy(
             out.write_all(&e).map_err(|e| e.to_string())?;
         }
         out.write_all(&t.next).map_err(|e| e.to_string())?;
-        if !t.big && out.stream_position().map_err(|e| e.to_string())? > u32::MAX as u64 {
-            return Err("Annotated copy exceeds classic TIFF's 4 GiB offset limit".into());
-        }
         out.seek(SeekFrom::Start(if t.big { 8 } else { 4 }))
             .map_err(|e| e.to_string())?;
         out.write_all(&t.bytes(ifd_offset, offset_width)?)
