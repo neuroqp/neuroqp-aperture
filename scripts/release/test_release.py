@@ -232,6 +232,41 @@ class ReleaseTests(unittest.TestCase):
             with mock.patch.object(notices, "RUST_RUNTIME", copied), self.assertRaisesRegex(ValueError, "checksum mismatch: LICENSE-MIT"):
                 notices.rust_runtime_notice("windows", compiler="rustc 1.98.0 (88d9e12ae 2026-08-18)")
 
+    def test_pinned_crate_licenses_cover_locked_crates_and_reject_changed_material(self):
+        lock = (notices.ROOT / "src-tauri/Cargo.lock").read_text(encoding="utf-8")
+        pins = json.loads((notices.RUST_RUNTIME / "crates.json").read_text(encoding="utf-8"))["crates"]
+        for item in pins:
+            self.assertIn(f'name = "{item["name"]}"\nversion = "{item["version"]}"\nsource = "{item["source"]}"\nchecksum = "{item["checksum"]}"\n', lock)
+        registry = "registry+https://github.com/rust-lang/crates.io-index"
+        expected = {
+            ("alloc-stdlib", "0.2.4"): ("Copyright (c) 2016 Dropbox, Inc.", "Redistributions in binary form must reproduce", "ae42d22078b98549e987d2f03d12df7b984fde47"),
+            ("dlopen2", "0.8.2"): ("Copyright (c) 2017 Szymon Wieloch", "Copyright (C) 2022 OpenByte", "cc80e4a0a90d499b677fdf7743699b4b3a43a989"),
+            ("dlopen2_derive", "0.4.3"): ("Copyright (c) 2017 Szymon Wieloch", "Copyright (C) 2022 OpenByte", "cc80e4a0a90d499b677fdf7743699b4b3a43a989"),
+            ("selectors", "0.38.0"): ("Mozilla Public License Version 2.0", "Exhibit B", "a15178c3c7c976c67b3641af77cae0b66093a175"),
+            ("webview2-com", "0.39.1"): ("Copyright (c) 2021 Bill Avery", "MIT License", "edc2caf886175ccaebe86078c9cfe1ae2a187328"),
+            ("webview2-com-macros", "0.8.1"): ("Copyright (c) 2021 Bill Avery", "MIT License", "dffa41a8a46d3f5565eefbff2de57d38d399f158"),
+            ("webview2-com-sys", "0.39.1"): ("Copyright (c) 2021 Bill Avery", "MIT License", "edc2caf886175ccaebe86078c9cfe1ae2a187328"),
+        }
+        self.assertEqual({(item["name"], item["version"]) for item in pins}, set(expected))
+        for (name, version), required in expected.items():
+            text = notices.pinned_crate_license({"name": name, "version": version, "source": registry})
+            for value in required:
+                self.assertIn(value, text)
+        crate = {"name": "alloc-stdlib", "version": "0.2.4", "source": registry}
+        self.assertEqual(notices.pinned_crate_license({**crate, "version": "0.3.0"}), "")
+        self.assertEqual(notices.pinned_crate_license({**crate, "source": "git+https://example.invalid/alloc"}), "")
+        with tempfile.TemporaryDirectory() as folder:
+            copied = Path(folder) / "runtime"
+            shutil.copytree(notices.RUST_RUNTIME, copied)
+            with (copied / "alloc-stdlib-0.2.4-LICENSE").open("ab") as license_file:
+                license_file.write(b"changed")
+            with mock.patch.object(notices, "RUST_RUNTIME", copied), self.assertRaisesRegex(ValueError, "checksum mismatch: alloc-stdlib-0.2.4-LICENSE"):
+                notices.pinned_crate_license(crate)
+            with (copied / "MPL-2.0.txt").open("ab") as license_file:
+                license_file.write(b"changed")
+            with mock.patch.object(notices, "RUST_RUNTIME", copied), self.assertRaisesRegex(ValueError, "checksum mismatch: MPL-2.0.txt"):
+                notices.pinned_crate_license({"name": "selectors", "version": "0.38.0", "source": registry})
+
     def test_version_and_notes(self):
         with tempfile.TemporaryDirectory() as folder:
             root = Path(folder)

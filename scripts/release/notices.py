@@ -53,6 +53,17 @@ def license_text(directory):
     return "\n".join(f"{p.name}\n{p.read_text(encoding='utf-8', errors='replace')}" for p in files)
 
 
+def pinned_crate_license(package):
+    """Return reviewed upstream license text for a published crate that omits it."""
+    for item in json.loads((RUST_RUNTIME / "crates.json").read_text(encoding="utf-8"))["crates"]:
+        if (item["name"], item["version"], item["source"]) == (package["name"], package["version"], package.get("source")):
+            data = (RUST_RUNTIME / item["file"]).read_bytes()
+            if hashlib.sha256(data).hexdigest() != item["sha256"]:
+                raise ValueError(f"Rust crate license checksum mismatch: {item['file']}")
+            return f"{item['file']} (upstream {item['upstream']})\n{data.decode('utf-8')}"
+    return ""
+
+
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("platform", choices=("linux", "windows"))
@@ -68,6 +79,7 @@ def main():
         text = license_text(directory)
         if package.get("license_file"):
             text += "\n" + (directory / package["license_file"]).read_text(encoding="utf-8", errors="replace")
+        text += pinned_crate_license(package)
         sections.append(f"Rust: {package['name']} {package['version']}\nLicense: {package.get('license')}\nSource: {package.get('repository') or package.get('source')}\n{text}")
     for directory in sorted((ROOT / "node_modules/.pnpm").glob("*/node_modules/*")):
         candidates = [directory] if not directory.name.startswith("@") else sorted(directory.iterdir())
