@@ -730,12 +730,26 @@ fn dz_options(args: &[String]) -> Result<String, String> {
     Ok(options.join(","))
 }
 
+/// libvips limits shared by the image worker and the vips command-line tools.
+pub(crate) const VIPS_THREADS: i32 = 2;
+const VIPS_CACHE_MAX_MEMORY: u64 = 64 * 1024 * 1024;
+const VIPS_DISC_THRESHOLD: &str = "32m";
+
+pub(crate) fn tool_options() -> [String; 4] {
+    [
+        format!("--vips-concurrency={VIPS_THREADS}"),
+        "--vips-cache-max=0".into(),
+        format!("--vips-cache-max-memory={VIPS_CACHE_MAX_MEMORY}"),
+        format!("--vips-disc-threshold={VIPS_DISC_THRESHOLD}"),
+    ]
+}
+
 pub fn worker_main() -> Result<(), String> {
-    std::env::set_var("VIPS_DISC_THRESHOLD", "32m");
+    std::env::set_var("VIPS_DISC_THRESHOLD", VIPS_DISC_THRESHOLD);
     let app = VipsApp::new("aperture-image-worker", false).map_err(|e| e.to_string())?;
-    app.concurrency_set(2);
+    app.concurrency_set(VIPS_THREADS);
     app.cache_set_max(0);
-    app.cache_set_max_mem(64 * 1024 * 1024);
+    app.cache_set_max_mem(VIPS_CACHE_MAX_MEMORY);
     let mut worker = Worker {
         images: HashMap::new(),
         source: None,

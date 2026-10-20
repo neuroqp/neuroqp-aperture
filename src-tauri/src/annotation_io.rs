@@ -238,16 +238,8 @@ pub fn stage_save(
             let output = crate::platform::tool("vips")
                 .current_dir(&temp)
                 .env("TMPDIR", ".")
-                .args([
-                    "tiffsave",
-                    &alias,
-                    "converted.tif",
-                    "--compression=lzw",
-                    "--vips-concurrency=2",
-                    "--vips-cache-max=0",
-                    "--vips-cache-max-memory=67108864",
-                    "--vips-disc-threshold=32m",
-                ])
+                .args(["tiffsave", &alias, "converted.tif", "--compression=lzw"])
+                .args(crate::vips_worker::tool_options())
                 .output()
                 .map_err(|e| {
                     format!("Cannot convert the image to TIFF: {e}. Install libvips tools.")

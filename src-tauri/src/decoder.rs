@@ -1,5 +1,5 @@
 //! C decoding lives in a child process, so cancellation can interrupt native I/O.
-use crate::vips_worker::{Request, Response, MAX_MESSAGE};
+use crate::vips_worker::{Request, Response, MAX_MESSAGE, VIPS_THREADS};
 use std::{
     fs::File,
     io::{BufRead, BufReader, Read, Write},
@@ -32,7 +32,7 @@ impl Decoder {
         let mut child = crate::platform::command(executable)
             .arg("--image-worker")
             .env("TMPDIR", work.join("tmp"))
-            .env("VIPS_CONCURRENCY", "2")
+            .env("VIPS_CONCURRENCY", VIPS_THREADS.to_string())
             .stdin(Stdio::piped())
             .stdout(Stdio::piped())
             .stderr(File::create(work.join("decoder.stderr")).map_err(|e| e.to_string())?)

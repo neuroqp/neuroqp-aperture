@@ -1995,17 +1995,13 @@ fn run_with_progress(
     let stdout = File::create(&stdout_path).map_err(|e| e.to_string())?;
     let stderr = File::create(&stderr_path).map_err(|e| e.to_string())?;
     let mut command = crate::platform::tool(program);
+    let threads = crate::vips_worker::VIPS_THREADS.to_string();
     command
         .args(args)
         .env("TMPDIR", dir.join("tmp"))
-        .env("VIPS_CONCURRENCY", "2");
+        .env("VIPS_CONCURRENCY", threads);
     if program == "vips" || program == "vipsheader" {
-        command.args([
-            "--vips-concurrency=2",
-            "--vips-cache-max=0",
-            "--vips-cache-max-memory=67108864",
-            "--vips-disc-threshold=32m",
-        ]);
+        command.args(crate::vips_worker::tool_options());
     }
     let process = {
         // Serialize spawning with cancellation so replacement cannot leave a
