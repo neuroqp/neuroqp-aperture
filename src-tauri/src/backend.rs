@@ -25,7 +25,9 @@ use std::{
 };
 
 pub const CACHE_LIMIT: u64 = 2 * 1024 * 1024 * 1024;
-pub const IMAGE_EXTENSIONS: &[&str] = &["jpg", "jpeg", "png", "bmp", "tif", "tiff", "webp", "nd2"];
+pub const IMAGE_EXTENSIONS: &[&str] = &[
+    "jpg", "jpeg", "png", "bmp", "tif", "tiff", "webp", "nd2", "czi",
+];
 const TILE_SIZE: u32 = 256;
 static NEXT_ID: AtomicU64 = AtomicU64::new(1);
 
@@ -524,7 +526,8 @@ impl LoadContext {
             .to_ascii_lowercase();
         if !supported_image(path) {
             return Err(
-                "Supported formats: JPEG, PNG, BMP, WebP, TIFF, BigTIFF and Nikon ND2.".into(),
+                "Supported formats: JPEG, PNG, BMP, WebP, TIFF, BigTIFF, Nikon ND2 and Zeiss CZI."
+                    .into(),
             );
         }
         let projection = frame.as_ref().map(|frame| frame.3).unwrap_or_default();

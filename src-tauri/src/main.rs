@@ -2,6 +2,7 @@
 mod annotation_io;
 mod backend;
 mod channels;
+mod czi;
 mod decoder;
 mod frame_cache;
 mod frames;

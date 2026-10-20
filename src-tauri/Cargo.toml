@@ -21,6 +21,8 @@ same-file = "1"
 image = { version = "0.25.10", default-features = false, features = ["bmp"] }
 openreadout-core = "=0.3.0"
 openreadout-nd2 = "=0.3.0"
+openreadout-czi = "=0.3.0"
+rayon = "1"
 flate2 = "=1.1.10"
 
 [target.'cfg(windows)'.dependencies]

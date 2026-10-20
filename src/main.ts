@@ -570,7 +570,7 @@ function showImage(state: ImageState) {
   );
   $("points-button").setAttribute(
     "title",
-    state.readOnly ? "Annotations unavailable while browsing" : "Multi-point",
+    state.readOnly ? "Browsing only · annotations unavailable" : "Multi-point",
   );
   $<HTMLButtonElement>("points-button").disabled = Boolean(state.readOnly);
   colorPanel.setChannels(

@@ -14,18 +14,22 @@ pub(crate) const MAX_FRAME_BYTES: u64 = 256 * 1024 * 1024;
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
 pub enum Format {
     Nd2,
+    Czi,
 }
 
 impl Format {
     pub fn from_path(path: &Path) -> Option<Self> {
         let extension = path.extension()?.to_str()?;
-        extension.eq_ignore_ascii_case("nd2").then_some(Self::Nd2)
+        [("nd2", Self::Nd2), ("czi", Self::Czi)]
+            .into_iter()
+            .find_map(|(name, format)| extension.eq_ignore_ascii_case(name).then_some(format))
     }
 
     /// Display-cache salt; change it when decoding or normalization changes.
     pub fn cache_version(self) -> &'static str {
         match self {
             Self::Nd2 => "nd2-openreadout-0.3.0-v2-normalized",
+            Self::Czi => "czi-openreadout-0.3.0-v1",
         }
     }
 }
@@ -34,6 +38,7 @@ impl std::fmt::Display for Format {
     fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         formatter.write_str(match self {
             Self::Nd2 => "ND2",
+            Self::Czi => "CZI",
         })
     }
 }
@@ -115,13 +120,18 @@ pub(crate) fn frame_bytes(
     bands: u32,
     bytes: usize,
 ) -> Result<usize, String> {
-    u64::from(width)
-        .checked_mul(u64::from(height))
-        .and_then(|n| n.checked_mul(u64::from(bands)))
-        .and_then(|n| n.checked_mul(bytes as u64))
-        .filter(|n| *n > 0 && *n <= MAX_FRAME_BYTES)
-        .and_then(|n| usize::try_from(n).ok())
-        .ok_or_else(|| format!("{format} selected frame exceeds the 256 MiB decoded-frame limit or has invalid dimensions. Export a smaller frame as TIFF."))
+    let total = u128::from(width) * u128::from(height) * u128::from(bands) * bytes as u128;
+    if total == 0 {
+        return Err(format!("{format} selected frame has invalid dimensions."));
+    }
+    if total > u128::from(MAX_FRAME_BYTES) {
+        // ponytail: whole-frame decoding; large stitched scenes need region streaming.
+        return Err(format!(
+            "{format} selected frame is {width} × {height} pixels with {bands} samples of {bytes} byte(s) ({:.1} MiB), above the 256 MiB decoded-frame limit. Export a smaller frame or region as TIFF.",
+            total as f64 / (1024.0 * 1024.0)
+        ));
+    }
+    Ok(total as usize)
 }
 
 pub(crate) fn description(

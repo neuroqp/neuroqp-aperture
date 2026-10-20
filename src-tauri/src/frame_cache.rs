@@ -2,7 +2,7 @@
 
 use crate::frames::{self, ExtractedFrame, Format, Projection, RawFrame, Selection};
 use crate::memory::{Budget, Reservation};
-use crate::nd2;
+use crate::{czi, nd2};
 use openreadout_core::source::{ByteSource, Input, LocalFile};
 use openreadout_core::{ChannelInfo, FormatReader, ImageInfo};
 use std::collections::VecDeque;
@@ -16,6 +16,7 @@ pub(crate) const FRAME_OVERHEAD: u64 = 64 * 1024;
 /// Format-specific bounds checked before the pinned reader allocates.
 enum Plan {
     Nd2(nd2::Plan),
+    Czi(czi::Plan),
 }
 
 impl Plan {
@@ -28,18 +29,23 @@ impl Plan {
             Format::Nd2 => {
                 nd2::Plan::new(source, budget).map(|(plan, lease)| (Self::Nd2(plan), lease))
             }
+            Format::Czi => {
+                czi::Plan::new(source, budget).map(|(plan, lease)| (Self::Czi(plan), lease))
+            }
         }
     }
 
     fn reader(&self) -> &'static dyn FormatReader {
         match self {
             Self::Nd2(_) => &openreadout_nd2::Nd2Reader,
+            Self::Czi(_) => &openreadout_czi::CziReader,
         }
     }
 
     fn check_images(&self, images: &[ImageInfo]) -> Result<(), String> {
         match self {
             Self::Nd2(plan) => plan.check_images(images),
+            Self::Czi(plan) => plan.check_images(images),
         }
     }
 
@@ -47,6 +53,7 @@ impl Plan {
     fn decode_peak(&self, frame_bytes: u64) -> u64 {
         match self {
             Self::Nd2(plan) => plan.decode_peak(frame_bytes),
+            Self::Czi(plan) => plan.decode_peak(frame_bytes),
         }
     }
 }
