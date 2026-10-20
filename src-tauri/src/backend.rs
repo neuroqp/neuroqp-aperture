@@ -96,12 +96,13 @@ pub enum Phase {
     Error,
 }
 
-type FrameSelection = (
-    crate::frames::Selection,
-    crate::frames::Dimensions,
-    Vec<Channel>,
-    crate::frames::Projection,
-);
+/// A selected frame with the navigation state and channels seeded for it.
+pub(crate) struct FrameSelection {
+    pub selection: crate::frames::Selection,
+    pub dimensions: crate::frames::Dimensions,
+    pub channels: Vec<Channel>,
+    pub projection: crate::frames::Projection,
+}
 
 type Notifier = Arc<dyn Fn(&ImageState) + Send + Sync>;
 
@@ -280,7 +281,12 @@ impl Backend {
         self.open_source(
             Path::new(&state.path),
             job.source.clone(),
-            Some((selection, dimensions, state.channels, projection)),
+            Some(FrameSelection {
+                selection,
+                dimensions,
+                channels: state.channels,
+                projection,
+            }),
         )
     }
 
@@ -480,18 +486,14 @@ impl LoadContext {
         &self,
         path: &Path,
         source: PathBuf,
-        frame: (
-            crate::frames::Selection,
-            crate::frames::Dimensions,
-            Vec<Channel>,
-        ),
+        frame: FrameSelection,
         acquisition: Arc<crate::preload::Acquisition>,
         preview_only: bool,
     ) -> Result<Arc<Job>, String> {
         self.create_job(
             path,
             source,
-            Some((frame.0, frame.1, frame.2, crate::frames::Projection::None)),
+            Some(frame),
             Some(acquisition),
             if preview_only {
                 LoadMode::Preview
@@ -531,9 +533,17 @@ impl LoadContext {
                     .into(),
             );
         }
-        let projection = frame.as_ref().map(|frame| frame.3).unwrap_or_default();
+        let projection = frame
+            .as_ref()
+            .map(|frame| frame.projection)
+            .unwrap_or_default();
         let format = crate::frames::Format::from_path(path);
-        let selection = format.map(|_| frame.as_ref().map(|frame| frame.0).unwrap_or_default());
+        let selection = format.map(|_| {
+            frame
+                .as_ref()
+                .map(|frame| frame.selection)
+                .unwrap_or_default()
+        });
         // BMP opens eagerly in the worker, including for vipsheader. Read only
         // its dimensions here, before permitting any full-frame allocations.
         let frame_memory = if extension == "bmp" {
@@ -605,7 +615,7 @@ impl LoadContext {
             alias
         };
         let (dimensions, initial_channels) = frame
-            .map(|(_, dimensions, channels, _)| (Some(dimensions), channels))
+            .map(|frame| (Some(frame.dimensions), frame.channels))
             .unwrap_or_default();
         let initial = ImageState {
             id,

@@ -442,7 +442,12 @@ pub(crate) fn run(context: &LoadContext, foreground: &Arc<Job>) {
             let Ok(job) = context.background_job(
                 Path::new(&state.path),
                 foreground.source.clone(),
-                (selection, metadata.dimensions, metadata.channels),
+                backend::FrameSelection {
+                    selection,
+                    dimensions: metadata.dimensions,
+                    channels: metadata.channels,
+                    projection: Projection::None,
+                },
                 acquisition.clone(),
                 preview_only,
             ) else {
