@@ -394,30 +394,4 @@ export class AnnotationViewer {
     this.overlay.append(fragment);
     this.updateInteraction();
   };
-
-  dispose() {
-    this.viewer.removeHandler("canvas-press", this.press);
-    this.viewer.removeHandler("canvas-drag", this.drag);
-    this.viewer.removeHandler("canvas-drag-end", this.dragEnd);
-    this.viewer.removeHandler("canvas-release", this.release);
-    this.viewer.removeHandler("canvas-click", this.click);
-    this.viewer.removeHandler("canvas-exit", this.exit);
-    this.viewer.removeHandler("canvas-nonprimary-press", this.buttonsChange);
-    this.viewer.removeHandler("canvas-nonprimary-release", this.buttonsChange);
-    this.viewer.canvas.removeEventListener("pointermove", this.pointerMove);
-    this.viewer.canvas.removeEventListener("pointerenter", this.enter);
-    document.removeEventListener("pointerdown", this.controlPress, true);
-    this.mouseControl = null;
-    this.viewer.canvas.removeEventListener(
-      "pointercancel",
-      this.resetInteraction,
-    );
-    document.removeEventListener("keydown", this.keyDown, true);
-    document.removeEventListener("keyup", this.keyUp, true);
-    window.removeEventListener("blur", this.resetInteraction);
-    for (const event of ["animation", "resize", "open"] as const)
-      this.viewer.removeHandler(event, this.render);
-    this.viewer.world.removeHandler("add-item", this.render);
-    this.overlay.remove();
-  }
 }

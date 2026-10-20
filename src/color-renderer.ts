@@ -144,14 +144,12 @@ export function bindColorRenderer(
   });
   let frame = 0;
   let revision = 0;
-  let disposed = false;
   const handleTile = async (event: OpenSeadragon.TileInvalidatedEvent) => {
     if (viewer.drawer.getType() === "aperture-gpu") return;
     const source = event.tiledImage.source as OpenSeadragon.TileSource &
       ColorSource;
     const count = source.apertureChannelCount;
-    if (!count || disposed || viewer.world.getIndexOfItem(event.tiledImage) < 0)
-      return;
+    if (!count || viewer.world.getIndexOfItem(event.tiledImage) < 0) return;
     const settings = copyColorSettings(getSettings());
     if (!source.apertureChannelMode && identity(settings, count)) return;
     const started = revision;
@@ -172,7 +170,6 @@ export function bindColorRenderer(
         alpha = planes[3];
       }
       if (
-        disposed ||
         started !== revision ||
         viewer.world.getIndexOfItem(event.tiledImage) < 0 ||
         (await event.outdated())
@@ -181,7 +178,6 @@ export function bindColorRenderer(
       await event.setData(rendered(data, settings, alpha), "context2d");
     } catch (error) {
       if (
-        !disposed &&
         started === revision &&
         viewer.world.getIndexOfItem(event.tiledImage) >= 0 &&
         !(await event.outdated())
@@ -202,7 +198,7 @@ export function bindColorRenderer(
       }
       viewer.drawer.canvas.dataset.colorRenderer = "cpu";
       revision++;
-      if (frame || disposed) return;
+      if (frame) return;
       frame = requestAnimationFrame(() => {
         frame = 0;
         const started = revision;
@@ -214,7 +210,6 @@ export function bindColorRenderer(
         // Its global timestamp also makes subsequently loaded tiles use this state.
         void viewer.requestInvalidate(true).catch((error) => {
           if (
-            !disposed &&
             started === revision &&
             items.some((item) => viewer.world.getIndexOfItem(item) >= 0)
           )
@@ -292,11 +287,6 @@ export function bindColorRenderer(
           job.userData.controller?.abort();
         },
       };
-    },
-    dispose() {
-      disposed = true;
-      cancelAnimationFrame(frame);
-      viewer.removeHandler("tile-invalidated", handleTile);
     },
   };
 }

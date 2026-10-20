@@ -993,9 +993,5 @@ bindUpdates(
   settings,
 );
 
-window.addEventListener("beforeunload", () => {
-  loader.dispose();
-  annotationViewer.dispose();
-  colorRenderer?.dispose();
-  viewer.destroy();
-});
+// Stop the native image-state listener; page listeners end with the document.
+window.addEventListener("beforeunload", () => loader.dispose());
