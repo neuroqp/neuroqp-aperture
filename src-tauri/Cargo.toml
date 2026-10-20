@@ -1,7 +1,7 @@
 [package]
 license = "MIT"
 name = "aperture"
-version = "0.2.1"
+version = "0.3.0"
 description = "A minimal tiled desktop image viewer"
 edition = "2021"
 
