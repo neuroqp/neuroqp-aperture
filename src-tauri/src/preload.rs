@@ -162,12 +162,11 @@ impl Acquisition {
         bytes: u64,
         background: bool,
     ) -> Result<Option<Reservation>, String> {
-        let mut guard = self.cache()?;
-        let cache = guard.as_mut().unwrap();
-        let result = cache.reserve(bytes, background);
-        self.snapshot_cache(cache);
-        self.trim_cache(&mut guard)?;
-        result
+        self.with_cache(|cache| {
+            let result = cache.reserve(bytes, background);
+            cache.trim()?;
+            result
+        })?
     }
 
     pub fn geometry(&self, selection: Selection) -> Result<Geometry, String> {
@@ -185,6 +184,21 @@ impl Acquisition {
             self.snapshot_cache(cache);
         }
         Ok(())
+    }
+
+    /// Publish cache counts after `operation` and apply maintenance deferred
+    /// while it held the lock.
+    fn with_cache<T>(&self, operation: impl FnOnce(&mut Cache) -> T) -> Result<T, String> {
+        let mut guard = self.cache()?;
+        let cache = guard.as_mut().unwrap();
+        let result = operation(cache);
+        self.snapshot_cache(cache);
+        if self.trim_requested.load(Ordering::Relaxed)
+            || self.clear_requested.load(Ordering::Relaxed)
+        {
+            self.trim_cache(&mut guard)?;
+        }
+        Ok(result)
     }
 
     fn cache(&self) -> Result<MutexGuard<'_, Option<Cache>>, String> {
@@ -218,18 +232,12 @@ impl Acquisition {
         background: bool,
         cancel: &AtomicBool,
     ) -> Result<ExtractedFrame, String> {
-        let mut guard = self.cache()?;
-        if cancel.load(Ordering::Relaxed) || self.stopped.load(Ordering::Relaxed) {
-            return Err("Loading cancelled.".into());
-        }
-        let cache = guard.as_mut().unwrap();
-        let result = cache.extract_display(output, selection, background, Some(cancel));
-        self.snapshot_cache(cache);
-        if self.trim_requested.load(Ordering::Relaxed)
-            || self.clear_requested.load(Ordering::Relaxed)
-        {
-            self.trim_cache(&mut guard)?;
-        }
+        let result = self.with_cache(|cache| {
+            if cancel.load(Ordering::Relaxed) || self.stopped.load(Ordering::Relaxed) {
+                return Err("Loading cancelled.".into());
+            }
+            cache.extract_display(output, selection, background, Some(cancel))
+        })?;
         if cancel.load(Ordering::Relaxed) {
             return Err("Loading cancelled.".into());
         }
@@ -244,18 +252,12 @@ impl Acquisition {
         cancel: &AtomicBool,
         progress: impl FnMut(f64),
     ) -> Result<ExtractedFrame, String> {
-        let mut guard = self.cache()?;
-        if cancel.load(Ordering::Relaxed) || self.stopped.load(Ordering::Relaxed) {
-            return Err("Loading cancelled.".into());
-        }
-        let cache = guard.as_mut().unwrap();
-        let result = cache.extract_projection(output, selection, projection, cancel, progress);
-        self.snapshot_cache(cache);
-        if self.trim_requested.load(Ordering::Relaxed)
-            || self.clear_requested.load(Ordering::Relaxed)
-        {
-            self.trim_cache(&mut guard)?;
-        }
+        let result = self.with_cache(|cache| {
+            if cancel.load(Ordering::Relaxed) || self.stopped.load(Ordering::Relaxed) {
+                return Err("Loading cancelled.".into());
+            }
+            cache.extract_projection(output, selection, projection, cancel, progress)
+        })?;
         if cancel.load(Ordering::Relaxed) || self.stopped.load(Ordering::Relaxed) {
             return Err("Loading cancelled.".into());
         }
@@ -417,31 +419,26 @@ pub(crate) fn run(context: &LoadContext, foreground: &Arc<Job>) {
             {
                 return;
             }
-            let Ok(mut guard) = acquisition.cache() else {
+            let Ok(described) = acquisition.with_cache(|cache| {
+                if !acquisition.current(generation, foreground) {
+                    return None;
+                }
+                let metadata = cache.describe(selection).ok()?;
+                // Preload admission preserves existing raw frames when memory is full.
+                // Display generation can evict optional raw frames as needed.
+                if preview_only {
+                    cache.preload(selection);
+                }
+                Some(metadata)
+            }) else {
                 return;
             };
             if !acquisition.current(generation, foreground) {
                 return;
             }
-            let cache = guard.as_mut().unwrap();
-            let Ok(metadata) = cache.describe(selection) else {
+            let Some(metadata) = described else {
                 continue;
             };
-            // Preload admission preserves existing raw frames when memory is full.
-            // Display generation can evict optional raw frames as needed.
-            if preview_only {
-                cache.preload(selection);
-            }
-            acquisition.snapshot_cache(cache);
-            if acquisition.trim_requested.load(Ordering::Relaxed)
-                || acquisition.clear_requested.load(Ordering::Relaxed)
-            {
-                let _ = acquisition.trim_cache(&mut guard);
-            }
-            drop(guard);
-            if !acquisition.current(generation, foreground) {
-                return;
-            }
             let Ok(job) = context.background_job(
                 Path::new(&state.path),
                 foreground.source.clone(),
