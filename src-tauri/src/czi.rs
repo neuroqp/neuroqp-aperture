@@ -1660,6 +1660,7 @@ mod tests {
         assert_eq!(second.dimensions.as_ref().unwrap().position, 1);
         assert_eq!(std::fs::read(&source).unwrap(), bytes);
         backend.shutdown();
+        drop(backend);
         std::fs::remove_dir_all(temp).unwrap();
     }
 
