@@ -140,6 +140,11 @@ impl Decoder {
         let _ = child.kill();
         let _ = child.wait();
     }
+
+    /// Killed after a failed call, or exited on its own.
+    pub fn stopped(&self) -> bool {
+        !matches!(self.child.lock().unwrap().try_wait(), Ok(None))
+    }
 }
 
 impl Drop for Decoder {
@@ -213,6 +218,7 @@ mod tests {
                 .call(&request(), &AtomicBool::new(false), || false, |_| {})
                 .is_err());
             assert!(!Path::new(&format!("/proc/{pid}")).exists());
+            assert!(decoder.stopped());
             drop(decoder);
             fs::remove_dir_all(root).unwrap();
         }
@@ -226,6 +232,7 @@ mod tests {
             thread::spawn(move || decoder.call(&request(), &cancel, || false, |_| {}))
         };
         thread::sleep(Duration::from_millis(50));
+        assert!(!decoder.stopped());
         let start = Instant::now();
         cancel.store(true, Ordering::Relaxed);
         decoder.stop();

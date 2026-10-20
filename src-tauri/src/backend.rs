@@ -369,13 +369,6 @@ impl Backend {
             if !job.cancel.load(Ordering::Relaxed) && job.state.lock().unwrap().phase == "ready" {
                 crate::preload::run(&context, &job);
             }
-            // Generated pyramids need no decoder once complete; native tiles do.
-            if job.native.lock().unwrap().is_empty() {
-                let decoder = job.decoder.lock().unwrap().take();
-                if let Some(decoder) = decoder {
-                    decoder.stop();
-                }
-            }
             if job.cancel.load(Ordering::Relaxed) || job.state.lock().unwrap().phase == "error" {
                 let decoder = job.decoder.lock().unwrap().clone();
                 if let Some(decoder) = decoder {
@@ -682,6 +675,7 @@ impl LoadContext {
     }
 }
 
+/// Generated pyramids need no decoder once complete; native tiles do.
 pub(crate) fn finish_decoder(job: &Job) {
     if job.native.lock().unwrap().is_empty() {
         if let Some(decoder) = job.decoder.lock().unwrap().take() {
@@ -2203,7 +2197,8 @@ fn worker_call(
             memory.bytes = amount;
             memory.reservations.push(reservation);
         }
-        if slot.is_none() {
+        // A failed call stops its decoder; later native tiles need a fresh one.
+        if slot.as_ref().is_none_or(|decoder| decoder.stopped()) {
             *slot = match crate::decoder::Decoder::start(&job.work) {
                 Ok(decoder) => Some(Arc::new(decoder)),
                 Err(error) => {
@@ -3683,6 +3678,26 @@ mod tests {
             }
         )
         .is_ok());
+        // A crashed decoder is replaced for the next native tile.
+        let decoder = job.decoder.lock().unwrap().clone();
+        if let Some(decoder) = &decoder {
+            decoder.stop();
+        }
+        assert!(read_asset(
+            &job,
+            Asset::Tile {
+                level: 12,
+                x: 0,
+                y: 0
+            }
+        )
+        .is_ok());
+        if let Some(decoder) = decoder {
+            assert!(!Arc::ptr_eq(
+                &decoder,
+                job.decoder.lock().unwrap().as_ref().unwrap()
+            ));
+        }
         backend.shutdown();
         drop(job);
         fs::remove_dir_all(root).unwrap();
