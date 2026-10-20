@@ -617,7 +617,7 @@ fn extract_frame(
     let (mut dataset, images, _) = open(input)?;
     let frame = frames::decode_frame(Format::Nd2, dataset.as_mut(), &images, selection)?;
     drop(dataset);
-    frames::write_frame(&frame, output, display)
+    frames::write_frame(&frame, output, display, None)
 }
 
 #[cfg(test)]
