@@ -232,6 +232,25 @@ class ReleaseTests(unittest.TestCase):
             with mock.patch.object(notices, "RUST_RUNTIME", copied), self.assertRaisesRegex(ValueError, "checksum mismatch: LICENSE-MIT"):
                 notices.rust_runtime_notice("windows", compiler="rustc 1.98.0 (88d9e12ae 2026-08-18)")
 
+    def test_pinned_crate_licenses_cover_locked_crates_and_reject_changed_material(self):
+        lock = (notices.ROOT / "src-tauri/Cargo.lock").read_text(encoding="utf-8")
+        pins = json.loads((notices.RUST_RUNTIME / "crates.json").read_text(encoding="utf-8"))["crates"]
+        for item in pins:
+            self.assertIn(f'name = "{item["name"]}"\nversion = "{item["version"]}"\nsource = "{item["source"]}"\nchecksum = "{item["checksum"]}"\n', lock)
+        crate = {"name": "alloc-stdlib", "version": "0.2.4", "source": "registry+https://github.com/rust-lang/crates.io-index"}
+        text = notices.pinned_crate_license(crate)
+        for required in ("Copyright (c) 2016 Dropbox, Inc.", "Redistributions in binary form must reproduce", "ae42d22078b98549e987d2f03d12df7b984fde47"):
+            self.assertIn(required, text)
+        self.assertEqual(notices.pinned_crate_license({**crate, "version": "0.3.0"}), "")
+        self.assertEqual(notices.pinned_crate_license({**crate, "source": "git+https://example.invalid/alloc"}), "")
+        with tempfile.TemporaryDirectory() as folder:
+            copied = Path(folder) / "runtime"
+            shutil.copytree(notices.RUST_RUNTIME, copied)
+            with (copied / "alloc-stdlib-0.2.4-LICENSE").open("ab") as license_file:
+                license_file.write(b"changed")
+            with mock.patch.object(notices, "RUST_RUNTIME", copied), self.assertRaisesRegex(ValueError, "checksum mismatch: alloc-stdlib-0.2.4-LICENSE"):
+                notices.pinned_crate_license(crate)
+
     def test_version_and_notes(self):
         with tempfile.TemporaryDirectory() as folder:
             root = Path(folder)

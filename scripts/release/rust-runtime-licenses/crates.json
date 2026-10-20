@@ -1,0 +1,16 @@
+{
+  "schema": 1,
+  "crates": [
+    {
+      "name": "alloc-stdlib",
+      "version": "0.2.4",
+      "source": "registry+https://github.com/rust-lang/crates.io-index",
+      "checksum": "0e76a019e91224d279006ff972f1e984179a6e9feb050adba6ce8274aef23195",
+      "license": "BSD-3-Clause",
+      "file": "alloc-stdlib-0.2.4-LICENSE",
+      "sha256": "c0c56f26d9c051cac4d200c34c84e7ae9aaa853e01a982a1df08b09931e518ae",
+      "upstream": "https://github.com/dropbox/rust-alloc-no-stdlib/blob/ae42d22078b98549e987d2f03d12df7b984fde47/LICENSE",
+      "scope": "The published crate omits a license file. Its .cargo_vcs_info.json names upstream commit ae42d22078b98549e987d2f03d12df7b984fde47, path alloc-stdlib; every packaged source file matches that commit. The repository's root LICENSE at that commit is reproduced verbatim and covers the subdirectory crate."
+    }
+  ]
+}
