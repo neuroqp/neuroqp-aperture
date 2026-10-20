@@ -46,8 +46,8 @@ Rehearse the same transfer, native capture and close commands with a verified
 executable. Verify a ready image state, actual pixels and normal process exit.
 The observer must inspect the owned application window.
 
-Python helpers require Python 3.11 or newer. Use `python3.12` on the host; the
-prepared Debian/Ubuntu system `python3` is suitable. Use the existing native adapters, `smoke-desktop-windows.ps1` and
+Run Python helpers with an interpreter from the
+[command reference](RELEASE-REFERENCE.md). Use the existing native adapters, `smoke-desktop-windows.ps1` and
 `smoke-desktop-linux.py`. Supply `source_sha`, `checksums_sha256`, exact asset path/hash and tiny-TIFF
 path/hash/dimensions in `identity.json`. Linux identities also name `environment`
 as `debian12` or `ubuntu24-wayland`, loopback `driver_url`, and the prepared

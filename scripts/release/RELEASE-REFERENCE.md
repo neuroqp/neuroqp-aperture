@@ -4,8 +4,8 @@ Follow [RELEASING.md](../../RELEASING.md). Run commands from the repository root
 in a reviewed checkout. Keep downloads and reports in an ignored owned evidence
 directory. `source_sha` always means the exact validated application commit.
 Release helpers require Python 3.11 or newer. Local examples use `python3.12`;
-this host's unqualified `python3` resolves to 3.10. Debian 12's system `python3`
-is suitable, and Windows CI selects Python 3.12.
+this host's unqualified `python3` resolves to 3.10. The prepared Debian 12 and
+Ubuntu 24 system `python3` is suitable, and Windows CI selects Python 3.12.
 
 ## Workflows
 

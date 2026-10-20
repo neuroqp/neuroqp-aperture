@@ -3,15 +3,15 @@
 
 Usage: python3 scripts/check-imagej-interop.py /path/to/ij.jar
 The jar argument can be omitted when IMAGEJ_JAR is set.
-Requires a JDK and Cargo with the project's serde dependency cached. Set
-JAVA_HOME or pass --java-home when the JDK is not on PATH. All synthetic
-images and builds live in a temporary directory; no real images are read.
+Requires a JDK and the project's Rust toolchain; the Rust steps run as an
+ignored test in the application crate. Set JAVA_HOME or pass --java-home when
+the JDK is not on PATH. All synthetic images live in a temporary directory; no
+real images are read.
 """
 
 import argparse
 import os
 from pathlib import Path
-import shutil
 import subprocess
 import tempfile
 
@@ -25,7 +25,7 @@ def main():
         parser.error("pass /path/to/ij.jar or set IMAGEJ_JAR")
     jar = args.jar.resolve(strict=True)
     scripts = Path(__file__).resolve().parent
-    backend = scripts.parent / "src-tauri" / "src"
+    manifest = scripts.parent / "src-tauri" / "Cargo.toml"
     java = str(args.java_home / "bin" / "java") if args.java_home else "java"
     javac = str(args.java_home / "bin" / "javac") if args.java_home else "javac"
 
@@ -45,17 +45,15 @@ def main():
 
         imagej("generate")
         sources = {path.name: path.read_bytes() for path in work.glob("*.tif")}
-        (work / "Cargo.toml").write_text(
-            '[package]\nname="aperture-imagej-check"\nversion="0.0.0"\nedition="2021"\n'
-            '[dependencies]\nserde={version="1",features=["derive"]}\n'
-        )
-        (work / "src").mkdir()
-        shutil.copyfile(scripts / "check-imagej-interop.rs", work / "src" / "main.rs")
-        for module in ["annotation_io.rs", "roi.rs", "tiff_annotations.rs"]:
-            shutil.copyfile(backend / module, work / "src" / module)
-        def rust(mode):
-            run("cargo", "run", "--quiet", "--offline", "--manifest-path",
-                str(work / "Cargo.toml"), "--", mode, directory)
+        def rust(step):
+            subprocess.run(
+                ["cargo", "test", "--quiet", "--locked", "--manifest-path",
+                 str(manifest), "imagej_interop::imagej_interop", "--",
+                 "--exact", "--ignored"],
+                check=True,
+                env=dict(os.environ, APERTURE_IMAGEJ_DIRECTORY=directory,
+                         APERTURE_IMAGEJ_STEP=step),
+            )
 
         rust("edit")
         for name, original in sources.items():

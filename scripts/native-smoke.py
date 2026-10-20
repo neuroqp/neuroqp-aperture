@@ -20,7 +20,7 @@ def main():
     parser.add_argument("images", type=Path, nargs="+")
     parser.add_argument("--driver-url", default="http://127.0.0.1:4444")
     parser.add_argument(
-        "--output", type=Path, default=Path("test-data/native-validation.json")
+        "--output", type=Path, default=Path("artifacts/native-smoke/native-validation.json")
     )
     parser.add_argument("--timeout", type=float, default=180)
     parser.add_argument("--expect-error", type=Path, action="append", default=[])

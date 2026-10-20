@@ -6,6 +6,8 @@ mod czi;
 mod decoder;
 mod frame_cache;
 mod frames;
+#[cfg(test)]
+mod imagej_interop;
 mod instances;
 mod memory;
 mod native;

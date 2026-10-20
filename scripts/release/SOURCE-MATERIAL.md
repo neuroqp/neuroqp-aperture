@@ -20,9 +20,9 @@ the baseline vendor inventory, exact npm lock identity and native identities.
 A changed root application version does not imply changed dependency coverage.
 New or changed dependencies require refreshed reviewed material before packaging.
 
-Release helpers require Python 3.11 or newer. On this host use `python3.12`,
-because its unqualified `python3` resolves to 3.10. Prepare and verify the files
-in an owned output directory:
+Run release helpers with an interpreter from the
+[command reference](RELEASE-REFERENCE.md). Prepare and verify the files in an
+owned output directory:
 
 ```sh
 python3.12 scripts/release/release.py source-material OUTPUT_DIRECTORY --source-sha FULL_SHA --fetch --cache CACHE_DIRECTORY

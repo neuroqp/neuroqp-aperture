@@ -13,9 +13,9 @@ pub struct Instances {
     coordination: PathBuf,
     cache_root: PathBuf,
     slot: u64,
-    running: Mutex<File>,
-    images: Mutex<BTreeMap<PathBuf, File>>,
-    _slot_lock: File,
+    running: Mutex<Lock>,
+    images: Mutex<BTreeMap<PathBuf, Lock>>,
+    _slot_lock: Lock,
 }
 
 impl Instances {
@@ -23,13 +23,13 @@ impl Instances {
         let coordination = root.join("instance-locks-v1");
         fs::create_dir_all(&coordination)?;
         // Taking both shared locks in this order closes the startup/update race.
-        let gate = lock_file(&coordination.join("update.lock"))?;
+        let gate = Lock::open(&coordination.join("update.lock"))?;
         gate.lock_shared()?;
-        let running = lock_file(&coordination.join("running.lock"))?;
+        let running = Lock::open(&coordination.join("running.lock"))?;
         running.lock_shared()?;
         let (slot, slot_lock) = (0..)
             .find_map(|slot| {
-                let lock = match lock_file(&coordination.join(format!("slot-{slot}.lock"))) {
+                let lock = match Lock::open(&coordination.join(format!("slot-{slot}.lock"))) {
                     Ok(lock) => lock,
                     Err(error) => return Some(Err(error)),
                 };
@@ -74,7 +74,7 @@ impl Instances {
                 continue;
             }
             fs::create_dir_all(path)?;
-            let lock = lock_file(&path.join(format!("slot-{}.lock", self.slot)))?;
+            let lock = Lock::open(&path.join(format!("slot-{}.lock", self.slot)))?;
             lock.lock()?;
             added.insert(path.clone(), lock);
         }
@@ -97,7 +97,7 @@ impl Instances {
             if entry.file_name() == own_name.as_str() {
                 continue;
             }
-            let lock = lock_file(&entry.path())?;
+            let lock = Lock::open(&entry.path())?;
             if !try_exclusive(&lock)? {
                 return Ok(true);
             }
@@ -126,7 +126,7 @@ impl Instances {
         paths
             .into_iter()
             .map(|path| {
-                let lock = lock_file(&path)?;
+                let lock = Lock::open(&path)?;
                 lock.lock()?;
                 Ok(SaveGuard { _lock: lock })
             })
@@ -134,7 +134,7 @@ impl Instances {
     }
 
     pub fn begin_update(&self) -> io::Result<UpdateGuard<'_>> {
-        let gate = lock_file(&self.coordination.join("update.lock"))?;
+        let gate = Lock::open(&self.coordination.join("update.lock"))?;
         if !try_exclusive(&gate)? {
             return Err(io::Error::other(
                 "Another Aperture instance is starting or installing an update. Try again shortly.",
@@ -168,12 +168,12 @@ impl Instances {
 }
 
 pub struct SaveGuard {
-    _lock: File,
+    _lock: Lock,
 }
 
 pub struct UpdateGuard<'a> {
-    running: MutexGuard<'a, File>,
-    _gate: File,
+    running: MutexGuard<'a, Lock>,
+    _gate: Lock,
 }
 
 impl Drop for UpdateGuard<'_> {
@@ -189,13 +189,35 @@ impl Drop for UpdateGuard<'_> {
     }
 }
 
-fn lock_file(path: &Path) -> io::Result<File> {
-    OpenOptions::new()
-        .read(true)
-        .write(true)
-        .create(true)
-        .truncate(false)
-        .open(path)
+/// A lock file handle that unlocks explicitly when dropped. A child process
+/// spawned concurrently shares the open file description until it execs, so
+/// closing this handle alone would leave its lock held for that window.
+pub struct Lock(File);
+
+impl Lock {
+    pub fn open(path: &Path) -> io::Result<Self> {
+        OpenOptions::new()
+            .read(true)
+            .write(true)
+            .create(true)
+            .truncate(false)
+            .open(path)
+            .map(Self)
+    }
+}
+
+impl std::ops::Deref for Lock {
+    type Target = File;
+
+    fn deref(&self) -> &File {
+        &self.0
+    }
+}
+
+impl Drop for Lock {
+    fn drop(&mut self) {
+        let _ = self.0.unlock();
+    }
 }
 
 fn try_exclusive(file: &File) -> io::Result<bool> {
@@ -498,6 +520,29 @@ mod tests {
             waiting.join().unwrap();
         });
         drop(instance);
+    }
+
+    #[test]
+    fn released_lease_ignores_descriptors_inherited_by_a_spawning_child() {
+        let root = Directory::new();
+        let image = root.0.join("image.tif");
+        let first = Instances::new(root.0.clone()).unwrap();
+        let second = Instances::new(root.0.clone()).unwrap();
+        first.set_image(Some(&image)).unwrap();
+        // A child between fork and exec holds a duplicate of each descriptor.
+        let inherited = first
+            .images
+            .lock()
+            .unwrap()
+            .values()
+            .next()
+            .unwrap()
+            .try_clone()
+            .unwrap();
+        assert!(second.others_open(&image).unwrap());
+        first.set_image(None).unwrap();
+        assert!(!second.others_open(&image).unwrap());
+        drop(inherited);
     }
 
     #[test]

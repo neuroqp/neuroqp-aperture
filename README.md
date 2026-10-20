@@ -164,9 +164,12 @@ cargo clippy --manifest-path src-tauri/Cargo.toml --all-targets --locked -- -D w
 ```
 
 Use `pnpm format` and `cargo fmt --manifest-path src-tauri/Cargo.toml --all` to
-format changes. The **Native validation** workflow runs the full checks above
-manually from GitHub Actions. It becomes available after the workflow lands on
-`main`; choose the branch to validate with **Run workflow**.
+format changes. The manual **Validate** workflow
+(`.github/workflows/validate.yml`) runs these checks, with a release build, plus
+corresponding-source preparation on Linux and Windows in GitHub Actions. Run it
+with `mode` set to `build` and `source_sha` set to a reviewed commit contained in
+`main`. Its `seal` mode records validated release inputs; see
+[RELEASING.md](RELEASING.md).
 The executable override makes decoder tests use the production child worker.
 Without it, isolated unit runs retain the CLI fixture path.
 
@@ -197,7 +200,7 @@ python scripts/native-smoke.py src-tauri/target/debug/aperture \
 The current native harness uses Hyprland, `ydotool`, `wl-copy`, and `grim` to
 operate the real file chooser and capture the application window. It uses the
 keyboard, clipboard, and window focus while running. Results and screenshots
-stay in ignored `test-data/`.
+stay in ignored `artifacts/`.
 
 For Settings and update-restart regression checks, start `tauri-driver` with
 isolated `XDG_CONFIG_HOME`, `XDG_CACHE_HOME` and `TMPDIR`, then run:

@@ -1,13 +1,13 @@
-mod annotation_io;
-mod roi;
-mod tiff_annotations;
+//! Rust side of `scripts/check-imagej-interop.py`, which supplies the working
+//! directory and step through the environment.
+use crate::{annotation_io, roi, tiff_annotations};
+use std::path::PathBuf;
 
-use std::path::Path;
-
-fn main() {
-    let args: Vec<_> = std::env::args().collect();
-    let directory = Path::new(&args[2]);
-    if args[1] == "reopen" {
+#[test]
+#[ignore = "run through scripts/check-imagej-interop.py"]
+fn imagej_interop() {
+    let directory = PathBuf::from(std::env::var_os("APERTURE_IMAGEJ_DIRECTORY").unwrap());
+    if std::env::var("APERTURE_IMAGEJ_STEP").unwrap() == "reopen" {
         let annotations = tiff_annotations::read(&directory.join("imagej-edited.tif")).unwrap();
         let active = roi::decode(&annotations.active_roi.unwrap())
             .unwrap()

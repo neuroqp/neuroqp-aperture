@@ -2,7 +2,7 @@
 """Benchmark an already-open native Tauri image, without opening or decoding it.
 
 Start tauri-driver and the app separately, open an existing pyramid, then run:
-  python3 scripts/native-color-benchmark.py --session test-data/color-session.json
+  python3 scripts/native-color-benchmark.py --session artifacts/color-session.json
 
 Inputs follow the real color-panel input handler at event-loop intervals. Timing
 does not read pixels. A separate correctness pass checks framebuffer changes.
@@ -361,7 +361,7 @@ def main():
     parser.add_argument("--session", type=Path, required=True)
     parser.add_argument("--driver-url", default="http://127.0.0.1:4444")
     parser.add_argument(
-        "--output", type=Path, default=Path("test-data/color-benchmark.json")
+        "--output", type=Path, default=Path("artifacts/color-benchmark/color-benchmark.json")
     )
     parser.add_argument("--selector", default='[data-color-field="maximum"]')
     parser.add_argument("--values", type=float, nargs=2, default=[64, 220])

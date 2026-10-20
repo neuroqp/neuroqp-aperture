@@ -60,14 +60,7 @@ jobs:
       - run: cargo fmt --manifest-path src-tauri/Cargo.toml --all -- --check
       - run: pnpm exec tsc --noEmit
       - run: pnpm test
-      - run: python3 scripts/release/test_release.py
-      - run: python3 scripts/release/test_release_state.py
-      - run: python3 scripts/release/test_linux_runtime.py
-      - run: python3 scripts/release/test_smoke_desktop.py
-      - run: python3 scripts/release/test_debian_render.py
-      - run: python3 scripts/release/test_linux_smoke.py
-      - run: python3 scripts/release/test_linux_idle.py
-      - run: python3 scripts/release/test_capture_linux.py
-      - run: python3 scripts/release/test_lab.py
+      - run: python3 -m unittest discover -s scripts/release -p 'test_*.py'
+      # Discovery skips this hyphenated module name.
       - run: python3 scripts/release/test-source-windows.py
       - run: python3 scripts/release/release.py check

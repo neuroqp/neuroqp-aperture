@@ -2,6 +2,7 @@
 //! Keep each reservation alive for the entire allocation/cache lifetime. Decoder and
 //! native-library workspaces need their own conservative reservations. Lock files
 //! are never unlinked: kernel-owned leases survive manager drops and release on crash.
+use crate::instances::Lock;
 use serde::Serialize;
 use std::{
     fs::{self, File, OpenOptions, TryLockError},
@@ -40,12 +41,12 @@ pub struct Reservation {
     budget: Arc<Budget>,
     slot: u64,
     bytes: u64,
-    _lease: File,
+    _lease: Lock,
 }
 
 struct Snapshot {
     status: MemoryStatus,
-    free: Option<(u64, File)>,
+    free: Option<(u64, Lock)>,
     next: u64,
     /// Available physical memory, when the platform reports it.
     physical: Option<u64>,
@@ -62,7 +63,7 @@ impl Budget {
         let settings = budget.directory.join("limit");
         if !settings.exists() {
             write_amount(&settings, DEFAULT_LIMIT_BYTES).map_err(message)?;
-            open_lock(&settings)
+            open_record(&settings)
                 .and_then(|file| file.sync_all())
                 .map_err(message)?;
         }
@@ -111,7 +112,7 @@ impl Budget {
         let _gate = self.gate().map_err(message)?;
         let settings = self.directory.join("limit");
         write_amount(&settings, bytes).map_err(message)?;
-        open_lock(&settings)
+        open_record(&settings)
             .and_then(|file| file.sync_all())
             .map_err(message)?;
         self.snapshot()
@@ -143,7 +144,7 @@ impl Budget {
         let (slot, lease) = match free {
             Some(free) => free,
             None => {
-                let lease = open_lock(&self.directory.join(format!("lease-{next}.lock")))
+                let lease = Lock::open(&self.directory.join(format!("lease-{next}.lock")))
                     .map_err(message)?;
                 lease.lock().map_err(message)?;
                 (next, lease)
@@ -190,8 +191,8 @@ impl Budget {
             .ok_or_else(|| error.into())
     }
 
-    fn gate(&self) -> io::Result<File> {
-        let gate = open_lock(&self.directory.join("gate.lock"))?;
+    fn gate(&self) -> io::Result<Lock> {
+        let gate = Lock::open(&self.directory.join("gate.lock"))?;
         gate.lock()?;
         Ok(gate)
     }
@@ -230,7 +231,7 @@ impl Budget {
                 slot.checked_add(1)
                     .ok_or_else(|| io::Error::other("Too many memory leases."))?,
             );
-            let lease = open_lock(&entry.path())?;
+            let lease = Lock::open(&entry.path())?;
             match lease.try_lock() {
                 Ok(()) => {
                     if free.is_none() {
@@ -297,7 +298,7 @@ fn message(error: io::Error) -> String {
     format!("Image memory budget: {error}")
 }
 
-fn open_lock(path: &Path) -> io::Result<File> {
+fn open_record(path: &Path) -> io::Result<File> {
     OpenOptions::new()
         .read(true)
         .write(true)
@@ -310,7 +311,7 @@ fn open_lock(path: &Path) -> io::Result<File> {
 // Lease records are sidecars because Windows exclusive locks prohibit reading
 // their locked range through another handle.
 fn write_amount(path: &Path, bytes: u64) -> io::Result<()> {
-    let mut file = open_lock(path)?;
+    let mut file = open_record(path)?;
     file.seek(SeekFrom::Start(0))?;
     file.write_all(&bytes.to_le_bytes())?;
     file.write_all(&bytes.to_le_bytes())?;
