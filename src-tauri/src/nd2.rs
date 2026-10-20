@@ -103,6 +103,8 @@ pub(crate) fn preflight(path: &Path) -> Result<Preflight, String> {
         .unwrap_or(1);
     // The decoder allocates from the on-disk header, not the map's advertised
     // length. Check that actual length even when the two intentionally differ.
+    // Bounds covers the intact map; this also covers chunks the reader rescans
+    // when it rejects that map, e.g. a map name with bytes after its NUL.
     for chunk in file
         .map
         .iter()
