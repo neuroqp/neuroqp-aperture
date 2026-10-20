@@ -1,3 +1,4 @@
+use crate::backend::pyramid::field;
 use serde::{Deserialize, Serialize};
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
@@ -5,13 +6,6 @@ pub struct NativeLevel {
     pub options: String,
     pub width: u32,
     pub height: u32,
-}
-
-fn field<'a>(header: &'a str, key: &str) -> Option<&'a str> {
-    header.lines().find_map(|line| {
-        let (name, value) = line.split_once(": ")?;
-        (name == key).then_some(value.trim())
-    })
 }
 
 fn number(header: &str, key: &str) -> Option<u32> {

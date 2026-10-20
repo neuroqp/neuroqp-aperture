@@ -415,7 +415,7 @@ pub(crate) fn run(context: &LoadContext, foreground: &Arc<Job>) {
         let mut ready = 1;
         for selection in Candidates::new(&dimensions, selected, hint) {
             if !acquisition.available(generation, foreground)
-                || backend::tree_size(&context.root) >= backend::CACHE_LIMIT / 2
+                || backend::cache::tree_size(&context.root) >= backend::cache::CACHE_LIMIT / 2
             {
                 return;
             }
@@ -442,7 +442,12 @@ pub(crate) fn run(context: &LoadContext, foreground: &Arc<Job>) {
             let Ok(job) = context.background_job(
                 Path::new(&state.path),
                 foreground.source.clone(),
-                (selection, metadata.dimensions, metadata.channels),
+                backend::FrameSelection {
+                    selection,
+                    dimensions: metadata.dimensions,
+                    channels: metadata.channels,
+                    projection: Projection::None,
+                },
                 acquisition.clone(),
                 preview_only,
             ) else {
@@ -455,7 +460,7 @@ pub(crate) fn run(context: &LoadContext, foreground: &Arc<Job>) {
                 }
                 *active = Some(Arc::downgrade(&job));
             }
-            let result = backend::load(&job);
+            let result = backend::pyramid::load(&job);
             backend::finish_decoder(&job);
             // Even a native pyramid must release its workers after preloading.
             job.cancel();

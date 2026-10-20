@@ -1604,15 +1604,15 @@ mod tests {
 
     #[test]
     fn backend_browses_czi_read_only_with_scene_geometry() {
-        use crate::backend::Backend;
+        use crate::backend::{Backend, Phase};
         use std::time::{Duration, Instant};
 
         fn ready(backend: &Backend) -> crate::backend::ImageState {
             let deadline = Instant::now() + Duration::from_secs(30);
             loop {
                 let state = backend.snapshot().unwrap();
-                if state.phase != "loading" {
-                    assert_eq!(state.phase, "ready", "{state:?}");
+                if state.phase != Phase::Loading {
+                    assert_eq!(state.phase, Phase::Ready, "{state:?}");
                     return state;
                 }
                 assert!(Instant::now() < deadline, "{state:?}");
