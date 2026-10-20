@@ -164,9 +164,11 @@ cargo clippy --manifest-path src-tauri/Cargo.toml --all-targets --locked -- -D w
 ```
 
 Use `pnpm format` and `cargo fmt --manifest-path src-tauri/Cargo.toml --all` to
-format changes. The **Native validation** workflow runs the full checks above
-manually from GitHub Actions. It becomes available after the workflow lands on
-`main`; choose the branch to validate with **Run workflow**.
+format changes. The manual **Validate** workflow
+(`.github/workflows/validate.yml`) runs these checks on Linux and Windows in
+GitHub Actions. Run it with `mode` set to `build` and `source_sha` set to the
+exact commit to validate. Its `seal` mode records validated release inputs; see
+[RELEASING.md](RELEASING.md).
 The executable override makes decoder tests use the production child worker.
 Without it, isolated unit runs retain the CLI fixture path.
 
