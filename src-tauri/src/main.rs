@@ -628,11 +628,11 @@ fn main() {
                 return;
             };
             let state = job.state.lock().unwrap().clone();
-            let asset = backend::asset(&path, &state.id, state.width, state.height).or_else(|| {
+            let asset = backend::assets::asset(&path, &state.id, state.width, state.height).or_else(|| {
                 state
                     .channel_mode
                     .then(|| {
-                        backend::channel_asset(
+                        backend::assets::channel_asset(
                             &path,
                             &state.id,
                             state.width,
@@ -656,7 +656,7 @@ fn main() {
                 // Preview delivery must not queue behind unfinished pyramid tiles.
                 let permit = if matches!(
                     &asset,
-                    backend::Asset::Preview | backend::Asset::ChannelPreview { .. }
+                    backend::assets::Asset::Preview | backend::assets::Asset::ChannelPreview { .. }
                 ) {
                     Ok(None)
                 } else {
@@ -669,7 +669,7 @@ fn main() {
                     Ok(_) => {
                         let active = job.clone();
                         tauri::async_runtime::spawn_blocking(move || {
-                            backend::read_asset(&active, asset)
+                            backend::assets::read_asset(&active, asset)
                         })
                         .await
                         .unwrap_or_else(|e| Err((500, e.to_string())))

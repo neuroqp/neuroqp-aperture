@@ -783,7 +783,10 @@ pub(crate) mod tests {
 
     #[test]
     fn backend_browses_all_axes_and_reuses_correct_channel_caches() {
-        use crate::backend::{channel_asset, read_asset, Backend, ImageState};
+        use crate::backend::{
+            assets::{channel_asset, read_asset},
+            Backend, ImageState,
+        };
         use std::sync::atomic::Ordering;
         use std::time::{Duration, Instant};
 
