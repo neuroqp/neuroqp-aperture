@@ -2200,11 +2200,12 @@ fn worker_call(
     let decoder = worker(job)?;
     let mut output = call(&decoder);
     // A crashed decoder fails its in-flight call; retry it once with a fresh
-    // decoder. Cancellation and cache-limit stops are not retried.
+    // decoder. Cancellation, cache-limit stops and failed loads are not retried.
     if output.is_err()
         && decoder.stopped()
         && !exceeded.get()
         && !job.cancel.load(Ordering::Relaxed)
+        && job.state.lock().unwrap().phase != "error"
     {
         output = call(&*worker(job)?);
     }
