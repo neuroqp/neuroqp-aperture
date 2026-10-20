@@ -417,8 +417,8 @@ fn max_samples(
         return Err("Projection frames have incompatible sample layouts.".into());
     }
     for (output, input) in output
-        .chunks_mut(65536 * bytes)
-        .zip(input.chunks(65536 * bytes))
+        .chunks_mut(frames::CANCEL_CHUNK_SAMPLES * bytes)
+        .zip(input.chunks(frames::CANCEL_CHUNK_SAMPLES * bytes))
     {
         frames::check_cancel(Some(cancel))?;
         if bytes == 1 {
@@ -462,15 +462,12 @@ fn retained_frame_bytes(frame: &RawFrame) -> u64 {
 }
 
 fn compact_images(images: Vec<ImageInfo>) -> Vec<ImageInfo> {
-    fn name(value: Option<String>) -> Option<String> {
-        value.map(|value| value.chars().take(256).collect())
-    }
     images
         .into_iter()
         .map(|image| {
             let mut compact =
                 ImageInfo::new(image.index, image.size_x, image.size_y, image.pixel_type);
-            compact.name = name(image.name);
+            compact.name = image.name.as_deref().map(frames::truncated_name);
             compact.size_c = image.size_c;
             compact.size_z = image.size_z;
             compact.size_t = image.size_t;
@@ -483,12 +480,8 @@ fn compact_images(images: Vec<ImageInfo>) -> Vec<ImageInfo> {
                 .take(image.size_c.min(crate::channels::MAX_CHANNELS) as usize)
                 .map(|channel| ChannelInfo {
                     index: channel.index,
-                    name: name(channel.name),
-                    color: channel.color.filter(|color| {
-                        color.len() == 7
-                            && color.starts_with('#')
-                            && color.as_bytes()[1..].iter().all(u8::is_ascii_hexdigit)
-                    }),
+                    name: channel.name.as_deref().map(frames::truncated_name),
+                    color: channel.color.filter(|color| frames::is_hex_color(color)),
                     ..ChannelInfo::default()
                 })
                 .collect();
@@ -962,8 +955,9 @@ mod tests {
             )
             .is_err());
         assert!(!ordinary.exists());
-        let mut samples = vec![0; 65537 * 2];
-        assert!(max_samples(&mut samples, &vec![255; 65537 * 2], 2, &cancel).is_err());
+        let length = (frames::CANCEL_CHUNK_SAMPLES + 1) * 2;
+        let mut samples = vec![0; length];
+        assert!(max_samples(&mut samples, &vec![255; length], 2, &cancel).is_err());
         assert!(samples.iter().all(|v| *v == 0));
         drop(cache);
         assert_eq!(budget.status().unwrap().used_bytes, 0);
