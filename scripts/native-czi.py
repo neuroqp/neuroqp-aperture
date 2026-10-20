@@ -264,7 +264,8 @@ def main():
         ]:
             result = invoke(command, values)
             message = (result.get('error') or '').lower() if isinstance(result, dict) else ''
-            assert message and any(word in message for word in ('read-only', 'browsing', 'czi')), (command, result)
+            # The disposable path names the format; require the refusal wording itself.
+            assert 'read-only' in message, (command, result)
         assert refused.read_bytes() == refused_bytes
         refused.unlink()
         report['checks']['backendRefusesAnnotationAndSave'] = True

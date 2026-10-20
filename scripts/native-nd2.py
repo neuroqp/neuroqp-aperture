@@ -201,7 +201,8 @@ def main():
             ('save_annotations', {'id': first['id'], 'path': str(refused), 'rois': [], 'overwrite': True}),
         ]:
             result = invoke(command, values)
-            assert result.get('error') and ('ND2' in result['error'] or 'read-only' in result['error'].lower()), (command, result)
+            # The disposable path names the format; require the refusal wording itself.
+            assert 'read-only' in (result.get('error') or '').lower(), (command, result)
         assert refused.read_bytes() == refused_bytes
         refused.unlink()
         report['checks']['backendRefusesAnnotationAndSave'] = True
