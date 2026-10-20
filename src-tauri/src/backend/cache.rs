@@ -344,9 +344,10 @@ fn prune_except(root: &Path, limit: u64, protected: Option<&Path>) -> Result<(),
 mod tests {
     use super::*;
     use crate::backend::{
-        budget_exceeded,
+        process::budget_exceeded,
+        process::uses_worker,
         tests::{channel_fixture, wait_ready},
-        uses_worker, Backend, ImageState, NEXT_ID,
+        Backend, ImageState, NEXT_ID,
     };
     use std::{
         sync::{Arc, Mutex},
