@@ -261,7 +261,11 @@ function showModal(dialog: HTMLDialogElement) {
 
 function setRois(rois: PointRoi[], edited: boolean) {
   current.rois = rois;
-  if (edited) current.dirty = true;
+  if (edited) {
+    current.dirty = true;
+    // A save confirmation no longer applies once points change again.
+    if (statusMessage && !statusMessage.error) statusMessage = null;
+  }
   annotationViewer.setRois(rois);
 }
 
