@@ -4,6 +4,7 @@ import {
   adjustDisplay,
   channelHistograms,
   defaultDisplaySettings as defaults,
+  component,
   splitChannels,
 } from "./display.ts";
 
@@ -18,7 +19,7 @@ test("RGBA pixels split into one plane per requested component", () => {
       [4, 8],
     ],
   );
-  assert.deepEqual([...splitChannels(rgba, 1)[0]], [1, 5]);
+  assert.deepEqual([...component(rgba, 3)], [4, 8]);
 });
 
 test("channel histograms retain independent original samples and ignore transparency", () => {

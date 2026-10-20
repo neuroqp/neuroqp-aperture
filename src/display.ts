@@ -73,14 +73,17 @@ export function percentileRange(bins: number[], tail: number) {
   };
 }
 
+/** Copy one interleaved RGBA component into its own plane. */
+export function component(rgba: ArrayLike<number>, index: number) {
+  return Uint8Array.from(
+    { length: rgba.length / 4 },
+    (_, i) => rgba[i * 4 + index],
+  );
+}
+
 /** Copy the first `count` interleaved RGBA components into separate planes. */
 export function splitChannels(rgba: ArrayLike<number>, count: number) {
-  return Array.from({ length: count }, (_, channel) =>
-    Uint8Array.from(
-      { length: rgba.length / 4 },
-      (_, i) => rgba[i * 4 + channel],
-    ),
-  );
+  return Array.from({ length: count }, (_, index) => component(rgba, index));
 }
 
 export async function loadChannelHistograms(
@@ -112,11 +115,10 @@ export async function loadChannelHistograms(
   const context = canvas.getContext("2d", { willReadFrequently: true })!;
   context.drawImage(image, 0, 0, canvas.width, canvas.height);
   const rgba = context.getImageData(0, 0, canvas.width, canvas.height).data;
-  const planes = splitChannels(rgba, 4);
   return channelHistograms(
-    planes.slice(0, channels),
+    splitChannels(rgba, channels),
     canvas.width,
     canvas.height,
-    planes[3],
+    component(rgba, 3),
   );
 }
