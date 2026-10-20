@@ -308,27 +308,12 @@ pub(crate) fn load(job: &Arc<Job>) -> Result<(), String> {
     let preview_partial = dir.join("preview.partial.jpg");
     // Explicit TIFF page=0 prevents unrelated pages from entering the displayed scene.
     // vips resize (rather than thumbnail) avoids automatic page-pyramid selection.
-    let scale = (1024.0 / width.max(height) as f64).min(1.0);
     let options = if pixels.tiff {
         "[page=0,n=1,access=sequential]"
     } else {
         "[access=sequential]"
     };
-    let preview_input = {
-        let levels = job.native.lock().unwrap();
-        levels
-            .iter()
-            .find(|level| level.width.max(level.height) <= 1024)
-            .or_else(|| levels.last())
-            .cloned()
-    };
-    let (preview_options, preview_scale) = match preview_input {
-        Some(level) => (
-            level.options,
-            (1024.0 / level.width.max(level.height) as f64).min(1.0),
-        ),
-        None => (options.to_string(), scale),
-    };
+    let (preview_options, preview_scale) = preview_source(job, width, height, options.into());
     // Large, ordinary gray/RGB8 strips use full-coverage area reduction. Other
     // layouts retain libvips, and full-resolution detail always uses libvips.
     let raw_preview = uses_worker(job)
@@ -439,6 +424,21 @@ pub(crate) fn load(job: &Arc<Job>) -> Result<(), String> {
     Ok(())
 }
 
+/// Read a 1024-pixel preview from the largest native level within that size, or
+/// from the smallest native level, before falling back to the full image.
+fn preview_source(job: &Job, width: u32, height: u32, fallback: String) -> (String, f64) {
+    let scale = |width: u32, height: u32| (1024.0 / width.max(height) as f64).min(1.0);
+    let levels = job.native.lock().unwrap();
+    match levels
+        .iter()
+        .find(|level| level.width.max(level.height) <= 1024)
+        .or_else(|| levels.last())
+    {
+        Some(level) => (level.options.clone(), scale(level.width, level.height)),
+        None => (fallback, scale(width, height)),
+    }
+}
+
 // Lossless display planes use a fixed 16-to-8-bit shift across every level.
 pub(super) fn extract_plane(
     job: &Job,
@@ -504,14 +504,7 @@ fn load_channels(job: &Arc<Job>, width: u32, height: u32, ushort: bool) -> Resul
     let planes = job.planes.lock().unwrap().clone();
     let native = !job.native.lock().unwrap().is_empty();
     let dir = job.dir.lock().unwrap().clone();
-    let level = {
-        let levels = job.native.lock().unwrap();
-        levels
-            .iter()
-            .find(|level| level.width.max(level.height) <= 1024)
-            .or_else(|| levels.last())
-            .cloned()
-    };
+    let page = |plane: &Plane| format!("[page={},n=1,access=sequential]", plane.page);
     let previews_ready = (0..planes.len()).all(|index| {
         valid_preview(
             &dir.join("channels")
@@ -524,16 +517,7 @@ fn load_channels(job: &Arc<Job>, width: u32, height: u32, ushort: bool) -> Resul
         if uses_worker(job) {
             let (options, scale): (Vec<_>, Vec<_>) = planes
                 .iter()
-                .map(|plane| match &level {
-                    Some(level) => (
-                        level.options.clone(),
-                        (1024.0 / level.width.max(level.height) as f64).min(1.0),
-                    ),
-                    None => (
-                        format!("[page={},n=1,access=sequential]", plane.page),
-                        (1024.0 / width.max(height) as f64).min(1.0),
-                    ),
-                })
+                .map(|plane| preview_source(job, width, height, page(plane)))
                 .unzip();
             worker_call(
                 job,
@@ -558,16 +542,7 @@ fn load_channels(job: &Arc<Job>, width: u32, height: u32, ushort: bool) -> Resul
             for (index, plane) in planes.iter().enumerate() {
                 let channel = dir.join("channels").join(index.to_string());
                 fs::create_dir_all(&channel).map_err(|e| e.to_string())?;
-                let (options, scale) = match &level {
-                    Some(level) => (
-                        level.options.clone(),
-                        (1024.0 / level.width.max(level.height) as f64).min(1.0),
-                    ),
-                    None => (
-                        format!("[page={},n=1,access=sequential]", plane.page),
-                        (1024.0 / width.max(height) as f64).min(1.0),
-                    ),
-                };
+                let (options, scale) = preview_source(job, width, height, page(plane));
                 let resized = job.work.join(format!("preview-{index}.v"));
                 run(
                     job,
@@ -611,7 +586,7 @@ fn load_channels(job: &Arc<Job>, width: u32, height: u32, ushort: bool) -> Resul
         for (index, plane) in planes.iter().enumerate() {
             let start = preview_end + (0.99 - preview_end) * index as f64 / planes.len() as f64;
             let end = preview_end + (0.99 - preview_end) * (index + 1) as f64 / planes.len() as f64;
-            let source = input(job, &format!("[page={},n=1,access=sequential]", plane.page));
+            let source = input(job, &page(plane));
             let destination = dir.join("channels").join(index.to_string()).join("tiles");
             if uses_worker(job) {
                 worker_call(
