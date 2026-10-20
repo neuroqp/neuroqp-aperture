@@ -207,9 +207,7 @@ pub async fn install_update(app: tauri::AppHandle) -> Result<(), String> {
         backend.shutdown();
         if let Err(error) = update.install(&bytes) {
             *app.state::<Updates>().pending.lock().unwrap() = Some((update, Some(bytes)));
-            backend
-                .closing
-                .store(false, std::sync::atomic::Ordering::Relaxed);
+            backend.resume();
             return Err(format!("{error}. Reopen your image to resume viewing."));
         }
         // Windows installation exits inside the updater after launching NSIS;

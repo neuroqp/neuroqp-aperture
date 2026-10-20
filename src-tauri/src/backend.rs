@@ -189,32 +189,7 @@ impl Backend {
         let closing = Arc::new(AtomicBool::new(false));
         let acquisition: Arc<Mutex<Option<Arc<crate::preload::Acquisition>>>> =
             Arc::new(Mutex::new(None));
-        let maintenance = {
-            let closing = Arc::downgrade(&closing);
-            let acquisition = acquisition.clone();
-            let memory = memory.clone();
-            thread::spawn(move || {
-                let mut epoch = memory.reclaim_epoch().unwrap_or(0);
-                while closing
-                    .upgrade()
-                    .is_some_and(|closing| !closing.load(Ordering::Relaxed))
-                {
-                    let next = memory.reclaim_epoch().unwrap_or(epoch);
-                    let reclaim = next != epoch;
-                    epoch = next;
-                    let current = acquisition.lock().unwrap().clone();
-                    if let Some(current) = current {
-                        if reclaim {
-                            current.foreground();
-                            current.clear_optional();
-                        } else {
-                            let _ = current.trim();
-                        }
-                    }
-                    thread::sleep(Duration::from_millis(250));
-                }
-            })
-        };
+        let maintenance = maintain(&closing, &acquisition, &memory);
         Ok(Self {
             current: Mutex::new(None),
             root,
@@ -472,6 +447,44 @@ impl Backend {
             thread::sleep(Duration::from_millis(20));
         }
     }
+
+    /// Undo a shutdown whose update install failed; the user reopens the image.
+    pub fn resume(&self) {
+        let mut workers = self.workers.lock().unwrap();
+        self.closing.store(false, Ordering::Relaxed);
+        workers.push(maintain(&self.closing, &self.acquisition, &self.memory));
+    }
+}
+
+fn maintain(
+    closing: &Arc<AtomicBool>,
+    acquisition: &Arc<Mutex<Option<Arc<crate::preload::Acquisition>>>>,
+    memory: &Arc<crate::memory::Budget>,
+) -> thread::JoinHandle<()> {
+    let closing = Arc::downgrade(closing);
+    let acquisition = acquisition.clone();
+    let memory = memory.clone();
+    thread::spawn(move || {
+        let mut epoch = memory.reclaim_epoch().unwrap_or(0);
+        while closing
+            .upgrade()
+            .is_some_and(|closing| !closing.load(Ordering::Relaxed))
+        {
+            let next = memory.reclaim_epoch().unwrap_or(epoch);
+            let reclaim = next != epoch;
+            epoch = next;
+            let current = acquisition.lock().unwrap().clone();
+            if let Some(current) = current {
+                if reclaim {
+                    current.foreground();
+                    current.clear_optional();
+                } else {
+                    let _ = current.trim();
+                }
+            }
+            thread::sleep(Duration::from_millis(250));
+        }
+    })
 }
 
 impl LoadContext {
@@ -2529,6 +2542,29 @@ mod tests {
         );
         backend.shutdown();
         drop((job, bmp_job, backend));
+        fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn resume_after_shutdown_restarts_maintenance_and_opening() {
+        let (root, backend, job) = workspace_fixture();
+        backend.shutdown();
+        assert!(backend.workers.lock().unwrap().is_empty());
+        assert_eq!(
+            backend.open(&job.source).unwrap_err(),
+            "Viewer shutting down."
+        );
+        backend.resume();
+        assert!(backend
+            .workers
+            .lock()
+            .unwrap()
+            .iter()
+            .any(|worker| !worker.is_finished()));
+        backend.open(&job.source).unwrap();
+        backend.shutdown();
+        assert!(backend.workers.lock().unwrap().is_empty());
+        drop((job, backend));
         fs::remove_dir_all(root).unwrap();
     }
 
