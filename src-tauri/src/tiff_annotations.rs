@@ -51,11 +51,7 @@ struct Tiff {
 
 impl Tiff {
     fn number(&self, b: &[u8]) -> u64 {
-        if self.little {
-            b.iter().rev().fold(0, |v, b| (v << 8) | u64::from(*b))
-        } else {
-            b.iter().fold(0, |v, b| (v << 8) | u64::from(*b))
-        }
+        crate::tiff_ifd::number(b, self.little)
     }
     fn bytes(&self, n: u64, size: usize) -> Result<Vec<u8>, String> {
         if size < 8 && n >= (1u64 << (size * 8)) {
@@ -98,22 +94,12 @@ impl Tiff {
             directory: 0,
         };
         let h = t.at(0, 8)?;
-        t.little = match &h[..2] {
-            b"II" => true,
-            b"MM" => false,
-            _ => return Err("Not a TIFF file".into()),
-        };
-        let first = match t.number(&h[2..4]) {
-            42 => t.number(&h[4..8]),
-            43 => {
-                t.big = true;
-                if t.number(&h[4..6]) != 8 || t.number(&h[6..8]) != 0 {
-                    return Err("Unsupported BigTIFF header".into());
-                }
-                let p = t.at(8, 8)?;
-                t.number(&p)
-            }
-            _ => return Err("Unsupported TIFF header".into()),
+        (t.little, t.big) = crate::tiff_ifd::header(&h)?;
+        let first = if t.big {
+            let p = t.at(8, 8)?;
+            t.number(&p)
+        } else {
+            t.number(&h[4..8])
         };
         t.load_directory(first, LIMIT)?;
         Ok(t)
