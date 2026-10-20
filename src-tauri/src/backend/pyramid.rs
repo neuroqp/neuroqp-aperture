@@ -37,39 +37,58 @@ pub(super) fn dimensions(header: &str) -> Result<(u32, u32), String> {
     Ok((width, height))
 }
 
-fn validate_header(header: &str) -> Result<(u32, u32), String> {
-    let dims = dimensions(header)?;
-    if !matches!(field(header, "format"), Some("uchar" | "ushort"))
-        || !field(header, "bands")
-            .and_then(|value| value.parse::<u32>().ok())
-            .is_some_and(|bands| {
-                (1..=channels::MAX_CHANNELS).contains(&bands)
-                    && (field(header, "vips-loader") == Some("tiffload")
-                        || matches!(bands, 1 | 3 | 4))
-            })
-    {
+/// The validated vipsheader fields that choose how a display is built.
+#[derive(Debug, PartialEq)]
+struct Header {
+    width: u32,
+    height: u32,
+    bands: u32,
+    ushort: bool,
+    tiff: bool,
+    srgb: bool,
+}
+
+fn validate_header(header: &str) -> Result<Header, String> {
+    let (width, height) = dimensions(header)?;
+    let loader = field(header, "vips-loader");
+    let tiff = loader == Some("tiffload");
+    let bands = field(header, "bands")
+        .and_then(|value| value.parse::<u32>().ok())
+        .filter(|bands| {
+            (1..=channels::MAX_CHANNELS).contains(bands) && (tiff || matches!(bands, 1 | 3 | 4))
+        });
+    let (Some(bands), Some(format @ ("uchar" | "ushort"))) = (bands, field(header, "format"))
+    else {
         return Err("Supported pixels: unsigned 8/16-bit grayscale, RGB, RGBA, and TIFFs with up to 32 channels. Signed and floating-point pixels are not supported.".into());
-    }
+    };
     if !matches!(
-        field(header, "vips-loader"),
+        loader,
         Some("jpegload" | "pngload" | "tiffload" | "magickload" | "bmp2vips" | "webpload")
     ) {
         return Err("This file does not decode as a supported image format.".into());
     }
-    if field(header, "vips-loader") == Some("magickload")
+    if loader == Some("magickload")
         && !field(header, "magick-format")
             .unwrap_or("")
             .starts_with("BMP")
     {
         return Err("Only BMP is supported through ImageMagick's decoder.".into());
     }
+    let interpretation = field(header, "interpretation");
     if !matches!(
-        field(header, "interpretation"),
+        interpretation,
         Some("b-w" | "grey16" | "srgb" | "rgb" | "rgb16" | "multiband")
     ) {
         return Err("Supported color interpretations: grayscale, RGB and sRGB. Convert other color spaces before opening.".into());
     }
-    Ok(dims)
+    Ok(Header {
+        width,
+        height,
+        bands,
+        ushort: format == "ushort",
+        tiff,
+        srgb: interpretation == Some("srgb"),
+    })
 }
 
 pub(crate) fn load(job: &Arc<Job>) -> Result<(), String> {
@@ -157,20 +176,20 @@ pub(crate) fn load(job: &Arc<Job>) -> Result<(), String> {
         None
     };
     let header = run(job, "vipsheader", &["-a".into(), input(job, "")])?;
-    let (width, height) = validate_header(&header)?;
-    if field(&header, "vips-loader") != Some("tiffload") {
-        let bands = field(&header, "bands").unwrap().parse::<u64>().unwrap();
-        let sample_bytes = if field(&header, "format") == Some("ushort") {
-            2
-        } else {
-            1
-        };
+    let pixels = validate_header(&header)?;
+    let (width, height) = (pixels.width, pixels.height);
+    if !pixels.tiff {
         job.frame_memory.fetch_max(
-            decoded_workspace(width, height, bands, sample_bytes)?,
+            decoded_workspace(
+                width,
+                height,
+                pixels.bands.into(),
+                if pixels.ushort { 2 } else { 1 },
+            )?,
             Ordering::Relaxed,
         );
     }
-    let tiffinfo = if field(&header, "vips-loader") == Some("tiffload") {
+    let tiffinfo = if pixels.tiff {
         #[cfg(unix)]
         let info = run(job, "tiffinfo", &[job.input.clone().into_os_string()]).ok();
         #[cfg(windows)]
@@ -206,7 +225,6 @@ pub(crate) fn load(job: &Arc<Job>) -> Result<(), String> {
     };
     *job.planes.lock().unwrap() = layout.planes;
     let pages = field(&header, "n-pages").unwrap_or("1");
-    let pixel = field(&header, "format").unwrap_or("uchar");
     job.update(|state| {
         state.channels = layout.channels;
         state.channel_mode = layout.channel_mode;
@@ -218,7 +236,7 @@ pub(crate) fn load(job: &Arc<Job>) -> Result<(), String> {
             .unwrap_or(1);
         state.detail = format!(
             "{width} × {height} · {}-bit · first image page of {pages}. Building preview…",
-            if pixel == "ushort" { 16 } else { 8 }
+            if pixels.ushort { 16 } else { 8 }
         );
     });
     let headers = RefCell::new(HashMap::<String, Result<String, String>>::new());
@@ -279,7 +297,7 @@ pub(crate) fn load(job: &Arc<Job>) -> Result<(), String> {
         }
     }
     if layout.channel_mode {
-        return load_channels(job, width, height, pixel == "ushort");
+        return load_channels(job, width, height, pixels.ushort);
     }
     if job.cancel.load(Ordering::Relaxed) {
         return Err("Loading cancelled.".into());
@@ -289,7 +307,7 @@ pub(crate) fn load(job: &Arc<Job>) -> Result<(), String> {
     // Explicit TIFF page=0 prevents unrelated pages from entering the displayed scene.
     // vips resize (rather than thumbnail) avoids automatic page-pyramid selection.
     let scale = (1024.0 / width.max(height) as f64).min(1.0);
-    let options = if field(&header, "vips-loader") == Some("tiffload") {
+    let options = if pixels.tiff {
         "[page=0,n=1,access=sequential]"
     } else {
         "[access=sequential]"
@@ -312,11 +330,7 @@ pub(crate) fn load(job: &Arc<Job>) -> Result<(), String> {
     // Large, ordinary gray/RGB8 strips use full-coverage area reduction. Other
     // layouts retain libvips, and full-resolution detail always uses libvips.
     let raw_preview = uses_worker(job)
-        && ((pixel == "ushort" && field(&header, "bands") == Some("1"))
-            || (pixel == "uchar"
-                && (field(&header, "bands") == Some("1")
-                    || (field(&header, "bands") == Some("3")
-                        && field(&header, "interpretation") == Some("srgb")))))
+        && (pixels.bands == 1 || (!pixels.ushort && pixels.bands == 3 && pixels.srgb))
         && u64::from(width) * u64::from(height) >= 16 * 1024 * 1024
         && preview_options == options
         && worker_call(
@@ -371,11 +385,7 @@ pub(crate) fn load(job: &Arc<Job>) -> Result<(), String> {
     if job.native.lock().unwrap().is_empty() {
         // The direct JPEG saver avoids constructing a new libvips graph per tile.
         // Ushort keeps its existing shrink-then-convert order for pixel parity.
-        let jpeg = if uses_worker(job)
-            && pixel == "uchar"
-            && field(&header, "bands") == Some("3")
-            && field(&header, "interpretation") == Some("srgb")
-        {
+        let jpeg = if uses_worker(job) && !pixels.ushort && pixels.bands == 3 && pixels.srgb {
             "--Q=85"
         } else {
             "--suffix=.jpg[Q=85,strip,background=52 54 51]"
@@ -901,7 +911,17 @@ mod tests {
     #[test]
     fn reject_signed_float_and_excessive_channels() {
         let header="width: 12\nheight: 13\nbands: 1\nformat: ushort\nvips-loader: tiffload\ninterpretation: grey16\n";
-        assert_eq!(validate_header(header).unwrap(), (12, 13));
+        assert_eq!(
+            validate_header(header).unwrap(),
+            Header {
+                width: 12,
+                height: 13,
+                bands: 1,
+                ushort: true,
+                tiff: true,
+                srgb: false,
+            }
+        );
         assert!(validate_header(&header.replace("ushort", "float")).is_err());
         assert!(validate_header(&header.replace("bands: 1", "bands: 5")).is_ok());
         assert!(validate_header(&header.replace("bands: 1", "bands: 33")).is_err());
