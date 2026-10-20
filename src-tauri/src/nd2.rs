@@ -785,7 +785,7 @@ pub(crate) mod tests {
     fn backend_browses_all_axes_and_reuses_correct_channel_caches() {
         use crate::backend::{
             assets::{channel_asset, read_asset},
-            Backend, ImageState,
+            Backend, ImageState, Phase,
         };
         use std::sync::atomic::Ordering;
         use std::time::{Duration, Instant};
@@ -794,8 +794,8 @@ pub(crate) mod tests {
             let deadline = Instant::now() + Duration::from_secs(30);
             loop {
                 let state = backend.snapshot().unwrap();
-                if state.phase != "loading" {
-                    assert_eq!(state.phase, "ready", "{state:?}");
+                if state.phase != Phase::Loading {
+                    assert_eq!(state.phase, Phase::Ready, "{state:?}");
                     return state;
                 }
                 assert!(Instant::now() < deadline, "{state:?}");

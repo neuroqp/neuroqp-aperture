@@ -1,7 +1,7 @@
 //! Decoder processes: direct libvips tools, the worker and their memory admission.
 use super::{
     cache::{tree_size, CACHE_LIMIT},
-    Job,
+    Job, Phase,
 };
 use std::{
     ffi::OsString,
@@ -275,7 +275,7 @@ pub(super) fn worker_call(
         && decoder.stopped()
         && !exceeded.get()
         && !job.cancel.load(Ordering::Relaxed)
-        && job.state.lock().unwrap().phase != "error"
+        && job.state.lock().unwrap().phase != Phase::Error
     {
         output = call(&*worker(job)?);
     }

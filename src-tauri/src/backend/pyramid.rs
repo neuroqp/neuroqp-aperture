@@ -2,7 +2,7 @@
 use super::{
     cache::{cached_manifest, housekeeping, valid_cache_assets, valid_preview, write_manifest},
     process::{decoded_workspace, input, run, run_with_progress, uses_worker, worker_call},
-    Job,
+    Job, Phase,
 };
 use crate::{
     channels::{self, Plane},
@@ -117,11 +117,10 @@ pub(crate) fn load(job: &Arc<Job>) -> Result<(), String> {
             state.preview_ready = true;
             state.tiles_ready = fully_ready;
             state.phase = if fully_ready || job.preview_only {
-                "ready"
+                Phase::Ready
             } else {
-                "loading"
-            }
-            .into();
+                Phase::Loading
+            };
             state.progress = Some(if fully_ready { 1.0 } else { 0.2 });
             state.detail = "Reused display preview. Source pixels unchanged.".into();
         });
@@ -269,7 +268,7 @@ pub(crate) fn load(job: &Arc<Job>) -> Result<(), String> {
         };
         if reused {
             job.update(|state| {
-                state.phase = "ready".into();
+                state.phase = Phase::Ready;
                 state.preview_ready = true;
                 state.tiles_ready = true;
                 state.progress = Some(1.0);
@@ -440,7 +439,7 @@ pub(crate) fn load(job: &Arc<Job>) -> Result<(), String> {
     drop(published);
     drop(access);
     job.update(|s| {
-        s.phase = "ready".into();
+        s.phase = Phase::Ready;
         s.progress = Some(1.0);
         s.detail = if job.native.lock().unwrap().is_empty() {
             "Display pyramid ready. Source pixels unchanged."
@@ -688,7 +687,7 @@ fn load_channels(job: &Arc<Job>, width: u32, height: u32, ushort: bool) -> Resul
     drop(published);
     drop(access);
     job.update(|state| {
-        state.phase = "ready".into();
+        state.phase = Phase::Ready;
         state.tiles_ready = !job.preview_only;
         state.progress = Some(1.0);
         state.detail = format!(
@@ -772,8 +771,8 @@ mod tests {
             let deadline = std::time::Instant::now() + Duration::from_secs(30);
             loop {
                 let state = backend.snapshot().unwrap();
-                if state.phase != "loading" {
-                    assert_eq!(state.phase, "ready", "{state:?}");
+                if state.phase != Phase::Loading {
+                    assert_eq!(state.phase, Phase::Ready, "{state:?}");
                     assert!(state.channel_mode);
                     assert_eq!(state.channels.len(), 5);
                     break;
@@ -791,7 +790,7 @@ mod tests {
                 .lock()
                 .unwrap()
                 .iter()
-                .any(|state| state.id == id && state.phase == "ready")
+                .any(|state| state.id == id && state.phase == Phase::Ready)
             {
                 assert!(Instant::now() < deadline);
                 thread::sleep(Duration::from_millis(2));
@@ -800,7 +799,7 @@ mod tests {
                 .lock()
                 .unwrap()
                 .iter()
-                .filter(|state| state.id == id && state.phase == "loading")
+                .filter(|state| state.id == id && state.phase == Phase::Loading)
                 .cloned()
                 .collect();
             let fractions: Vec<_> = loading.iter().filter_map(|state| state.progress).collect();
@@ -876,7 +875,7 @@ mod tests {
             backend.open(&root.join(name)).unwrap();
             loop {
                 let state = backend.snapshot().unwrap();
-                if state.phase != "loading" {
+                if state.phase != Phase::Loading {
                     assert!(state.detail.contains("Reused"), "{state:?}");
                     break;
                 }
@@ -924,7 +923,7 @@ mod tests {
             let deadline = std::time::Instant::now() + Duration::from_secs(20);
             loop {
                 let state = backend.snapshot().unwrap();
-                if state.phase != "loading" {
+                if state.phase != Phase::Loading {
                     return state;
                 }
                 assert!(std::time::Instant::now() < deadline);
@@ -934,14 +933,14 @@ mod tests {
         let corrupt = Path::new(env!("CARGO_MANIFEST_DIR")).join("../tests/fixtures/corrupt.tif");
         backend.open(&corrupt).unwrap();
         let failed = wait();
-        assert_eq!(failed.phase, "error");
+        assert_eq!(failed.phase, Phase::Error);
         assert_eq!(
             failed.error.as_deref(),
             Some("Could not read this image. It may be damaged or use an unsupported format.")
         );
         let first = backend.open(&fixture).unwrap();
         let state = wait();
-        assert_eq!(state.phase, "ready", "{:?}", state);
+        assert_eq!(state.phase, Phase::Ready, "{:?}", state);
         assert_eq!((state.width, state.height), (65, 49));
         let job = backend.current.lock().unwrap().clone().unwrap();
         let bytes = read_asset(
@@ -959,7 +958,7 @@ mod tests {
         fs::remove_dir_all(job.dir.lock().unwrap().join("tiles_files")).unwrap();
         backend.open(&fixture).unwrap();
         let rebuilt = wait();
-        assert_eq!(rebuilt.phase, "ready");
+        assert_eq!(rebuilt.phase, Phase::Ready);
         assert!(!rebuilt.detail.contains("Reused"));
         let rebuilt_job = backend.current.lock().unwrap().clone().unwrap();
         assert!(read_asset(
@@ -974,7 +973,7 @@ mod tests {
         let second = backend.open(&fixture).unwrap();
         assert_ne!(first.id, second.id);
         let state = wait();
-        assert_eq!(state.phase, "ready");
+        assert_eq!(state.phase, Phase::Ready);
         assert!(state.detail.contains("Reused"));
         assert!(job.cancel.load(Ordering::Relaxed));
         assert_eq!(read_asset(&job, Asset::Preview).unwrap_err().0, 410);
@@ -985,7 +984,7 @@ mod tests {
         backend.cancel();
         assert!(sleeper.join().unwrap().unwrap_err().contains("cancelled"));
         assert!(cancelled.elapsed() < Duration::from_secs(2));
-        assert_eq!(backend.snapshot().unwrap().phase, "cancelled");
+        assert_eq!(backend.snapshot().unwrap().phase, Phase::Cancelled);
         backend.shutdown();
         fs::remove_dir_all(root).unwrap();
     }

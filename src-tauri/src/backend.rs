@@ -71,7 +71,7 @@ pub struct ImageState {
     pub width: u32,
     pub height: u32,
     pub orientation: u8,
-    pub phase: String,
+    pub phase: Phase,
     pub preview_ready: bool,
     pub tiles_ready: bool,
     pub progress: Option<f64>,
@@ -84,6 +84,16 @@ pub struct ImageState {
     pub calibration: Option<crate::frames::Calibration>,
     pub display_ranges: Vec<[u16; 2]>,
     pub projection: crate::frames::Projection,
+}
+
+/// Serialized as the frontend's lowercase `ImageState.phase` strings.
+#[derive(Clone, Copy, Debug, PartialEq, Serialize)]
+#[serde(rename_all = "lowercase")]
+pub enum Phase {
+    Loading,
+    Ready,
+    Cancelled,
+    Error,
 }
 
 type FrameSelection = (
@@ -342,16 +352,19 @@ impl Backend {
         workers.push(thread::spawn(move || {
             if let Err(error) = load(&job) {
                 job.update(|state| {
-                    state.phase = "error".into();
+                    state.phase = Phase::Error;
                     state.error = Some(error);
                     state.detail = "Image loading failed.".into();
                 });
             }
             finish_decoder(&job);
-            if !job.cancel.load(Ordering::Relaxed) && job.state.lock().unwrap().phase == "ready" {
+            if !job.cancel.load(Ordering::Relaxed)
+                && job.state.lock().unwrap().phase == Phase::Ready
+            {
                 crate::preload::run(&context, &job);
             }
-            if job.cancel.load(Ordering::Relaxed) || job.state.lock().unwrap().phase == "error" {
+            if job.cancel.load(Ordering::Relaxed) || job.state.lock().unwrap().phase == Phase::Error
+            {
                 let decoder = job.decoder.lock().unwrap().clone();
                 if let Some(decoder) = decoder {
                     decoder.stop();
@@ -610,7 +623,7 @@ impl LoadContext {
             width: 0,
             height: 0,
             orientation: 1,
-            phase: "loading".into(),
+            phase: Phase::Loading,
             preview_ready: false,
             tiles_ready: false,
             progress: None,
@@ -698,7 +711,7 @@ impl Job {
             if self.cancel.swap(true, Ordering::Relaxed) {
                 return;
             }
-            state.phase = "cancelled".into();
+            state.phase = Phase::Cancelled;
             state.detail = "Loading cancelled.".into();
             state.progress = None;
             state.revision += 1;
@@ -735,7 +748,7 @@ impl Job {
             // Coarse overall progress keeps long multichannel conversions quiet.
             let fraction = (fraction * 20.0).floor() / 20.0;
             if self.cancel.load(Ordering::Relaxed)
-                || state.phase != "loading"
+                || state.phase != Phase::Loading
                 || state.progress.is_some_and(|previous| fraction <= previous)
             {
                 return;
@@ -1012,7 +1025,7 @@ mod tests {
         backend.open(&source).unwrap();
         wait_ready(&backend);
         let job = backend.current.lock().unwrap().clone().unwrap();
-        job.state.lock().unwrap().phase = "loading".into();
+        job.state.lock().unwrap().phase = Phase::Loading;
         fs::remove_file(job.dir.lock().unwrap().join("preview.jpg")).unwrap();
         let waiting = {
             let job = job.clone();
@@ -1037,7 +1050,7 @@ mod tests {
         assert!(job.processes.lock().unwrap().is_empty());
         assert!(sleeper.join().unwrap().unwrap_err().contains("cancelled"));
         assert_eq!(waiting.join().unwrap().unwrap_err().0, 410);
-        assert_eq!(backend.snapshot().unwrap().phase, "cancelled");
+        assert_eq!(backend.snapshot().unwrap().phase, Phase::Cancelled);
         backend.shutdown();
         fs::remove_dir_all(root).unwrap();
     }
@@ -1082,8 +1095,8 @@ mod tests {
         let deadline = Instant::now() + Duration::from_secs(20);
         loop {
             let state = backend.snapshot().unwrap();
-            if state.phase != "loading" {
-                assert_eq!(state.phase, "ready", "{state:?}");
+            if state.phase != Phase::Loading {
+                assert_eq!(state.phase, Phase::Ready, "{state:?}");
                 return state;
             }
             assert!(Instant::now() < deadline);

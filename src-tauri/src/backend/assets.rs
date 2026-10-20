@@ -3,7 +3,7 @@ use super::{
     cache::{tree_size, CACHE_LIMIT},
     process::{input, run},
     pyramid::{extract_plane, field},
-    Backend, Job,
+    Backend, Job, Phase,
 };
 use std::{
     ffi::OsString,
@@ -61,7 +61,7 @@ fn read_channel_asset(job: &Arc<Job>, asset: Asset) -> Result<Vec<u8>, (u16, Str
             return Err((410, "Image replaced or cancelled.".into()));
         }
         let state = job.state.lock().unwrap().clone();
-        if state.phase == "error" {
+        if state.phase == Phase::Error {
             return Err((500, state.error.unwrap_or_default()));
         }
         // Windows cannot move a directory while a descendant file is open.
@@ -101,7 +101,7 @@ fn read_channel_asset(job: &Arc<Job>, asset: Asset) -> Result<Vec<u8>, (u16, Str
         if *job.dir.lock().unwrap() != dir {
             continue;
         }
-        if state.phase == "ready" {
+        if state.phase == Phase::Ready {
             return Err((404, "Channel tile unavailable.".into()));
         }
         if std::time::Instant::now() > deadline {
@@ -288,13 +288,13 @@ pub(crate) fn read_asset(job: &Arc<Job>, asset: Asset) -> Result<Vec<u8>, (u16, 
             Asset::ChannelPreview { .. } | Asset::ChannelTile { .. } => unreachable!(),
             Asset::Tile { level, x, y } => {
                 if !job.native.lock().unwrap().is_empty() {
-                    if state.phase == "error" {
+                    if state.phase == Phase::Error {
                         return Err((500, state.error.unwrap_or_default()));
                     }
                     drop(access);
                     return native_tile(job, level, x, y).map_err(|error| {
                         job.update(|s| {
-                            s.phase = "error".into();
+                            s.phase = Phase::Error;
                             s.error = Some(error.clone());
                             s.detail = "Cannot load image detail.".into();
                         });
@@ -325,10 +325,10 @@ pub(crate) fn read_asset(job: &Arc<Job>, asset: Asset) -> Result<Vec<u8>, (u16, 
         if *job.dir.lock().unwrap() != dir {
             continue;
         }
-        if state.phase == "error" {
+        if state.phase == Phase::Error {
             return Err((500, state.error.unwrap_or_default()));
         }
-        if state.phase == "ready" {
+        if state.phase == Phase::Ready {
             return Err((404, "Tile unavailable.".into()));
         }
         if std::time::Instant::now() > deadline {
@@ -532,7 +532,7 @@ mod tests {
         backend.shutdown();
         let job = backend.current.lock().unwrap().clone().unwrap();
         job.cancel.store(false, Ordering::Relaxed);
-        job.state.lock().unwrap().phase = "ready".into();
+        job.state.lock().unwrap().phase = Phase::Ready;
         for (number, asset, relative, old, published_bytes) in [
             (
                 0,
@@ -715,8 +715,8 @@ mod tests {
         let deadline = std::time::Instant::now() + Duration::from_secs(20);
         loop {
             let state = backend.snapshot().unwrap();
-            if state.phase != "loading" {
-                assert_eq!(state.phase, "ready", "{:?}", state);
+            if state.phase != Phase::Loading {
+                assert_eq!(state.phase, Phase::Ready, "{:?}", state);
                 break;
             }
             assert!(std::time::Instant::now() < deadline);
@@ -745,8 +745,8 @@ mod tests {
         let deadline = std::time::Instant::now() + Duration::from_secs(20);
         loop {
             let state = backend.snapshot().unwrap();
-            if state.phase != "loading" {
-                assert_eq!(state.phase, "ready");
+            if state.phase != Phase::Loading {
+                assert_eq!(state.phase, Phase::Ready);
                 assert!(state.detail.contains("Reused"));
                 break;
             }

@@ -347,7 +347,7 @@ mod tests {
         process::budget_exceeded,
         process::uses_worker,
         tests::{channel_fixture, wait_ready},
-        Backend, ImageState, NEXT_ID,
+        Backend, ImageState, Phase, NEXT_ID,
     };
     use std::{
         sync::{Arc, Mutex},
@@ -568,13 +568,13 @@ mod tests {
                 .unwrap()
                 < initial_events
                     .iter()
-                    .position(|state| state.phase == "ready")
+                    .position(|state| state.phase == Phase::Ready)
                     .unwrap()
         );
         assert!(events
             .iter()
-            .any(|state| state.id == reopened.id && state.phase == "ready"));
-        assert_eq!(events.last().unwrap().phase, "cancelled");
+            .any(|state| state.id == reopened.id && state.phase == Phase::Ready));
+        assert_eq!(events.last().unwrap().phase, Phase::Cancelled);
         drop(events);
         backend.shutdown();
         fs::remove_dir_all(root).unwrap();
@@ -608,7 +608,7 @@ mod tests {
         let replaced = job.clone();
         let old_housekeeping = thread::spawn(move || housekeeping(&replaced));
         backend.open(&source).unwrap();
-        assert_eq!(backend.snapshot().unwrap().phase, "loading");
+        assert_eq!(backend.snapshot().unwrap().phase, Phase::Loading);
         drop(guard);
         assert!(old_housekeeping
             .join()
