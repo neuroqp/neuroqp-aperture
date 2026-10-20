@@ -114,19 +114,13 @@ document.querySelector<HTMLDivElement>("#app")!.innerHTML = `
 
 const $ = <T extends HTMLElement = HTMLElement>(id: string) =>
   document.getElementById(id)! as T;
-const tools = bindTools(updatePointTool, {
-  visibility: (open) => {
-    if (open) colorPanel.redraw();
-    else colorPanel.closeTransient();
-  },
-  handleEscape: () => colorPanel.handleEscape(),
-});
+let colorRenderer: ReturnType<typeof bindColorRenderer> | undefined;
+const colorPanel = bindColorPanel(() => colorRenderer?.refresh());
+const tools = bindTools(updatePointTool, colorPanel);
 const settings = bindSettings();
 bindTheme();
 const native = isTauri();
 const windowHandle = native ? getCurrentWindow() : null;
-let colorRenderer: ReturnType<typeof bindColorRenderer> | undefined;
-const colorPanel = bindColorPanel(() => colorRenderer?.refresh());
 const dimensionNavigation = bindDimensionNavigation(
   async (position, z, time, hint, projection) => {
     if (
