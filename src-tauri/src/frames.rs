@@ -9,6 +9,9 @@ use std::path::Path;
 use std::sync::atomic::{AtomicBool, Ordering};
 
 pub(crate) const MAX_FRAME_BYTES: u64 = 256 * 1024 * 1024;
+/// Samples processed between cancellation checks.
+pub(crate) const CANCEL_CHUNK_SAMPLES: usize = 65536;
+const MAX_NAME_CHARS: usize = 256;
 
 /// Microscopy containers browsed one selected frame at a time.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
@@ -134,6 +137,16 @@ pub(crate) fn frame_bytes(
     Ok(total as usize)
 }
 
+pub(crate) fn truncated_name(name: &str) -> String {
+    name.chars().take(MAX_NAME_CHARS).collect()
+}
+
+pub(crate) fn is_hex_color(color: &str) -> bool {
+    color.len() == 7
+        && color.starts_with('#')
+        && color.as_bytes()[1..].iter().all(u8::is_ascii_hexdigit)
+}
+
 pub(crate) fn description(
     format: Format,
     images: &[ImageInfo],
@@ -188,15 +201,11 @@ pub(crate) fn description(
                     name: channel
                         .and_then(|c| c.name.as_deref())
                         .filter(|s| !s.trim().is_empty())
-                        .map(|name| name.chars().take(256).collect())
+                        .map(truncated_name)
                         .unwrap_or_else(|| format!("Channel {}", c + 1)),
                     color: channel
                         .and_then(|c| c.color.as_deref())
-                        .filter(|s| {
-                            s.len() == 7
-                                && s.starts_with('#')
-                                && s.as_bytes()[1..].iter().all(u8::is_ascii_hexdigit)
-                        })
+                        .filter(|s| is_hex_color(s))
                         .unwrap_or(if image.size_c == 1 {
                             "#ffffff"
                         } else {
@@ -221,7 +230,7 @@ pub(crate) fn description(
                         .name
                         .as_deref()
                         .filter(|s| !s.trim().is_empty())
-                        .map(|name| name.chars().take(256).collect())
+                        .map(truncated_name)
                         .unwrap_or_else(|| format!("Position {}", p + 1))
                 })
                 .collect(),
@@ -259,7 +268,6 @@ pub(crate) struct RawFrame {
     pub bytes: usize,
     pub rgb: bool,
     pub pixels: Vec<u8>,
-    pub metadata: ExtractedFrame,
 }
 
 pub(crate) fn decode_frame(
@@ -268,10 +276,9 @@ pub(crate) fn decode_frame(
     images: &[ImageInfo],
     selection: Selection,
 ) -> Result<RawFrame, String> {
-    let metadata = description(format, images, selection)?;
+    let bands = description(format, images, selection)?.channels.len() as u32;
     let image = &images[selection.position as usize];
     let bytes = image.pixel_type.bytes_per_sample();
-    let bands = metadata.channels.len() as u32;
     let length = frame_bytes(format, image.size_x, image.size_y, bands, bytes)?;
     // ponytail: bounded whole-frame assembly until the reader offers bounded regions.
     let mut pixels = vec![0u8; length];
@@ -316,7 +323,6 @@ pub(crate) fn decode_frame(
         bytes,
         rgb: image.samples_per_pixel == 3,
         pixels,
-        metadata,
     })
 }
 
@@ -330,12 +336,13 @@ pub(crate) fn check_cancel(cancel: Option<&AtomicBool>) -> Result<(), String> {
 
 pub(crate) fn write_frame(
     frame: &RawFrame,
+    description: ExtractedFrame,
     output: &Path,
     display: bool,
     cancel: Option<&AtomicBool>,
 ) -> Result<ExtractedFrame, String> {
     check_cancel(cancel)?;
-    let mut result = frame.metadata.clone();
+    let mut result = description;
     // Normalize only the disposable display cache; original frame samples stay intact.
     let normalized;
     let (pixels, output_bits) = if display && frame.bytes == 2 {
@@ -366,7 +373,7 @@ pub(crate) fn write_frame(
         .map_err(error)?;
     let written = (|| {
         file.write_all(&header).map_err(error)?;
-        for block in pixels.chunks(65536 * usize::from(output_bits / 8)) {
+        for block in pixels.chunks(CANCEL_CHUNK_SAMPLES * usize::from(output_bits / 8)) {
             check_cancel(cancel)?;
             file.write_all(block).map_err(error)?;
         }
@@ -388,7 +395,7 @@ fn display_samples(
 ) -> Result<(Vec<u8>, Vec<[u16; 2]>), String> {
     let mut ranges = vec![[u16::MAX, 0]; if rgb { 1 } else { bands }];
     for (index, sample) in pixels.as_chunks::<2>().0.iter().enumerate() {
-        if index % 65536 == 0 {
+        if index % CANCEL_CHUNK_SAMPLES == 0 {
             check_cancel(cancel)?;
         }
         let value = u16::from_le_bytes(*sample);
@@ -398,7 +405,7 @@ fn display_samples(
     }
     let mut display = Vec::with_capacity(pixels.len() / 2);
     for (index, sample) in pixels.as_chunks::<2>().0.iter().enumerate() {
-        if index % 65536 == 0 {
+        if index % CANCEL_CHUNK_SAMPLES == 0 {
             check_cancel(cancel)?;
         }
         let value = u32::from(u16::from_le_bytes(*sample));

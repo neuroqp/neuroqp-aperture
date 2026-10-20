@@ -87,7 +87,7 @@ impl Cache {
     pub fn new(format: Format, source: PathBuf, budget: Arc<Budget>) -> Result<Self, String> {
         let source = Arc::new(CheckedSource::open(source)?);
         let (plan, mut metadata) = Plan::new(format, &source, &budget)?;
-        source.check().map_err(|e| e.to_string())?;
+        source.verify()?;
         let input = Input::from_source(&source.path, source.clone());
         let dataset = plan
             .reader()
@@ -96,7 +96,7 @@ impl Cache {
         let full_images = dataset.info().map_err(|e| format!("{format}: {e}"))?.images;
         plan.check_images(&full_images)?;
         let images = compact_images(full_images);
-        source.check().map_err(|e| e.to_string())?;
+        source.verify()?;
         // Readers can retain split channel data internally; never retain one.
         drop(dataset);
         frames::description(format, &images, Selection::default()).map_err(|error| {
@@ -182,15 +182,13 @@ impl Cache {
     }
 
     pub fn reserve(&mut self, bytes: u64, background: bool) -> Result<Option<Reservation>, String> {
-        loop {
+        while !self.frames.is_empty() {
             if let Some(reservation) = self.budget.try_reserve(bytes, background)? {
                 return Ok(Some(reservation));
             }
-            if self.frames.pop_front().is_none() {
-                break;
-            }
+            self.frames.pop_front();
         }
-        reserve_after_reclaim(&self.budget, bytes, background)
+        self.budget.reserve(bytes, background, None)
     }
 
     fn load(
@@ -252,12 +250,13 @@ impl Cache {
     ) -> Result<ExtractedFrame, String> {
         frames::check_cancel(cancel)?;
         self.trim()?;
+        let metadata = self.describe(selection)?;
         let frame = if let Some(index) = self.frames.iter().position(|(key, _)| *key == selection) {
             self.frames.remove(index).unwrap().1
         } else {
             self.load(selection, background, true)?.ok_or_else(|| format!("{} selected frame decoding does not fit the application memory budget. Increase the limit in Settings.", self.format))?
         };
-        self.convert_display(output, selection, frame, background, cancel)
+        self.convert_display(output, selection, metadata, frame, background, cancel)
     }
 
     /// Keep the raw frame's lease while normalizing its separate display copy,
@@ -266,6 +265,7 @@ impl Cache {
         &mut self,
         output: &Path,
         selection: Selection,
+        metadata: ExtractedFrame,
         frame: Frame,
         background: bool,
         cancel: Option<&AtomicBool>,
@@ -275,8 +275,8 @@ impl Cache {
         } else {
             0
         };
-        let result = match self.reserve(display_bytes + FRAME_OVERHEAD + metadata_bytes(&frame.raw.metadata), background)? {
-            Some(_display) => frames::write_frame(&frame.raw, output, true, cancel),
+        let result = match self.reserve(display_bytes + FRAME_OVERHEAD + metadata_bytes(&metadata), background)? {
+            Some(_display) => frames::write_frame(&frame.raw, metadata, output, true, cancel),
             None => Err(format!("{} display conversion does not fit the application memory budget. Increase the limit in Settings.", self.format)),
         };
         let source = self.check_source();
@@ -336,6 +336,7 @@ impl Cache {
         };
         let total = u64::from(z_count) * u64::from(time_count);
         let frame_bytes = u64::from(width) * u64::from(height) * u64::from(bands) * bytes as u64;
+        // Also covers the description held until the result is written.
         let _accumulator = self.reserve(frame_bytes + FRAME_OVERHEAD + metadata_bytes(&metadata), false)?
             .ok_or_else(|| format!("{} projection accumulator does not fit the application memory budget. Increase the limit in Settings.", self.format))?;
         frames::check_cancel(Some(cancel))?;
@@ -346,7 +347,6 @@ impl Cache {
             bytes,
             rgb,
             pixels: vec![0; frame_bytes as usize],
-            metadata,
         };
         let mut completed = 0u64;
         for time in 0..time_count {
@@ -391,9 +391,9 @@ impl Cache {
         self.check_source()?;
         frames::check_cancel(Some(cancel))?;
         let display_bytes = if bytes == 2 { frame_bytes / 2 } else { 0 };
-        let _display = self.reserve(display_bytes + FRAME_OVERHEAD + metadata_bytes(&accumulator.metadata), false)?
+        let _display = self.reserve(display_bytes + FRAME_OVERHEAD, false)?
             .ok_or_else(|| format!("{} projection display conversion does not fit the application memory budget. Increase the limit in Settings.", self.format))?;
-        let result = frames::write_frame(&accumulator, output, true, Some(cancel));
+        let result = frames::write_frame(&accumulator, metadata, output, true, Some(cancel));
         if let Err(error) = self
             .check_source()
             .and_then(|_| frames::check_cancel(Some(cancel)))
@@ -418,8 +418,8 @@ fn max_samples(
         return Err("Projection frames have incompatible sample layouts.".into());
     }
     for (output, input) in output
-        .chunks_mut(65536 * bytes)
-        .zip(input.chunks(65536 * bytes))
+        .chunks_mut(frames::CANCEL_CHUNK_SAMPLES * bytes)
+        .zip(input.chunks(frames::CANCEL_CHUNK_SAMPLES * bytes))
     {
         frames::check_cancel(Some(cancel))?;
         if bytes == 1 {
@@ -459,19 +459,16 @@ fn metadata_bytes(metadata: &ExtractedFrame) -> u64 {
 }
 
 fn retained_frame_bytes(frame: &RawFrame) -> u64 {
-    frame.pixels.capacity() as u64 + FRAME_OVERHEAD + metadata_bytes(&frame.metadata)
+    frame.pixels.capacity() as u64 + FRAME_OVERHEAD
 }
 
 fn compact_images(images: Vec<ImageInfo>) -> Vec<ImageInfo> {
-    fn name(value: Option<String>) -> Option<String> {
-        value.map(|value| value.chars().take(256).collect())
-    }
     images
         .into_iter()
         .map(|image| {
             let mut compact =
                 ImageInfo::new(image.index, image.size_x, image.size_y, image.pixel_type);
-            compact.name = name(image.name);
+            compact.name = image.name.as_deref().map(frames::truncated_name);
             compact.size_c = image.size_c;
             compact.size_z = image.size_z;
             compact.size_t = image.size_t;
@@ -484,12 +481,8 @@ fn compact_images(images: Vec<ImageInfo>) -> Vec<ImageInfo> {
                 .take(image.size_c.min(crate::channels::MAX_CHANNELS) as usize)
                 .map(|channel| ChannelInfo {
                     index: channel.index,
-                    name: name(channel.name),
-                    color: channel.color.filter(|color| {
-                        color.len() == 7
-                            && color.starts_with('#')
-                            && color.as_bytes()[1..].iter().all(u8::is_ascii_hexdigit)
-                    }),
+                    name: channel.name.as_deref().map(frames::truncated_name),
+                    color: channel.color.filter(|color| frames::is_hex_color(color)),
                     ..ChannelInfo::default()
                 })
                 .collect();
@@ -518,27 +511,6 @@ fn summary_bytes(images: &[ImageInfo], capacity: usize) -> u64 {
         }
     }
     bytes
-}
-
-pub(crate) fn reserve_after_reclaim(
-    budget: &Arc<Budget>,
-    bytes: u64,
-    background: bool,
-) -> Result<Option<Reservation>, String> {
-    if let Some(reservation) = budget.try_reserve(bytes, background)? {
-        return Ok(Some(reservation));
-    }
-    if !background && bytes <= budget.status()?.limit_bytes {
-        budget.request_reclaim()?;
-        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(2);
-        while std::time::Instant::now() < deadline {
-            if let Some(reservation) = budget.try_reserve(bytes, false)? {
-                return Ok(Some(reservation));
-            }
-            std::thread::sleep(std::time::Duration::from_millis(25));
-        }
-    }
-    Ok(None)
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -609,6 +581,11 @@ impl CheckedSource {
             ));
         }
         Ok(())
+    }
+
+    /// `check` with the error message reported to the user.
+    pub(crate) fn verify(&self) -> Result<(), String> {
+        self.check().map_err(|e| e.to_string())
     }
 
     pub(crate) fn stable_path(&self) -> PathBuf {
@@ -688,9 +665,10 @@ mod tests {
         assert!(!cancelled.exists());
         assert!(cache.contains(first));
         // Cancelling after the raw frame is taken out still caches it again.
+        let metadata = cache.describe(first).unwrap();
         let frame = cache.frames.pop_back().unwrap().1;
         assert!(cache
-            .convert_display(&cancelled, first, frame, true, Some(&cancel))
+            .convert_display(&cancelled, first, metadata, frame, true, Some(&cancel))
             .is_err());
         assert!(!cancelled.exists());
         assert_eq!(cache.frames[0].1.raw.pixels.as_ptr(), raw_pointer);
@@ -978,8 +956,9 @@ mod tests {
             )
             .is_err());
         assert!(!ordinary.exists());
-        let mut samples = vec![0; 65537 * 2];
-        assert!(max_samples(&mut samples, &vec![255; 65537 * 2], 2, &cancel).is_err());
+        let length = (frames::CANCEL_CHUNK_SAMPLES + 1) * 2;
+        let mut samples = vec![0; length];
+        assert!(max_samples(&mut samples, &vec![255; length], 2, &cancel).is_err());
         assert!(samples.iter().all(|v| *v == 0));
         drop(cache);
         assert_eq!(budget.status().unwrap().used_bytes, 0);
@@ -1043,13 +1022,11 @@ mod tests {
             bytes: 1,
             rgb: false,
             pixels,
-            metadata,
         };
+        assert!(retained_frame_bytes(&frame) >= 1024 + FRAME_OVERHEAD);
         let vector_bytes = 8192 * std::mem::size_of::<String>() as u64;
-        assert!(
-            retained_frame_bytes(&frame) >= 1024 + FRAME_OVERHEAD + vector_bytes + 4096 + 32 * 4
-        );
-        assert!(serde_json::to_vec(&frame.metadata).unwrap().len() < 48 * 1024);
+        assert!(metadata_bytes(&metadata) >= vector_bytes + 4096 + 32 * 4);
+        assert!(serde_json::to_vec(&metadata).unwrap().len() < 48 * 1024);
     }
 
     fn metadata_source(additions: Vec<(&str, Vec<u8>)>) -> Vec<u8> {
