@@ -1175,3 +1175,35 @@ diagnostics. Real acquisitions and provenance remain in ignored `test-data/nd2/`
 An unrelated existing instance-lease test failed once in the initial parallel run;
 its isolated rerun and the complete serial Rust suite passed. Its implementation
 was not changed.
+
+## Initial CZI browsing, October 20, 2026
+
+The Rust-only CZI implementation passed 131 mandatory Rust tests, 90 frontend
+tests, TypeScript, frontend/native builds, Prettier and rustfmt. The optional
+public CZI test compared 2720 decoded samples and per-plane ranges against
+independent czifile references, including mosaic seams, BGR24/BGR48 order and
+JPEG XR, Zstd and Zstd HiLo compression. It also checked that three whole-slide
+scenes above the 256 MiB selected-frame cap are refused and that every browsable
+public scene reserves less than 1 GiB to decode. Both public ND2 tests passed.
+
+The Linux native harness passed all 28 checks in GPU and forced CPU rendering:
+read-only UI and backend refusal, visible composite pixels, Position/Z/Time
+keyboard and wheel navigation, local channel switching, coordinate-specific
+caches, Z max on and off, the 640-by-400 layout, replacement and cancellation,
+truncated and oversized refusals, eleven decodable public acquisitions including
+scenes of different heights, unchanged source SHA-256 and normal Close. After
+the format-neutral refactor, the ND2 native, projection and memory harnesses
+passed again. Two GPU runs on a long-lived driver session failed in harness
+transport (a window-resize timeout and a dropped WebDriver connection, with no
+application crash). Two consecutive GPU runs on a fresh driver passed.
+
+Four rounds of independent Opus and GPT review hardened preflight accounting
+against hostile files: per-plane decode batches, embedded subblock offsets,
+JPEG XR tiling, XML-derived and event-list copies, and explicit rejection of
+duplicate JPEG XR offsets, malformed event lists and multi-file parts.
+Windows execution, large laboratory acquisitions, total resident memory and
+real-file decode latency were not validated. CZI annotations, scenes above the
+frame cap and scientific export remain unsupported. See [CZI support](docs/CZI.md).
+
+Ignored evidence is under `artifacts/czi/`; public fixtures, provenance and the
+reference script remain in ignored `test-data/czi/`.
