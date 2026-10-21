@@ -52,7 +52,49 @@ def driver_url(requested=None):
         raise SessionError('Start the session wrapper with --driver PORT to get a tauri-driver.')
     if requested and requested.rstrip('/') != url:
         raise SessionError(f'--driver-url {requested} is not this session\'s driver {url}.')
+    prefix = 'http://127.0.0.1:'
+    port = url[len(prefix):]
+    if not url.startswith(prefix) or not port.isdigit():
+        raise SessionError(f'{url} is not a local tauri-driver URL.')
+    # Recheck here: the variable could also be set by hand inside the session.
+    for candidate in (int(port), int(port) + 1):
+        if not port_owned(candidate):
+            raise SessionError(f'Port {candidate} is not served by this session\'s driver.')
     return url
+
+
+def listeners(port):
+    """Return the socket inodes listening on TCP port, IPv4 or IPv6."""
+    inodes = set()
+    for table in ('/proc/net/tcp', '/proc/net/tcp6'):
+        try:
+            lines = Path(table).read_text().splitlines()[1:]
+        except OSError:
+            continue
+        for fields in (line.split() for line in lines):
+            if fields[3] == '0A' and int(fields[1].rsplit(':', 1)[1], 16) == port:
+                inodes.add(fields[9])
+    return inodes
+
+
+def port_owned(port):
+    """Whether every listener on port belongs to a process of this test run."""
+    marker = os.environ.get('APERTURE_TEST_RUN')
+    inodes = listeners(port)
+    if not marker or not inodes:
+        return False
+    owned = set()
+    for proc in Path('/proc').iterdir():
+        try:
+            if f'APERTURE_TEST_RUN={marker}'.encode() not in (proc / 'environ').read_bytes().split(b'\0'):
+                continue
+            for fd in (proc / 'fd').iterdir():
+                link = os.readlink(fd)
+                if link.startswith('socket:['):
+                    owned.add(link[8:-1])
+        except (OSError, ValueError):
+            continue
+    return inodes <= owned
 
 
 def application(binary):

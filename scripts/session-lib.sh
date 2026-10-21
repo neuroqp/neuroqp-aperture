@@ -56,6 +56,7 @@ listeners() {
 	for file in /proc/net/tcp /proc/net/tcp6; do
 		[[ -r $file ]] && files+=("$file")
 	done
+	((${#files[@]})) || return 0
 	awk -v port=":$(printf '%04X' "$1")" \
 		'$4 == "0A" && substr($2, length($2) - 4) == port { print $10 }' \
 		"${files[@]}"

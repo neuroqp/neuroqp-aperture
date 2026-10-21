@@ -547,8 +547,9 @@ python3 scripts/native-color-benchmark.py --session test-data/color-session.json
   --output test-data/gpu-benchmark.json --trials 40 --warmup 8 --gpu-fence
 ```
 
-The session file contains the WebKitWebDriver `sessionId`; the driver defaults
-to localhost:4444. Navigate the native webview to `tauri://localhost/?colorBenchmark`
+The session file contains the WebKitWebDriver `sessionId`; run the benchmark
+inside the same `scripts/headless-session --driver 4444` session, whose driver
+it uses. Navigate the native webview to `tauri://localhost/?colorBenchmark`
 for viewport diagnostics and sustained validation. Add `colorRenderer=cpu` for
 the previous CPU path. `--sustained --trials 120 --drag-interval-ms 16.6667`
 requests a continuous input stream and reports the cadence actually achieved,
