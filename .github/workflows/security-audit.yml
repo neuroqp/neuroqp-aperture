@@ -79,7 +79,7 @@ jobs:
               (
                 [.vulnerabilities.list[] | ["vulnerability", .package.name, .package.version, .advisory.id, (.versions.patched | join(" ") | if . == "" then "No published fix" else . end)]]
                 + [.warnings | to_entries[] | .key as $kind | .value[] | [$kind, .package.name, .package.version, (.advisory.id // "-"), "-"]]
-                | .[] | map(tostring | gsub("&"; "&amp;") | gsub("<"; "&lt;") | gsub(">"; "&gt;") | gsub("\\|"; "\\|") | gsub("[\r\n]"; " "))
+                | .[] | map(tostring | gsub("\\\\"; "\\\\") | gsub("&"; "&amp;") | gsub("<"; "&lt;") | gsub(">"; "&gt;") | gsub("\\|"; "\\|") | gsub("[\r\n]"; " "))
                 | "| " + join(" | ") + " |"
               )
             ' "$out/report.json" >> "$out/summary.md"

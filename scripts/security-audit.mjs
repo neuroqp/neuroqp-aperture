@@ -40,8 +40,10 @@ function blocksProduction(report) {
 }
 
 // Escape instead of stripping so version ranges such as ">=1.2.3" stay readable.
+// Backslashes go first so an input backslash cannot cancel the pipe escape.
 function tableCell(value) {
   return String(value)
+    .replace(/\\/g, "\\\\")
     .replace(/&/g, "&amp;")
     .replace(/</g, "&lt;")
     .replace(/>/g, "&gt;")
@@ -109,6 +111,11 @@ if (process.argv[2] === "--self-test") {
   unfixable.advisories.example.patched_versions = "<0.0.0";
   assert.match(summary("All", unfixable), /No published fix/);
   assert.equal(tableCell("bad|name\n<tag>"), "bad\\|name &lt;tag&gt;");
+  assert.equal(tableCell("a\\|b"), "a\\\\\\|b");
+  assert.equal(
+    tableCell("x\\</td>&lt;|[y](z)"),
+    "x\\\\&lt;/td&gt;&amp;lt;\\|[y](z)",
+  );
   console.log("Audit policy checks passed");
 } else {
   const directory = process.argv[2];
