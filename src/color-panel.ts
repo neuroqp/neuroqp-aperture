@@ -585,6 +585,8 @@ export function bindColorPanel(onChange: (settings: ColorSettings) => void) {
           ? ((drag.startY - event.clientY) / height) * 100
           : ((event.clientX - drag.startX) / width) * (axis[1] - axis[0])),
     );
+    // A user edit wins over the pending sampled initial range.
+    rangesPending = false;
     refreshInspectorRange();
     publish();
   }
@@ -674,6 +676,8 @@ export function bindColorPanel(onChange: (settings: ColorSettings) => void) {
     } else if (target.closest("#color-reset-range"))
       settings = resetColorConnection(settings, selected);
     else return;
+    // A user edit wins over the pending sampled initial range.
+    rangesPending = false;
     refreshInspectorRange();
     publish();
   });
@@ -687,6 +691,8 @@ export function bindColorPanel(onChange: (settings: ColorSettings) => void) {
       field,
       input.valueAsNumber,
     );
+    // A user edit wins over the pending sampled initial range.
+    rangesPending = false;
     refreshInspectorRange();
     publish();
   });

@@ -59,17 +59,26 @@ export function composeColorPixels(
   if (planes.some((plane) => plane.length !== size))
     throw new Error("Channel tile dimensions differ.");
   const routes = colorRoutes(settings, planes.length);
+  // 8-bit samples look up the same transfer once per value and route.
+  const tables = planes.every((plane) => plane instanceof Uint8Array)
+    ? routes.map((route) =>
+        Float64Array.from({ length: 256 }, (_, value) =>
+          colorConnectionValue(value, route),
+        ),
+      )
+    : null;
   const output = new Uint8ClampedArray(size * 4);
   for (let pixel = 0; pixel < size; pixel++) {
     let red = 0,
       green = 0,
       blue = 0;
-    for (const route of routes) {
+    for (let index = 0; index < routes.length; index++) {
+      const route = routes[index];
+      const sample = planes[route.channel][pixel];
       // Same analytic transfer as the GPU shader, in source units.
-      const intensity = colorConnectionValue(
-        planes[route.channel][pixel],
-        route,
-      );
+      const intensity = tables
+        ? tables[index][sample]
+        : colorConnectionValue(sample, route);
       red += intensity * route.color[0];
       green += intensity * route.color[1];
       blue += intensity * route.color[2];

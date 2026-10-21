@@ -261,7 +261,12 @@ pub(crate) fn load(job: &Arc<Job>) -> Result<(), String> {
         } else {
             levels
         };
-    let fallback = eight_bit_fallback(&mut layout, &pixels, job.native.lock().unwrap().is_empty());
+    let fallback = eight_bit_fallback(
+        &mut layout,
+        &pixels,
+        job.native.lock().unwrap().is_empty(),
+        !uses_worker(job),
+    );
     let sample_bits = if layout.channel_mode && pixels.ushort && !fallback {
         16
     } else {
@@ -457,18 +462,20 @@ fn noted(detail: &str, fallback: bool) -> String {
 }
 
 /// Native levels serve 16-bit detail on demand. A generated lossless pyramid
-/// whose worst case (levels add a third) exceeds the per-job work cap keeps
+/// whose worst case (levels add a third, plus the CLI path's temporary plane)
+/// exceeds the work budget (half the display cache) keeps
 /// the previous 8-bit display: gray16/RGB16 as a composite, channel pages as
 /// high-byte planes. ND2/CZI frames are small enough never to fall back.
-fn eight_bit_fallback(layout: &mut channels::Layout, pixels: &Header, generated: bool) -> bool {
-    const _: () = assert!(crate::frames::MAX_FRAME_BYTES * 4 / 3 <= CACHE_LIMIT / 2);
-    let bytes =
-        u128::from(pixels.width) * u128::from(pixels.height) * layout.planes.len() as u128 * 2;
-    if !(pixels.ushort
-        && layout.channel_mode
-        && generated
-        && bytes * 4 / 3 > u128::from(CACHE_LIMIT / 2))
-    {
+fn eight_bit_fallback(
+    layout: &mut channels::Layout,
+    pixels: &Header,
+    generated: bool,
+    scratch: bool,
+) -> bool {
+    const _: () = assert!(crate::frames::MAX_FRAME_BYTES * 7 / 3 <= CACHE_LIMIT / 2);
+    let plane = u128::from(pixels.width) * u128::from(pixels.height) * 2;
+    let peak = plane * layout.planes.len() as u128 * 4 / 3 + if scratch { plane } else { 0 };
+    if !(pixels.ushort && layout.channel_mode && generated && peak > u128::from(CACHE_LIMIT / 2)) {
         return false;
     }
     layout.channel_mode = !(layout.rgb || (pixels.bands == 1 && layout.planes.len() == 1));
@@ -1037,7 +1044,7 @@ mod tests {
         let decide = |header: &str, generated: bool| {
             let mut layout = channels::discover(header, &|_| unreachable!(), None).unwrap();
             let pixels = validate_header(header).unwrap();
-            let fallback = eight_bit_fallback(&mut layout, &pixels, generated);
+            let fallback = eight_bit_fallback(&mut layout, &pixels, generated, false);
             (fallback, layout)
         };
         // Gray16 and RGB16 return to the composite path with 8-bit domains.
@@ -1064,6 +1071,14 @@ mod tests {
         let within = gray.replace("43054", "16384").replace("29398", "16384");
         assert!(!decide(&within, true).0);
         assert!(decide(&within.replace("bands: 1", "bands: 4"), true).0);
+        // The CLI path's temporary 512 MiB plane tips the same image over.
+        let mut layout = channels::discover(&within, &|_| unreachable!(), None).unwrap();
+        assert!(eight_bit_fallback(
+            &mut layout,
+            &validate_header(&within).unwrap(),
+            true,
+            true
+        ));
     }
 
     #[test]
