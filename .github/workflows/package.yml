@@ -28,11 +28,11 @@ jobs:
     runs-on: ${{ matrix.os }}
     timeout-minutes: 45
     steps:
-      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           ref: ${{ inputs.source_sha }}
           persist-credentials: false
-      - uses: actions/setup-python@a26af69be951a213d495a4c3e4e4022e16d87065 # v5
+      - uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97 # v7.0.0
         with:
           python-version: "3.12"
       - name: Require successful validation
@@ -42,16 +42,16 @@ jobs:
           VALIDATION_RUN: ${{ inputs.validation_run_id }}
           SOURCE_SHA: ${{ inputs.source_sha }}
         run: python scripts/release/release-state.py trusted-run "$VALIDATION_RUN" validate.yml --source-sha "$SOURCE_SHA"
-      - uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4
+      - uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
         with:
           name: validated-inputs
           run-id: ${{ inputs.validation_run_id }}
           github-token: ${{ github.token }}
           path: build/validated
-      - uses: pnpm/action-setup@f40ffcd9367d9f12939873eb1018b921a783ffaa # v4
+      - uses: pnpm/action-setup@b906affcce14559ad1aafd4ab0e942779e9f58b1 # v4
         with:
           version: 9.15.9
-      - uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4
+      - uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1 # v7.1.0
         with:
           node-version: 22.22.0
           cache: pnpm
@@ -75,7 +75,7 @@ jobs:
           (cd build/extracted && ../release/Aperture-x86_64.AppImage --appimage-extract >/dev/null)
           python3 scripts/release/linux-runtime.py verify-package build/extracted/squashfs-root build/linux-prepared/manifest.json
           node node_modules/@tauri-apps/cli/tauri.js signer sign --app-version "$(python3 scripts/release/release.py check)" build/release/Aperture-x86_64.AppImage
-      - uses: dtolnay/rust-toolchain@e2a55d2ffb04f378e9626c28d38b36d230d1e12f
+      - uses: dtolnay/rust-toolchain@683b588c487a69d01f6c6ddf40f036ff682cc2c8
         if: matrix.platform == 'windows'
         with:
           toolchain: 1.98.0
@@ -105,7 +105,7 @@ jobs:
           if ($LASTEXITCODE) { exit $LASTEXITCODE }
           pwsh scripts/release/smoke-windows.ps1 -Version (python scripts/release/release.py check) -Setup build/release/Aperture-Setup-x64.exe
           if ($LASTEXITCODE) { exit $LASTEXITCODE }
-      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
+      - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
         if: always()
         with:
           name: packages-${{ matrix.platform }}
@@ -113,7 +113,7 @@ jobs:
           if-no-files-found: ignore
           retention-days: 90
           compression-level: 0
-      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
+      - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
         if: always()
         with:
           name: package-diagnostics-${{ matrix.platform }}
@@ -126,17 +126,17 @@ jobs:
     runs-on: ubuntu-24.04
     timeout-minutes: 15
     steps:
-      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           ref: ${{ inputs.source_sha }}
           persist-credentials: false
-      - uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4
+      - uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
         with:
           name: validated-inputs
           run-id: ${{ inputs.validation_run_id }}
           github-token: ${{ github.token }}
           path: build/validated
-      - uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4
+      - uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
         with:
           pattern: packages-*
           path: build/release
@@ -150,7 +150,7 @@ jobs:
           plan=build/release/Aperture-Corresponding-Source.json
           python3 scripts/release/release.py metadata build/release --version "$(python3 scripts/release/release.py check)" --source-sha "$SOURCE_SHA" --plan "$plan" --plan-sha256 "$(sha256sum "$plan" | cut -d' ' -f1)"
           python3 scripts/release/release-state.py package build/release build/validated/validation.json build/package.json
-      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
+      - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
         if: always()
         with:
           name: release-files
@@ -158,7 +158,7 @@ jobs:
           if-no-files-found: ignore
           retention-days: 90
           compression-level: 0
-      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
+      - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
         if: always()
         with:
           name: package-manifest

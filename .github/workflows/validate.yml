@@ -39,19 +39,19 @@ jobs:
       # Preserve the reviewed native/source baseline before WebKit resolves its
       # indirect dependencies. The full dependency identity gate remains required.
       - run: apt-get update && apt-get install -y --no-install-recommends git ca-certificates curl gstreamer1.0-plugins-good=1.22.0-5+deb12u3
-      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           ref: ${{ inputs.source_sha }}
           persist-credentials: false
       - run: bash scripts/release/prepare-linux.sh
-      - uses: pnpm/action-setup@f40ffcd9367d9f12939873eb1018b921a783ffaa # v4
+      - uses: pnpm/action-setup@b906affcce14559ad1aafd4ab0e942779e9f58b1 # v4
         with:
           version: 9.15.9
-      - uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4
+      - uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1 # v7.1.0
         with:
           node-version: 22.22.0
           cache: pnpm
-      - uses: dtolnay/rust-toolchain@e2a55d2ffb04f378e9626c28d38b36d230d1e12f
+      - uses: dtolnay/rust-toolchain@683b588c487a69d01f6c6ddf40f036ff682cc2c8
         with:
           toolchain: 1.98.0
           components: rustfmt, clippy
@@ -69,7 +69,7 @@ jobs:
         env:
           APERTURE_WORKER_EXECUTABLE: ${{ github.workspace }}/src-tauri/target/release/aperture
       - run: cargo clippy --manifest-path src-tauri/Cargo.toml --all-targets --locked -- -D warnings
-      - uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4
+      - uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
         with:
           name: corresponding-source
           path: build/source-baseline
@@ -89,7 +89,7 @@ jobs:
           tar -czf build/evidence/development-linux.tar.gz -C build/development linux
       - name: Record successful development validation
         run: python3 scripts/release/release-state.py build linux src-tauri/target/release/aperture build/development/linux/BUILDINFO-linux.json build/evidence/build-linux.json --source-sha "${{ inputs.source_sha }}"
-      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
+      - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
         if: always()
         with:
           name: development-linux
@@ -112,7 +112,7 @@ jobs:
       RUSTFLAGS: -C target-feature=+crt-static
       LIBCLANG_PATH: C:\Program Files\LLVM\bin
     steps:
-      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           ref: ${{ inputs.source_sha }}
           persist-credentials: false
@@ -123,17 +123,17 @@ jobs:
         run: choco install nsis --version=3.11 --yes --no-progress --allow-downgrade
       - name: Check portable extraction and locking
         run: pwsh scripts/release/test-portable.ps1
-      - uses: pnpm/action-setup@f40ffcd9367d9f12939873eb1018b921a783ffaa # v4
+      - uses: pnpm/action-setup@b906affcce14559ad1aafd4ab0e942779e9f58b1 # v4
         with:
           version: 9.15.9
-      - uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4
+      - uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1 # v7.1.0
         with:
           node-version: 22.22.0
           cache: pnpm
-      - uses: actions/setup-python@a26af69be951a213d495a4c3e4e4022e16d87065 # v5
+      - uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97 # v7.0.0
         with:
           python-version: "3.12"
-      - uses: dtolnay/rust-toolchain@e2a55d2ffb04f378e9626c28d38b36d230d1e12f
+      - uses: dtolnay/rust-toolchain@683b588c487a69d01f6c6ddf40f036ff682cc2c8
         with:
           toolchain: 1.98.0
           targets: x86_64-pc-windows-msvc
@@ -159,7 +159,7 @@ jobs:
         env:
           APERTURE_WORKER_EXECUTABLE: ${{ github.workspace }}\src-tauri\target\x86_64-pc-windows-msvc\release\aperture.exe
       - run: cargo clippy --manifest-path src-tauri/Cargo.toml --target x86_64-pc-windows-msvc --all-targets --locked -- -D warnings
-      - uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4
+      - uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
         with:
           name: corresponding-source
           path: build/source-baseline
@@ -179,7 +179,7 @@ jobs:
           if ($LASTEXITCODE) { exit $LASTEXITCODE }
       - name: Record successful development validation
         run: python scripts/release/release-state.py build windows src-tauri/target/x86_64-pc-windows-msvc/release/aperture.exe build/windows/payload/BUILDINFO-windows.json build/evidence/build-windows.json --source-sha "${{ inputs.source_sha }}"
-      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
+      - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
         if: always()
         with:
           name: development-windows
@@ -197,7 +197,7 @@ jobs:
     runs-on: ubuntu-24.04
     timeout-minutes: 20
     steps:
-      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           ref: ${{ inputs.source_sha }}
           persist-credentials: false
@@ -207,14 +207,14 @@ jobs:
           BUILD_RUN: ${{ inputs.build_run_id }}
           SOURCE_SHA: ${{ inputs.source_sha }}
         run: python3 scripts/release/release-state.py trusted-run "$BUILD_RUN" validate.yml --source-sha "$SOURCE_SHA"
-      - uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4
+      - uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
         with:
           pattern: development-*
           run-id: ${{ inputs.build_run_id }}
           github-token: ${{ github.token }}
           path: build/development
           merge-multiple: true
-      - uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4
+      - uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
         with:
           name: corresponding-source
           run-id: ${{ inputs.build_run_id }}
@@ -236,7 +236,7 @@ jobs:
           python3 -c 'import os; from pathlib import Path; Path("build/validated/native.json").write_text(os.environ["NATIVE_JSON"])'
           python3 scripts/release/release-state.py validate build/validated --source-sha "$SOURCE_SHA" --build-run-id "$BUILD_RUN" --native-report build/validated/native.json --runtime build/validated/linux-runtime.tar.gz --output build/validated/validation.json
           python3 -c 'import json,subprocess; p=json.load(open("build/validated/validation.json")); l=p["platforms"]["linux"]; subprocess.run(["python3","scripts/release/linux-runtime.py","stage","build/validated/linux-runtime.tar.gz","build/runtime-check","--archive-sha256",p["linux_runtime_sha256"],"--source-sha",p["source_sha"],"--binary-sha256",l["binary_sha256"],"--native-sha256",l["native_dependencies_sha256"]],check=True)'
-      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
+      - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
         with:
           name: validated-inputs
           path: build/validated/
@@ -249,11 +249,11 @@ jobs:
     runs-on: ubuntu-24.04
     timeout-minutes: 30
     steps:
-      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           ref: ${{ inputs.source_sha }}
           persist-credentials: false
-      - uses: actions/cache@0057852bfaa89a56745cba8c7296529d2fc39830 # v4
+      - uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
         with:
           path: build/source-cache
           key: corresponding-source-${{ hashFiles('scripts/release/corresponding-source.json') }}
@@ -261,7 +261,7 @@ jobs:
         env:
           SOURCE_SHA: ${{ inputs.source_sha }}
         run: python3 scripts/release/release.py source-material build/source --source-sha "$SOURCE_SHA" --fetch --cache build/source-cache
-      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
+      - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
         with:
           name: corresponding-source
           path: build/source/*
