@@ -15,7 +15,8 @@ serde = { version = "1", features = ["derive"] }
 serde_json = "1"
 tokio = { version = "1", features = ["sync", "time"] }
 libvips = { path = "vendor/libvips" }
-tauri-plugin-updater = "2"
+# Releases ship raw Setup and AppImage updater assets, so skip archive support.
+tauri-plugin-updater = { version = "2", default-features = false, features = ["rustls-tls", "system-proxy"] }
 tauri-plugin-opener = "2"
 same-file = "1"
 image = { version = "0.25.10", default-features = false, features = ["bmp"] }

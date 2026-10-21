@@ -5,7 +5,7 @@ import { join } from "node:path";
 
 const severities = ["info", "low", "moderate", "high", "critical"];
 
-// pnpm 9 exits with 1 for findings. Registry/CLI failures must still fail CI.
+// pnpm exits with 1 for findings. Registry/CLI failures must still fail CI.
 function parseReport(stdout, status) {
   const report = JSON.parse(stdout);
   const counts = report.metadata?.vulnerabilities;
@@ -28,7 +28,7 @@ function parseReport(stdout, status) {
     )
   ) {
     throw new Error(
-      "Audit did not return a complete pnpm 9 vulnerability report",
+      "Audit did not return a complete pnpm vulnerability report",
     );
   }
   return report;
