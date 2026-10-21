@@ -5,6 +5,7 @@ use super::{
     pyramid::{extract_plane, field},
     Backend, ImageState, Job, Phase,
 };
+use crate::vips_worker::Samples;
 use std::{
     ffi::OsString,
     fs,
@@ -370,12 +371,17 @@ fn native_tile(
                 "vipsheader",
                 &["-a".into(), resized.clone().into_os_string()],
             )?;
+            let samples = match (field(&header, "format"), state.sample_bits) {
+                (Some("ushort"), 16) => Samples::Ushort,
+                (Some("ushort"), _) => Samples::HighByte,
+                _ => Samples::Uchar,
+            };
             extract_plane(
                 job,
                 resized.clone().into_os_string(),
                 band,
                 &partial,
-                field(&header, "format") == Some("ushort"),
+                samples,
             )?;
         }
         if job.cancel.load(Ordering::Relaxed) {

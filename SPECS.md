@@ -209,6 +209,9 @@ on Open, folder navigation or Close. Cancellation or save failure must retain un
   Unsigned 16-bit images, including single-band grayscale, RGB16, 16-bit PNG
   and single-channel ImageJ stacks, display as channel images. Their display caches retain separate lossless 16-bit planes,
   served to the viewer as raw samples. 16-bit RGBA keeps the 8-bit path.
+  Without a reusable TIFF pyramid, an image whose generated 16-bit pyramid could
+  exceed half the display cache keeps the previous 8-bit high-byte display, and
+  its status says so.
   Display caches are display samples, not scientific exports.
   Use WebGL2 to retain immutable integer channel textures and evaluate each
   connection's range, brightness and color in the shader. Coalesce settings changes within an event-loop turn and redraw

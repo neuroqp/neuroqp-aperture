@@ -178,3 +178,23 @@ test("the histogram axis keeps dim 16-bit data readable and 8-bit unchanged", as
   );
   assert.deepEqual([...displayBins(narrow, [0, 255])], [...narrow]);
 });
+
+test("16-bit histograms count every preview pixel, including sparse bright spots", async () => {
+  const { percentileRange } = await import("./display.ts");
+  const plane = new Uint16Array(1024 * 1024).fill(100);
+  // Off the 4-pixel stride used for 8-bit sampling.
+  plane[5 * 1024 + 7] = 50000;
+  const [bins] = channelHistograms([plane], 1024, 1024, undefined, 16);
+  assert.equal(bins[50000], 1);
+  assert.equal(bins[100], 1024 * 1024 - 1);
+  assert.deepEqual(percentileRange(bins, 0, [0, 65535]), {
+    minimum: 100,
+    maximum: 50000,
+  });
+  const [sampled] = channelHistograms([plane], 1024, 1024);
+  assert.equal(sampled.length, 256);
+  assert.equal(
+    sampled.reduce((sum, count) => sum + count, 0),
+    256 * 256,
+  );
+});

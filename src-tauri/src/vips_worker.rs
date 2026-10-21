@@ -15,6 +15,26 @@ use std::{
 
 pub const MAX_MESSAGE: usize = 64 * 1024;
 
+/// Display samples of one channel plane. `HighByte` is the 8-bit fallback for
+/// 16-bit sources whose lossless display cache would exceed its limit.
+#[derive(Clone, Copy, Debug, PartialEq, Serialize, Deserialize)]
+pub enum Samples {
+    Uchar,
+    HighByte,
+    Ushort,
+}
+
+impl Samples {
+    /// dzsave tile format: 16-bit PNG favors fast encoding over size.
+    pub fn suffix(self) -> &'static str {
+        if self == Self::Ushort {
+            "suffix=.png[strip,compression=1]"
+        } else {
+            "suffix=.png[strip]"
+        }
+    }
+}
+
 #[derive(Debug, Serialize, Deserialize)]
 pub enum Request {
     TiffChannelInfo {
@@ -29,14 +49,14 @@ pub enum Request {
         options: Vec<String>,
         scale: Vec<f64>,
         planes: Vec<Plane>,
-        ushort: bool,
+        samples: Samples,
         directory: String,
     },
     ChannelPyramid {
         input: String,
         output: String,
         band: u32,
-        ushort: bool,
+        samples: Samples,
     },
     RawPreview {
         input: String,
@@ -260,7 +280,7 @@ impl Worker {
                 options,
                 scale,
                 planes,
-                ushort,
+                samples,
                 directory,
             } => {
                 self.channel_previews(
@@ -268,7 +288,7 @@ impl Worker {
                     &options,
                     &scale,
                     &planes,
-                    ushort,
+                    samples,
                     (&directory, progress),
                 )?;
                 Ok(String::new())
@@ -277,7 +297,7 @@ impl Worker {
                 input,
                 output,
                 band,
-                ushort,
+                samples,
             } => {
                 let result = (|| {
                     let source = self.open(&input)?;
@@ -287,11 +307,11 @@ impl Worker {
                     // lossless pyramid without full decoded planes in memory or
                     // intermediate disk files.
                     save_pyramid(
-                        &display_plane(&extracted, ushort)?,
+                        &display_plane(&extracted, samples)?,
                         &output,
                         &format!(
                             "tile-size=256,overlap=0,{},depth=onepixel",
-                            crate::backend::pyramid::channel_suffix(ushort)
+                            samples.suffix()
                         ),
                         progress,
                     )
@@ -430,9 +450,20 @@ impl Worker {
                         "--interpretation=b-w" | "--interpretation=grey16"
                     ) =>
             {
-                let ushort = args[3] == "--interpretation=grey16";
-                save_image(&display_plane(&image, ushort)?, output, progress, 0.0, 1.0)
+                let samples = if args[3] == "--interpretation=grey16" {
+                    Samples::Ushort
+                } else {
+                    Samples::Uchar
+                };
+                save_image(&display_plane(&image, samples)?, output, progress, 0.0, 1.0)
             }
+            "cast" if args.len() == 5 && args[3] == "uchar" && args[4] == "--shift" => save_image(
+                &display_plane(&image, Samples::HighByte)?,
+                output,
+                progress,
+                0.0,
+                1.0,
+            ),
             "dzsave" => {
                 let options = dz_options(&args[3..])?;
                 save_pyramid(&image, output, &options, progress)
@@ -489,7 +520,7 @@ impl Worker {
         options: &[String],
         scales: &[f64],
         planes: &[Plane],
-        ushort: bool,
+        samples: Samples,
         (directory, progress): (&str, &Progress),
     ) -> Result<(), String> {
         if planes.is_empty()
@@ -514,7 +545,7 @@ impl Worker {
                     .unwrap_or(u64::MAX)
                     .saturating_mul(u64::try_from(small.get_height()).unwrap_or(u64::MAX))
                     .saturating_mul(u64::try_from(small.get_bands()).unwrap_or(u64::MAX))
-                    .saturating_mul(if ushort { 2 } else { 1 });
+                    .saturating_mul(if samples == Samples::Uchar { 1 } else { 2 });
                 if small.get_width().max(small.get_height()) > 1024 || bytes > 64 * 1024 * 1024 {
                     return Err("Channel preview exceeds its memory limit.".into());
                 }
@@ -534,7 +565,7 @@ impl Worker {
             }
             let band = i32::try_from(plane.band).map_err(|_| "Invalid channel band.")?;
             let extracted = ops::extract_band(&resized[&key], band).map_err(|e| e.to_string())?;
-            let display = display_plane(&extracted, ushort)?;
+            let display = display_plane(&extracted, samples)?;
             let channel = Path::new(directory)
                 .join("channels")
                 .join(index.to_string());
@@ -561,16 +592,22 @@ impl Worker {
     }
 }
 
-/// Label one band as a lossless display plane; PNG saves grey16 at 16 bits.
-fn display_plane(image: &VipsImage, ushort: bool) -> Result<VipsImage, String> {
-    reinterpret(
-        image,
-        if ushort {
-            ops::Interpretation::Grey16
-        } else {
-            ops::Interpretation::BW
-        },
-    )
+/// Label one band as a display plane; PNG saves grey16 at 16 bits. The 8-bit
+/// fallback keeps the high byte of each 16-bit sample at every level.
+fn display_plane(image: &VipsImage, samples: Samples) -> Result<VipsImage, String> {
+    match samples {
+        Samples::Uchar => reinterpret(image, ops::Interpretation::BW),
+        Samples::Ushort => reinterpret(image, ops::Interpretation::Grey16),
+        Samples::HighByte => reinterpret(
+            &ops::cast_with_opts(
+                image,
+                ops::BandFormat::Uchar,
+                &ops::CastOptions { shift: true },
+            )
+            .map_err(|e| e.to_string())?,
+            ops::Interpretation::BW,
+        ),
+    }
 }
 
 fn reinterpret(
@@ -924,7 +961,7 @@ mod tests {
                 options: vec!["[page=0,n=1,access=sequential]".into()],
                 scale: vec![1.0],
                 planes: vec![Plane { page: 0, band: 0 }],
-                ushort: true,
+                samples: Samples::Ushort,
                 directory: channel_directory.to_str().unwrap().into(),
             })
             .unwrap();
@@ -1053,7 +1090,13 @@ mod tests {
     }
 
     fn channel_pyramids_match_materialized_planes(worker: &mut Worker, directory: &Path) {
-        for (bits, bands, band) in [(8, 3, 2), (16, 3, 1), (16, 1, 0)] {
+        for (bits, bands, band, kind) in [
+            (8, 3, 2, Samples::Uchar),
+            (16, 3, 1, Samples::Ushort),
+            (16, 1, 0, Samples::Ushort),
+            // The oversized-cache fallback keeps the previous high-byte planes.
+            (16, 1, 0, Samples::HighByte),
+        ] {
             // Odd edges, more than one tile, and varying low bytes catch
             // accidental changes to normalization/shrink order at every level.
             let samples = (0..259 * 257 * bands)
@@ -1078,7 +1121,8 @@ mod tests {
                 },
             )
             .unwrap();
-            let source = directory.join(format!("channel-{bits}-{bands}.tif"));
+            let name = format!("{bits}-{bands}-{kind:?}");
+            let source = directory.join(format!("channel-{name}.tif"));
             reinterpret(
                 &image,
                 match (bits, bands) {
@@ -1094,16 +1138,17 @@ mod tests {
             if bits == 8 {
                 rgb_direct_pyramid_matches(worker, directory, &source);
             }
-            let actual = directory.join(format!("actual-{bits}-{bands}"));
+            let actual = directory.join(format!("actual-{name}"));
             worker
                 .process(Request::ChannelPyramid {
                     input: source.clone(),
                     output: actual.to_str().unwrap().into(),
                     band,
-                    ushort: bits == 16,
+                    samples: kind,
                 })
                 .unwrap();
             let raw = directory.join("raw.v").to_str().unwrap().to_owned();
+            let shifted = directory.join("shifted.v").to_str().unwrap().to_owned();
             let extracted = directory.join("extracted.v").to_str().unwrap().to_owned();
             worker
                 .command(
@@ -1117,14 +1162,31 @@ mod tests {
                     ],
                 )
                 .unwrap();
+            let pixels = if kind == Samples::HighByte {
+                worker
+                    .command(
+                        "vips",
+                        &[
+                            "cast".into(),
+                            raw,
+                            shifted.clone(),
+                            "uchar".into(),
+                            "--shift".into(),
+                        ],
+                    )
+                    .unwrap();
+                shifted
+            } else {
+                raw
+            };
             worker
                 .command(
                     "vips",
                     &[
                         "copy".into(),
-                        raw,
+                        pixels,
                         extracted.clone(),
-                        if bits == 16 {
+                        if kind == Samples::Ushort {
                             "--interpretation=grey16"
                         } else {
                             "--interpretation=b-w"
@@ -1133,7 +1195,7 @@ mod tests {
                     ],
                 )
                 .unwrap();
-            let expected = directory.join(format!("expected-{bits}-{bands}"));
+            let expected = directory.join(format!("expected-{name}"));
             worker
                 .command(
                     "vips",
@@ -1143,14 +1205,14 @@ mod tests {
                         expected.to_str().unwrap().into(),
                         "--tile-size=256".into(),
                         "--overlap=0".into(),
-                        format!("--{}", crate::backend::pyramid::channel_suffix(bits == 16)),
+                        format!("--{}", kind.suffix()),
                         "--depth=onepixel".into(),
                     ],
                 )
                 .unwrap();
-            let actual_tiles = actual.with_file_name(format!("actual-{bits}-{bands}_files"));
-            let expected_tiles = expected.with_file_name(format!("expected-{bits}-{bands}_files"));
-            if bits == 16 {
+            let actual_tiles = actual.with_file_name(format!("actual-{name}_files"));
+            let expected_tiles = expected.with_file_name(format!("expected-{name}_files"));
+            if kind == Samples::Ushort {
                 // Full resolution keeps exact source samples, including low bytes.
                 let level =
                     actual_tiles.join(crate::backend::assets::max_level(259, 257).to_string());
@@ -1167,6 +1229,23 @@ mod tests {
                     }
                 }
             }
+            if kind == Samples::HighByte {
+                let tile = actual_tiles
+                    .join(crate::backend::assets::max_level(259, 257).to_string())
+                    .join("0_0.png");
+                let image = VipsImage::new_from_file(tile.to_str().unwrap()).unwrap();
+                let high: Vec<u8> = samples
+                    .as_chunks::<2>()
+                    .0
+                    .iter()
+                    .map(|sample| (u16::from_ne_bytes(*sample) >> 8) as u8)
+                    .collect();
+                let pixels = image.image_write_to_memory();
+                assert_eq!(pixels.len(), 256 * 256);
+                for (index, value) in pixels.iter().enumerate() {
+                    assert_eq!(*value, high[index / 256 * 259 + index % 256]);
+                }
+            }
             for level in fs::read_dir(&actual_tiles).unwrap() {
                 let level = level.unwrap();
                 if !level.file_type().unwrap().is_dir() {
@@ -1177,7 +1256,7 @@ mod tests {
                     let expected_tile = expected_tiles
                         .join(level.file_name())
                         .join(tile.file_name());
-                    if bits == 16 {
+                    if kind == Samples::Ushort {
                         // Every generated level stays a 16-bit grayscale PNG.
                         u16_samples(&tile.path());
                     }
@@ -1228,7 +1307,7 @@ mod tests {
                 input: format!("{}[page=0,n=1,access=sequential]", source.display()),
                 output: output.to_str().unwrap().into(),
                 band: 0,
-                ushort: true,
+                samples: Samples::Ushort,
             })
             .unwrap();
         let mut levels = 0;

@@ -37,6 +37,7 @@ export function displayValue(value: number, settings: DisplaySettings) {
 }
 
 // Sample original display planes once, independently of their color/range mapping.
+// 16-bit previews count every pixel so sparse bright spots set the sampled maximum.
 export function channelHistograms(
   planes: readonly ArrayLike<number>[],
   width: number,
@@ -45,7 +46,8 @@ export function channelHistograms(
   bits: 8 | 16 = 8,
 ) {
   const bins = planes.map(() => new Uint32Array(1 << bits));
-  const step = Math.max(1, Math.ceil(Math.max(width, height) / 256));
+  const step =
+    bits === 16 ? 1 : Math.max(1, Math.ceil(Math.max(width, height) / 256));
   for (let y = 0; y < height; y += step) {
     for (let x = 0; x < width; x += step) {
       const pixel = y * width + x;

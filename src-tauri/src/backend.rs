@@ -32,12 +32,14 @@ const BROWSER_BYTES: u64 = 96 * 1024 * 1024;
 const DISPLAY_MEMORY_ERROR: &str = "Image display does not fit the shared memory budget. Close another image window or increase the limit in Settings.";
 
 /// Extra display memory for 16-bit channel planes: the second byte of each
-/// 1024-pixel overview sample in both overview sets, plus the encoded PNG and
-/// decoded body of each concurrent `.u16` preview response (at most 16). The
-/// tile cache keeps its byte budget.
+/// 1024-pixel overview sample in both overview sets, the encoded PNG and
+/// decoded body of each concurrent `.u16` preview response (at most 16), and
+/// the viewer's 65536-bin histogram per channel plus one temporary. The tile
+/// cache keeps its byte budget.
 fn wide_display_bytes(channels: u64) -> u64 {
     const PREVIEW: u64 = 1024 * 1024 * 2;
-    channels * PREVIEW + channels.min(16) * 2 * PREVIEW
+    const HISTOGRAM: u64 = 65536 * 4;
+    channels * (PREVIEW + HISTOGRAM) + channels.min(16) * 2 * PREVIEW + 2 * HISTOGRAM
 }
 
 pub const IMAGE_EXTENSIONS: &[&str] = &[
@@ -97,6 +99,9 @@ pub struct ImageState {
     pub sample_bits: u8,
     /// The three channels are R, G and B samples of one acquisition.
     pub rgb: bool,
+    /// A 16-bit source shown with 8-bit display samples to fit the cache limit.
+    #[serde(skip)]
+    pub display_fallback: bool,
     pub read_only: bool,
     pub dimensions: Option<crate::frames::Dimensions>,
     pub calibration: Option<crate::frames::Calibration>,
@@ -590,8 +595,9 @@ impl LoadContext {
             NEXT_ID.fetch_add(1, Ordering::Relaxed)
         );
         let mut hasher = DefaultHasher::new();
-        // Bump when display samples change: v6 keeps 16-bit channel planes.
-        "aperture-display-v6-16bit".hash(&mut hasher);
+        // Bump when display samples change: v6 keeps 16-bit channel planes
+        // unless a generated pyramid would exceed half the cache limit.
+        "aperture-display-v6-16bit-fallback-half-cache".hash(&mut hasher);
         source.hash(&mut hasher);
         metadata.len().hash(&mut hasher);
         #[cfg(unix)]
@@ -672,6 +678,7 @@ impl LoadContext {
             channel_mode: selection.is_some(),
             sample_bits,
             rgb,
+            display_fallback: false,
             read_only: selection.is_some(),
             dimensions,
             calibration: None,
@@ -773,20 +780,16 @@ impl Job {
             let _ = child.wait();
         }
     }
-    /// Admit the foreground display's 16-bit allowance once its width is known.
-    fn reserve_display(&self) -> Result<(), String> {
-        let state = self.state.lock().unwrap().clone();
-        if self.background
-            || state.sample_bits != 16
-            || self.display_memory.lock().unwrap().is_some()
-        {
+    /// Admit the foreground display's 16-bit allowance before publishing it.
+    fn reserve_display(&self, sample_bits: u8, channels: usize) -> Result<(), String> {
+        if self.background || sample_bits != 16 || self.display_memory.lock().unwrap().is_some() {
             return Ok(());
         }
         // Never hold the slot while waiting, so cancellation stays immediate.
         let reservation = self
             .memory
             .reserve(
-                wide_display_bytes(state.channels.len() as u64),
+                wide_display_bytes(channels as u64),
                 false,
                 Some(&self.cancel),
             )?

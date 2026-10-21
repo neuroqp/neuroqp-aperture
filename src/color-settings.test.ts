@@ -397,3 +397,32 @@ test("compatible frames, which keep their ranges, require identical channel doma
     true,
   );
 });
+
+test("both reset controls restore full channel domains and 100% brightness", async () => {
+  const { initialColorRanges } = await import("./color-settings.ts");
+  const channels = [
+    { id: "0", name: "DAPI", domain: wide },
+    { id: "1", name: "FITC", domain: wide },
+  ];
+  const opened = initialColorRanges(
+    defaultColorSettings(channels),
+    channels,
+    [histogram(1200, 1500), histogram(900, 1100)],
+    false,
+  );
+  const edited = adjustColorConnection(opened, 1, "brightness", 30);
+  const full = [0, 65535, 100];
+  const ranges = (settings: ReturnType<typeof defaultColorSettings>) =>
+    settings.connections.map(({ minimum, maximum, brightness }) => [
+      minimum,
+      maximum,
+      brightness,
+    ]);
+  // The header reset rebuilds the defaults; it never reuses histogram ranges.
+  assert.deepEqual(ranges(defaultColorSettings(channels)), [full, full]);
+  // The connection Reset restores only the selected connection.
+  assert.deepEqual(ranges(resetColorConnection(edited, 1)), [
+    full,
+    [900, 1100, 100],
+  ]);
+});

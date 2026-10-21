@@ -29,6 +29,7 @@ pub(super) struct CacheManifest {
     pub(super) channel_mode: bool,
     pub(super) sample_bits: u8,
     pub(super) rgb: bool,
+    pub(super) display_fallback: bool,
     pub(super) planes: Vec<Plane>,
     pub(super) native: Vec<NativeLevel>,
     #[serde(default)]
@@ -157,6 +158,7 @@ pub(super) fn write_manifest(job: &Job, dir: &Path) -> Result<(), String> {
         channel_mode: state.channel_mode,
         sample_bits: state.sample_bits,
         rgb: state.rgb,
+        display_fallback: state.display_fallback,
         planes: job.planes.lock().unwrap().clone(),
         native: job.native.lock().unwrap().clone(),
         dimensions: state.dimensions,
@@ -188,7 +190,7 @@ pub(super) fn cached_manifest(job: &Job, dir: &Path) -> Option<CacheManifest> {
         || manifest.channels.is_empty()
         || manifest.channels.len() > channels::MAX_CHANNELS as usize
         || !matches!(manifest.sample_bits, 8 | 16)
-        || (manifest.sample_bits == 16 && !manifest.channel_mode)
+        || (manifest.sample_bits == 16 && (!manifest.channel_mode || manifest.display_fallback))
         || manifest
             .channels
             .iter()
@@ -619,6 +621,55 @@ mod tests {
             .any(|state| state.id == reopened.id && state.phase == Phase::Ready));
         assert_eq!(events.last().unwrap().phase, Phase::Cancelled);
         drop(events);
+        backend.shutdown();
+        fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn reused_16_bit_cache_publishes_nothing_without_display_memory() {
+        let root = std::env::temp_dir().join(format!(
+            "aperture-reuse-memory-{}-{}",
+            std::process::id(),
+            NEXT_ID.fetch_add(1, Ordering::Relaxed)
+        ));
+        fs::create_dir_all(&root).unwrap();
+        let source = root.join("source.tif");
+        channel_fixture(&source, 1, 1, "");
+        let mut backend = Backend::new(root.join("cache")).unwrap();
+        let events = Arc::new(Mutex::new(Vec::<ImageState>::new()));
+        let recorded = events.clone();
+        backend.set_notifier(move |state| recorded.lock().unwrap().push(state.clone()));
+        backend.open(&source).unwrap();
+        assert_eq!(wait_ready(&backend).sample_bits, 16);
+        // Release the first display, then leave no room for the next one.
+        backend.cancel();
+        let available = backend.memory.status().unwrap().available_bytes;
+        let full = backend
+            .memory
+            .try_reserve(available, false)
+            .unwrap()
+            .unwrap();
+        let reopened = backend.open(&source).unwrap();
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(20);
+        let failed = loop {
+            let state = backend.snapshot().unwrap();
+            if state.phase != Phase::Loading {
+                break state;
+            }
+            assert!(std::time::Instant::now() < deadline);
+            thread::sleep(std::time::Duration::from_millis(10));
+        };
+        assert_eq!(failed.phase, Phase::Error);
+        assert!(failed.error.unwrap().contains("does not fit"));
+        assert!(events
+            .lock()
+            .unwrap()
+            .iter()
+            .filter(|state| state.id == reopened.id)
+            .all(|state| !state.preview_ready && state.phase != Phase::Ready));
+        drop(full);
+        backend.open(&source).unwrap();
+        assert!(wait_ready(&backend).detail.contains("Reused"));
         backend.shutdown();
         fs::remove_dir_all(root).unwrap();
     }

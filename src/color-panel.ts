@@ -693,10 +693,9 @@ export function bindColorPanel(onChange: (settings: ColorSettings) => void) {
   document.getElementById("reset-colors")!.addEventListener("click", () => {
     if (!enabled) return;
     closeTransient();
+    // Like per-connection Reset: full channel domains and 100% brightness.
     settings = defaultColorSettings(channels);
-    // Restore the as-opened 16-bit ranges when a preview sample is available.
-    rangesPending = layout.sampleBits === 16;
-    initializeRanges();
+    rangesPending = false;
     selected = settings.connections[0]?.id ?? null;
     render();
     publish();

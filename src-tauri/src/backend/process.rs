@@ -346,18 +346,10 @@ mod tests {
                 + decoder_workspace(&job).unwrap()
                 <= crate::memory::MIN_LIMIT_BYTES
         );
-        // A 16-bit foreground display holds its allowance until cancelled.
-        {
-            let mut state = job.state.lock().unwrap();
-            state.sample_bits = 16;
-            state.channels = vec![crate::channels::Channel {
-                name: "Channel 1".into(),
-                color: "#ffffff".into(),
-                domain: [0, 65535],
-            }];
-        }
-        job.reserve_display().unwrap();
-        job.reserve_display().unwrap();
+        // A 16-bit foreground display holds one allowance until cancelled.
+        job.reserve_display(16, 1).unwrap();
+        job.reserve_display(16, 1).unwrap();
+        job.reserve_display(8, 32).unwrap();
         assert_eq!(
             backend.memory.status().unwrap().used_bytes,
             super::super::wide_display_bytes(1)
