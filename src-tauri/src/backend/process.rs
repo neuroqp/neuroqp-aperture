@@ -211,12 +211,18 @@ pub(super) fn decoded_workspace(
 
 fn decoder_workspace(job: &Job) -> Result<u64, String> {
     let state = job.state.lock().unwrap();
+    // Four bytes per preview sample also cover one materialized 16-bit preview.
     let preview = state.channels.len().max(1) as u64 * 1024 * 1024 * 4;
     let (overhead, frame) = if job.selection.is_some() {
         // Frame display TIFFs have one whole-image strip; preserve its full decode.
         (
             128 * 1024 * 1024,
-            decoded_workspace(state.width, state.height, state.channels.len() as u64, 1)?,
+            decoded_workspace(
+                state.width,
+                state.height,
+                state.channels.len() as u64,
+                u64::from(state.sample_bits / 8),
+            )?,
         )
     } else {
         // A bounded metadata/streaming allowance, plus geometry for codecs that
@@ -332,10 +338,32 @@ mod tests {
         assert_eq!(decoded_workspace(8000, 8000, 3, 1).unwrap(), 768_000_000);
         assert!(decoded_workspace(u32::MAX, u32::MAX, 4, 2).is_err());
         let (root, backend, job) = workspace_fixture();
-        // The browser allowance plus a small image workspace fits 256 MiB.
+        // The browser allowance plus a small image workspace fits 256 MiB,
+        // also with a single 16-bit channel's display allowance.
         assert!(
-            96 * 1024 * 1024 + decoder_workspace(&job).unwrap() <= crate::memory::MIN_LIMIT_BYTES
+            super::super::BROWSER_BYTES
+                + super::super::wide_display_bytes(1)
+                + decoder_workspace(&job).unwrap()
+                <= crate::memory::MIN_LIMIT_BYTES
         );
+        // A 16-bit foreground display holds its allowance until cancelled.
+        {
+            let mut state = job.state.lock().unwrap();
+            state.sample_bits = 16;
+            state.channels = vec![crate::channels::Channel {
+                name: "Channel 1".into(),
+                color: "#ffffff".into(),
+                domain: [0, 65535],
+            }];
+        }
+        job.reserve_display().unwrap();
+        job.reserve_display().unwrap();
+        assert_eq!(
+            backend.memory.status().unwrap().used_bytes,
+            super::super::wide_display_bytes(1)
+        );
+        job.cancel();
+        assert_eq!(backend.memory.status().unwrap().used_bytes, 0);
         let bmp = root.join("source.bmp");
         image::RgbaImage::new(16, 12).save(&bmp).unwrap();
         let context = LoadContext {

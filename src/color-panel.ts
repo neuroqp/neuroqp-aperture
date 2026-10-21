@@ -6,6 +6,7 @@ import {
   connectColor,
   copyColorSettings,
   defaultColorSettings,
+  initialColorRanges,
   removeColorConnection,
   resetColorConnection,
   setOutputColor,
@@ -17,7 +18,13 @@ import {
   type ColorChannel,
   type ColorSettings,
 } from "./color-settings";
-import { percentileRange } from "./display";
+import {
+  defaultDomain,
+  displayBins,
+  histogramAxis,
+  percentileRange,
+  type Domain,
+} from "./display";
 import { bindHelp } from "./help";
 import "./color-panel.css";
 
@@ -92,7 +99,12 @@ export function bindColorPanel(onChange: (settings: ColorSettings) => void) {
     enabled = false,
     selected: number | null = null;
   let histograms: readonly (Uint32Array | null)[] = [],
-    logarithmic = false;
+    logarithmic = false,
+    layout = { sampleBits: 8, rgb: false },
+    // 16-bit ranges start from the first preview sample of each acquisition.
+    rangesPending = false,
+    // Histogram x-axis in source units; frozen while a range drag is active.
+    axis: Domain = defaultDomain;
   let editing: string | null = null,
     hsv = { h: 0, s: 1, v: 1 },
     suppressClick = false;
@@ -158,6 +170,29 @@ export function bindColorPanel(onChange: (settings: ColorSettings) => void) {
       .join("");
     if (focus) focusEdge(Number(focus));
   }
+  const domainOf = (edge: NonNullable<ReturnType<typeof edgeById>>) =>
+    channels.find((channel) => channel.id === edge.source)?.domain ??
+    defaultDomain;
+  // Fraction of the histogram axis, clamped to the graph.
+  const position = (value: number) =>
+    Math.max(0, Math.min(1, (value - axis[0]) / (axis[1] - axis[0])));
+  function initializeRanges() {
+    if (!rangesPending || !histograms.some(Boolean)) return;
+    settings = initialColorRanges(settings, channels, histograms, layout.rgb);
+    rangesPending = false;
+  }
+  function updateAxis() {
+    const edge = edgeById(selected);
+    if (!edge || rangeGesture) return false;
+    const next = histogramAxis(
+      selectedHistogram(),
+      domainOf(edge),
+      edge.maximum,
+    );
+    if (next[0] === axis[0] && next[1] === axis[1]) return false;
+    axis = next;
+    return true;
+  }
   const selectedHistogram = () => {
     const edge = edgeById(selected);
     return edge
@@ -169,6 +204,7 @@ export function bindColorPanel(onChange: (settings: ColorSettings) => void) {
   function refreshInspectorRange() {
     const edge = edgeById(selected);
     if (!edge) return;
+    if (updateAxis()) refreshInspectorHistogram();
     for (const field of ["minimum", "maximum", "brightness"] as const) {
       const input = get<HTMLInputElement>(`range-${field}`);
       if (!input) continue;
@@ -185,27 +221,30 @@ export function bindColorPanel(onChange: (settings: ColorSettings) => void) {
       );
       if (field === "brightness") continue;
       const cutoff = document.getElementById(`color-cutoff-${field}`)!;
-      cutoff.setAttribute("x1", String(edge[field]));
-      cutoff.setAttribute("x2", String(edge[field]));
+      cutoff.setAttribute("x1", String(position(edge[field]) * 255));
+      cutoff.setAttribute("x2", String(position(edge[field]) * 255));
     }
     const controls = get("range-controls");
-    controls.style.setProperty("--minimum", `${(edge.minimum / 255) * 100}%`);
-    controls.style.setProperty("--maximum", `${(edge.maximum / 255) * 100}%`);
+    controls.style.setProperty("--minimum", `${position(edge.minimum) * 100}%`);
+    controls.style.setProperty("--maximum", `${position(edge.maximum) * 100}%`);
     controls.style.setProperty("--brightness", `${100 - edge.brightness}%`);
-    document
-      .getElementById("color-range-line")!
-      .setAttribute(
-        "d",
-        Array.from(
-          { length: 256 },
-          (_, x) =>
-            `${x === 0 ? "M" : "L"}${x} ${64 * (1 - colorConnectionValue(x, edge))}`,
-        ).join(""),
-      );
+    // The transfer function is linear between the axis ends and both cutoffs.
+    document.getElementById("color-range-line")!.setAttribute(
+      "d",
+      [axis[0], edge.minimum, edge.maximum, axis[1]]
+        .map((value) => Math.max(axis[0], Math.min(axis[1], value)))
+        .map(
+          (value, index) =>
+            `${index ? "L" : "M"}${position(value) * 255} ${64 * (1 - colorConnectionValue(value, edge))}`,
+        )
+        .join(""),
+    );
   }
   function refreshInspectorHistogram() {
     if (!edgeById(selected)) return;
-    const bins = selectedHistogram(),
+    updateAxis();
+    const source = selectedHistogram(),
+      bins = source && displayBins(source, axis),
       peak = bins ? Math.max(...bins) : 0;
     document
       .getElementById("color-histogram-bars")!
@@ -215,11 +254,13 @@ export function bindColorPanel(onChange: (settings: ColorSettings) => void) {
           ? `M0 64${Array.from(bins, (count, x) => `L${x} ${64 - 62 * (logarithmic ? Math.log1p(count) / Math.log1p(peak) : count / peak)}`).join("")}L255 64Z`
           : "",
       );
+    get("axis-start").textContent = String(axis[0]);
+    get("axis-end").textContent = String(axis[1]);
     get("inspector")
       .querySelectorAll<HTMLButtonElement>("[data-color-percentile]")
       .forEach((button) => (button.disabled = !enabled || !peak));
     get("histogram-description").textContent = bins
-      ? `Approximate original source channel histogram from an 8-bit preview sample; ${logarithmic ? "logarithmic" : "linear"} counts`
+      ? `Approximate original source channel histogram from a ${layout.sampleBits}-bit preview sample; ${logarithmic ? "logarithmic" : "linear"} counts`
       : "Source channel histogram unavailable";
     const scale = get<HTMLButtonElement>("histogram-scale");
     scale.textContent = logarithmic ? "Log" : "Linear";
@@ -238,7 +279,8 @@ export function bindColorPanel(onChange: (settings: ColorSettings) => void) {
     const source =
         channels.find((channel) => channel.id === edge.source)?.name ??
         edge.source,
-      color = colorName(settings.colors[edge.color]);
+      color = colorName(settings.colors[edge.color]),
+      [start, end] = domainOf(edge);
     inspector.innerHTML = `<div class="color-inspector-heading">
       <span class="color-connection-source" title="${escape(source)}">${escape(source)}</span>
       <svg class="color-connection-arrow" viewBox="0 0 24 24" aria-hidden="true"><path d="M5 12h14m-7-7 7 7-7 7"/></svg>
@@ -261,10 +303,10 @@ export function bindColorPanel(onChange: (settings: ColorSettings) => void) {
         <div class="color-range-highlight brightness"></div>
       </div>
       </div>
-      <div class="range-labels"><span>0</span><span>255</span>
+      <div class="range-labels"><span id="color-axis-start"></span><span id="color-axis-end"></span>
       <button id="color-histogram-scale" class="text-button histogram-scale" type="button" aria-label="Logarithmic histogram scale" ${enabled ? "" : "disabled"}></button></div>
     </div>
-    ${(["minimum", "maximum"] as const).map((field) => `<label class="adjustment" for="color-range-${field}"><span>${field === "minimum" ? "Minimum" : "Maximum"}</span><input id="color-range-${field}" type="range" data-color-field="${field}" min="${field === "minimum" ? 0 : 1}" max="${field === "minimum" ? 254 : 255}" aria-label="${escape(label(edge))} ${field}" ${enabled ? "" : "disabled"}><output id="color-value-${field}" for="color-range-${field}"></output></label>`).join("")}
+    ${(["minimum", "maximum"] as const).map((field) => `<label class="adjustment" for="color-range-${field}"><span>${field === "minimum" ? "Minimum" : "Maximum"}</span><input id="color-range-${field}" type="range" data-color-field="${field}" min="${field === "minimum" ? start : start + 1}" max="${field === "minimum" ? end - 1 : end}" aria-label="${escape(label(edge))} ${field}" ${enabled ? "" : "disabled"}><output id="color-value-${field}" for="color-range-${field}"></output></label>`).join("")}
     <label class="adjustment" for="color-range-brightness"><span>Brightness</span><input id="color-range-brightness" type="range" data-color-field="brightness" min="0" max="100" step="1" aria-label="${escape(label(edge))} brightness" ${enabled ? "" : "disabled"}><output id="color-value-brightness" for="color-range-brightness"></output></label>
     <footer class="panel-footer display-presets">${[0, 0.1, 0.5, 1].map((tail) => `<button class="text-button" type="button" data-color-percentile="${tail}" title="${tail === 0 ? "Set display range to the sampled source channel minimum and maximum" : `Set display range to the ${tail}–${100 - tail} percentiles`}">${tail}–${100 - tail}</button>`).join("")}<button id="color-reset-range" class="text-button" type="button" ${enabled ? "" : "disabled"}>${icon("reset")}Reset</button></footer>`;
     refreshInspectorRange();
@@ -513,8 +555,8 @@ export function bindColorPanel(onChange: (settings: ColorSettings) => void) {
     if (!enabled || !edge) return;
     const { x, y, width, height } = rangePoint(target, event);
     if (!width || !height || x < 0 || x > width || y < 0 || y > height) return;
-    const minimum = (edge.minimum / 255) * width,
-      maximum = (edge.maximum / 255) * width,
+    const minimum = position(edge.minimum) * width,
+      maximum = position(edge.maximum) * width,
       plateau = (1 - edge.brightness / 100) * height,
       nearPlateau = Math.abs(y - plateau) <= 10;
     // Preserve a brightness target even when the true plateau has zero width.
@@ -541,7 +583,7 @@ export function bindColorPanel(onChange: (settings: ColorSettings) => void) {
       drag.startValue +
         (drag.field === "brightness"
           ? ((drag.startY - event.clientY) / height) * 100
-          : ((event.clientX - drag.startX) / width) * 255),
+          : ((event.clientX - drag.startX) / width) * (axis[1] - axis[0])),
     );
     refreshInspectorRange();
     publish();
@@ -600,6 +642,8 @@ export function bindColorPanel(onChange: (settings: ColorSettings) => void) {
       if (!drag || drag.pointerId !== event.pointerId) return;
       if (type === "pointerup") moveRange(event);
       stopRangeGesture();
+      // Rescale the axis once the drag no longer depends on it.
+      refreshInspectorRange();
       if (type === "pointerup" && drag.target.isConnected) {
         const field = rangeField(drag.target, event);
         if (field) drag.target.dataset.graphField = field;
@@ -622,8 +666,9 @@ export function bindColorPanel(onChange: (settings: ColorSettings) => void) {
       const bins = selectedHistogram();
       if (!bins) return;
       const range = percentileRange(
-        Array.from(bins),
+        bins,
         Number(preset.dataset.colorPercentile),
+        domainOf(edgeById(selected)!),
       );
       settings = setColorConnectionRange(settings, selected, range);
     } else if (target.closest("#color-reset-range"))
@@ -649,6 +694,9 @@ export function bindColorPanel(onChange: (settings: ColorSettings) => void) {
     if (!enabled) return;
     closeTransient();
     settings = defaultColorSettings(channels);
+    // Restore the as-opened 16-bit ranges when a preview sample is available.
+    rangesPending = layout.sampleBits === 16;
+    initializeRanges();
     selected = settings.connections[0]?.id ?? null;
     render();
     publish();
@@ -802,19 +850,29 @@ export function bindColorPanel(onChange: (settings: ColorSettings) => void) {
   new ResizeObserver(() => draw()).observe(patch);
   render();
   return {
-    setChannels(next: readonly ColorChannel[], preserve = false) {
+    setChannels(
+      next: readonly ColorChannel[],
+      preserve = false,
+      sampleLayout = { sampleBits: 8, rgb: false },
+    ) {
       if (preserve && sameColorChannels(channels, next)) return;
       closeTransient();
       channels = next.map((channel) => ({ ...channel }));
+      layout = sampleLayout;
       histograms = [];
       settings = defaultColorSettings(channels);
+      rangesPending = layout.sampleBits === 16;
       selected = settings.connections[0]?.id ?? null;
       render();
       publish();
     },
     setHistograms(next: readonly (Uint32Array | null)[]) {
       histograms = next;
-      refreshInspectorHistogram();
+      if (rangesPending) {
+        initializeRanges();
+        renderInspector();
+        publish();
+      } else refreshInspectorHistogram();
     },
     settings: () => copyColorSettings(settings),
     setEnabled(ready: boolean) {

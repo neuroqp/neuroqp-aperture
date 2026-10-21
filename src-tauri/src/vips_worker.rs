@@ -283,23 +283,16 @@ impl Worker {
                     let source = self.open(&input)?;
                     let band = i32::try_from(band).map_err(|_| "Invalid image band.")?;
                     let extracted = ops::extract_band(&source, band).map_err(|e| e.to_string())?;
-                    let pixels = if ushort {
-                        ops::cast_with_opts(
-                            &extracted,
-                            ops::BandFormat::Uchar,
-                            &ops::CastOptions { shift: true },
-                        )
-                        .map_err(|e| e.to_string())?
-                    } else {
-                        extracted
-                    };
-                    // Keep extraction and display normalization lazy, so one
-                    // source traversal feeds the lossless pyramid without full
-                    // decoded planes in memory or intermediate disk files.
+                    // Keep extraction lazy, so one source traversal feeds the
+                    // lossless pyramid without full decoded planes in memory or
+                    // intermediate disk files.
                     save_pyramid(
-                        &grayscale(&pixels)?,
+                        &display_plane(&extracted, ushort)?,
                         &output,
-                        "tile-size=256,overlap=0,suffix=.png[strip],depth=onepixel",
+                        &format!(
+                            "tile-size=256,overlap=0,{},depth=onepixel",
+                            crate::backend::pyramid::channel_suffix(ushort)
+                        ),
                         progress,
                     )
                 })();
@@ -342,9 +335,18 @@ impl Worker {
                     format,
                 )
                 .map_err(|e| e.to_string())?;
+                // A PNG output is a lossless single-channel display plane.
+                let options = if output.ends_with(".png") {
+                    if preview.bands != 1 {
+                        return Err("Raw TIFF channel previews must have one band.".into());
+                    }
+                    "[strip]"
+                } else {
+                    "[Q=85,strip,background=52 54 51]"
+                };
                 save_image(
                     &reinterpret(&image, interpretation)?,
-                    &format!("{output}[Q=85,strip,background=52 54 51]"),
+                    &format!("{output}{options}"),
                     progress,
                     0.98,
                     0.02,
@@ -409,15 +411,6 @@ impl Worker {
                 let extracted = ops::extract_band(&image, band).map_err(|e| e.to_string())?;
                 save_image(&extracted, output, progress, 0.0, 1.0)
             }
-            "cast" if args.len() == 5 && args[3] == "uchar" && args[4] == "--shift" => {
-                let pixels = ops::cast_with_opts(
-                    &image,
-                    ops::BandFormat::Uchar,
-                    &ops::CastOptions { shift: true },
-                )
-                .map_err(|e| e.to_string())?;
-                save_image(&pixels, output, progress, 0.0, 1.0)
-            }
             "tiffsave" if args.len() == 4 && args[3] == "--compression=lzw" => {
                 ops::tiffsave_with_opts(
                     &image,
@@ -430,8 +423,15 @@ impl Worker {
                 .map_err(|e| e.to_string())
             }
             "copy" if args.len() == 3 => save_image(&image, output, progress, 0.0, 1.0),
-            "copy" if args.len() == 4 && args[3] == "--interpretation=b-w" => {
-                save_image(&grayscale(&image)?, output, progress, 0.0, 1.0)
+            "copy"
+                if args.len() == 4
+                    && matches!(
+                        args[3].as_str(),
+                        "--interpretation=b-w" | "--interpretation=grey16"
+                    ) =>
+            {
+                let ushort = args[3] == "--interpretation=grey16";
+                save_image(&display_plane(&image, ushort)?, output, progress, 0.0, 1.0)
             }
             "dzsave" => {
                 let options = dz_options(&args[3..])?;
@@ -534,17 +534,7 @@ impl Worker {
             }
             let band = i32::try_from(plane.band).map_err(|_| "Invalid channel band.")?;
             let extracted = ops::extract_band(&resized[&key], band).map_err(|e| e.to_string())?;
-            let pixels = if ushort {
-                ops::cast_with_opts(
-                    &extracted,
-                    ops::BandFormat::Uchar,
-                    &ops::CastOptions { shift: true },
-                )
-                .map_err(|e| e.to_string())?
-            } else {
-                extracted
-            };
-            let display = grayscale(&pixels)?;
+            let display = display_plane(&extracted, ushort)?;
             let channel = Path::new(directory)
                 .join("channels")
                 .join(index.to_string());
@@ -571,8 +561,16 @@ impl Worker {
     }
 }
 
-fn grayscale(image: &VipsImage) -> Result<VipsImage, String> {
-    reinterpret(image, ops::Interpretation::BW)
+/// Label one band as a lossless display plane; PNG saves grey16 at 16 bits.
+fn display_plane(image: &VipsImage, ushort: bool) -> Result<VipsImage, String> {
+    reinterpret(
+        image,
+        if ushort {
+            ops::Interpretation::Grey16
+        } else {
+            ops::Interpretation::BW
+        },
+    )
 }
 
 fn reinterpret(
@@ -720,6 +718,7 @@ fn dz_options(args: &[String]) -> Result<String, String> {
                 | "depth=onepixel"
                 | "background=52 54 51"
                 | "suffix=.png[strip]"
+                | "suffix=.png[strip,compression=1]"
                 | "suffix=.jpg[Q=85,strip,background=52 54 51]"
                 | "Q=85"
         ) {
@@ -929,7 +928,28 @@ mod tests {
                 directory: channel_directory.to_str().unwrap().into(),
             })
             .unwrap();
-        assert!(channel_directory.join("channels/0/preview.png").is_file());
+        // The 16-bit preview keeps every source sample at scale 1.
+        let (width, height, preview) =
+            u16_samples(&channel_directory.join("channels/0/preview.png"));
+        let source_image = VipsImage::new_from_file(source.to_str().unwrap()).unwrap();
+        assert_eq!(
+            (width, height),
+            (
+                source_image.get_width() as u32,
+                source_image.get_height() as u32
+            )
+        );
+        assert_eq!(
+            preview,
+            source_image
+                .image_write_to_memory()
+                .as_chunks::<2>()
+                .0
+                .iter()
+                .map(|sample| u16::from_ne_bytes(*sample))
+                .collect::<Vec<_>>()
+        );
+        drop(source_image);
         assert!(!channel_directory.join("preview.jpg").exists());
         assert_eq!(
             worker
@@ -942,6 +962,20 @@ mod tests {
                 .unwrap(),
             "used"
         );
+        // Large 16-bit gray channel previews use the same area reducer losslessly.
+        let raw_channel = directory.join("raw-channel.png");
+        assert_eq!(
+            worker
+                .process(Request::RawPreview {
+                    input: source.to_str().unwrap().into(),
+                    output: raw_channel.to_str().unwrap().into(),
+                    max_edge: 1024,
+                    threads: 2,
+                })
+                .unwrap(),
+            "used"
+        );
+        assert_eq!(u16_samples(&raw_channel), (width, height, preview));
         let status = std::process::Command::new("vips")
             .args([
                 "resize",
@@ -1013,6 +1047,7 @@ mod tests {
         .is_err());
         drop(native_image);
         channel_pyramids_match_materialized_planes(&mut worker, &directory);
+        constant_ushort_pyramid_is_exact_at_every_level(&mut worker, &directory);
         drop(worker);
         fs::remove_dir_all(directory).unwrap();
     }
@@ -1069,8 +1104,7 @@ mod tests {
                 })
                 .unwrap();
             let raw = directory.join("raw.v").to_str().unwrap().to_owned();
-            let cast = directory.join("cast.v").to_str().unwrap().to_owned();
-            let normalized = directory.join("normalized.v").to_str().unwrap().to_owned();
+            let extracted = directory.join("extracted.v").to_str().unwrap().to_owned();
             worker
                 .command(
                     "vips",
@@ -1083,31 +1117,19 @@ mod tests {
                     ],
                 )
                 .unwrap();
-            let pixels = if bits == 16 {
-                worker
-                    .command(
-                        "vips",
-                        &[
-                            "cast".into(),
-                            raw,
-                            cast.clone(),
-                            "uchar".into(),
-                            "--shift".into(),
-                        ],
-                    )
-                    .unwrap();
-                cast
-            } else {
-                raw
-            };
             worker
                 .command(
                     "vips",
                     &[
                         "copy".into(),
-                        pixels,
-                        normalized.clone(),
-                        "--interpretation=b-w".into(),
+                        raw,
+                        extracted.clone(),
+                        if bits == 16 {
+                            "--interpretation=grey16"
+                        } else {
+                            "--interpretation=b-w"
+                        }
+                        .into(),
                     ],
                 )
                 .unwrap();
@@ -1117,17 +1139,34 @@ mod tests {
                     "vips",
                     &[
                         "dzsave".into(),
-                        normalized,
+                        extracted,
                         expected.to_str().unwrap().into(),
                         "--tile-size=256".into(),
                         "--overlap=0".into(),
-                        "--suffix=.png[strip]".into(),
+                        format!("--{}", crate::backend::pyramid::channel_suffix(bits == 16)),
                         "--depth=onepixel".into(),
                     ],
                 )
                 .unwrap();
             let actual_tiles = actual.with_file_name(format!("actual-{bits}-{bands}_files"));
             let expected_tiles = expected.with_file_name(format!("expected-{bits}-{bands}_files"));
+            if bits == 16 {
+                // Full resolution keeps exact source samples, including low bytes.
+                let level =
+                    actual_tiles.join(crate::backend::assets::max_level(259, 257).to_string());
+                for (tile, x0, y0) in [("0_0", 0, 0), ("1_0", 256, 0), ("1_1", 256, 256)] {
+                    let (width, height, values) = u16_samples(&level.join(format!("{tile}.png")));
+                    assert_eq!((width, height), ((259 - x0).min(256), (257 - y0).min(256)));
+                    for (index, value) in values.iter().enumerate() {
+                        let (x, y) = (x0 + index as u32 % width, y0 + index as u32 / width);
+                        let offset = ((y * 259 + x) * bands as u32 + band) as usize * 2;
+                        assert_eq!(
+                            *value,
+                            u16::from_ne_bytes([samples[offset], samples[offset + 1]])
+                        );
+                    }
+                }
+            }
             for level in fs::read_dir(&actual_tiles).unwrap() {
                 let level = level.unwrap();
                 if !level.file_type().unwrap().is_dir() {
@@ -1138,6 +1177,10 @@ mod tests {
                     let expected_tile = expected_tiles
                         .join(level.file_name())
                         .join(tile.file_name());
+                    if bits == 16 {
+                        // Every generated level stays a 16-bit grayscale PNG.
+                        u16_samples(&tile.path());
+                    }
                     let a = VipsImage::new_from_file(tile.path().to_str().unwrap()).unwrap();
                     let b = VipsImage::new_from_file(expected_tile.to_str().unwrap()).unwrap();
                     assert_eq!(
@@ -1153,6 +1196,54 @@ mod tests {
                 }
             }
         }
+    }
+
+    fn u16_samples(path: &Path) -> (u32, u32, Vec<u16>) {
+        let body = crate::backend::assets::u16_body(&fs::read(path).unwrap(), |_, _| true)
+            .unwrap_or_else(|error| panic!("{}: {error}", path.display()));
+        let dimension = |at: usize| u32::from_le_bytes(body[at..at + 4].try_into().unwrap());
+        let samples = body[8..]
+            .as_chunks::<2>()
+            .0
+            .iter()
+            .map(|sample| u16::from_le_bytes(*sample))
+            .collect();
+        (dimension(0), dimension(4), samples)
+    }
+
+    fn constant_ushort_pyramid_is_exact_at_every_level(worker: &mut Worker, directory: &Path) {
+        // A constant whose low byte differs from its high byte exposes any
+        // 16-to-8-bit cast or rescaling at a reduced level.
+        let samples = 0x1234_u16.to_ne_bytes().repeat(300 * 260);
+        let image = VipsImage::new_from_memory_copy(&samples, 300, 260, 1, ops::BandFormat::Ushort)
+            .unwrap();
+        let source = directory.join("constant.tif");
+        reinterpret(&image, ops::Interpretation::Grey16)
+            .unwrap()
+            .image_write_to_file(source.to_str().unwrap())
+            .unwrap();
+        let output = directory.join("constant");
+        worker
+            .process(Request::ChannelPyramid {
+                input: format!("{}[page=0,n=1,access=sequential]", source.display()),
+                output: output.to_str().unwrap().into(),
+                band: 0,
+                ushort: true,
+            })
+            .unwrap();
+        let mut levels = 0;
+        for level in fs::read_dir(directory.join("constant_files")).unwrap() {
+            let level = level.unwrap();
+            if !level.file_type().unwrap().is_dir() {
+                continue;
+            }
+            levels += 1;
+            for tile in fs::read_dir(level.path()).unwrap() {
+                let (_, _, values) = u16_samples(&tile.unwrap().path());
+                assert!(values.iter().all(|value| *value == 0x1234));
+            }
+        }
+        assert_eq!(levels, crate::backend::assets::max_level(300, 260) + 1);
     }
 
     fn rgb_direct_pyramid_matches(worker: &mut Worker, directory: &Path, source: &str) {

@@ -5,34 +5,74 @@ import { component, splitChannels } from "./display.ts";
 import type { ImageState } from "./image";
 
 export const planeType = "aperturePlanes";
-export type Planes = { width: number; height: number; planes: Uint8Array[] };
+export type Planes = {
+  width: number;
+  height: number;
+  bits: 8 | 16;
+  planes: (Uint8Array | Uint16Array)[];
+};
 type ColorSource = OpenSeadragon.TileSourceOptions & {
   getTileUrl: (level: number, x: number, y: number) => string;
   apertureChannelCount?: number;
   apertureChannelMode?: boolean;
 };
 
+export type ColorRoute = {
+  channel: number;
+  minimum: number;
+  maximum: number;
+  brightness: number;
+  /** Output color components, 0–255. */
+  color: number[];
+};
+
+/** Valid connections from existing channels, in the form both renderers use. */
+export function colorRoutes(
+  settings: ColorSettings,
+  count: number,
+): ColorRoute[] {
+  return settings.connections.flatMap((route) => {
+    const channel = Number(route.source);
+    const hex = settings.colors[route.color];
+    if (
+      !Number.isInteger(channel) ||
+      channel < 0 ||
+      channel >= count ||
+      !/^#[0-9a-f]{6}$/i.test(hex ?? "")
+    )
+      return [];
+    const color = [1, 3, 5].map((start) =>
+      parseInt(hex.slice(start, start + 2), 16),
+    );
+    const { minimum, maximum, brightness } = route;
+    return [{ channel, minimum, maximum, brightness, color }];
+  });
+}
+
 /** Routes add after their own transfer function, then clamp once at output. */
 export function composeColorPixels(
-  planes: readonly Uint8Array[],
+  planes: readonly ArrayLike<number>[],
   settings: ColorSettings,
   alpha?: Uint8Array,
 ) {
   const size = planes[0]?.length ?? 0;
   if (planes.some((plane) => plane.length !== size))
     throw new Error("Channel tile dimensions differ.");
-  const lookup = colorLookup(planes.length, settings);
+  const routes = colorRoutes(settings, planes.length);
   const output = new Uint8ClampedArray(size * 4);
   for (let pixel = 0; pixel < size; pixel++) {
     let red = 0,
       green = 0,
       blue = 0;
-    for (let channel = 0; channel < planes.length; channel++) {
-      const at = planes[channel][pixel] * 3;
-      const table = lookup[channel];
-      red += table[at];
-      green += table[at + 1];
-      blue += table[at + 2];
+    for (const route of routes) {
+      // Same analytic transfer as the GPU shader, in source units.
+      const intensity = colorConnectionValue(
+        planes[route.channel][pixel],
+        route,
+      );
+      red += intensity * route.color[0];
+      green += intensity * route.color[1];
+      blue += intensity * route.color[2];
     }
     const at = pixel * 4;
     output[at] = red;
@@ -41,25 +81,6 @@ export function composeColorPixels(
     output[at + 3] = alpha?.[pixel] ?? 255;
   }
   return output;
-}
-
-/** Keep route clipping ahead of summation, including values above 255. */
-export function colorLookup(count: number, settings: ColorSettings) {
-  const lookup = Array.from({ length: count }, () => new Float64Array(256 * 3));
-  for (const route of settings.connections) {
-    const table = lookup[Number(route.source)];
-    const hex = settings.colors[route.color];
-    if (!table || !/^#[0-9a-f]{6}$/i.test(hex ?? "")) continue;
-    const color = [1, 3, 5].map((start) =>
-      parseInt(hex.slice(start, start + 2), 16),
-    );
-    for (let value = 0; value < 256; value++) {
-      const intensity = colorConnectionValue(value, route);
-      for (let component = 0; component < 3; component++)
-        table[value * 3 + component] += intensity * color[component];
-    }
-  }
-  return lookup;
 }
 
 function rendered(planes: Planes, settings: ColorSettings, alpha?: Uint8Array) {
@@ -99,10 +120,24 @@ function identity(settings: ColorSettings, count: number) {
   );
 }
 
-async function channelPlane(url: string, signal: AbortSignal) {
+/** Parse a `.u16` body: u32 LE width, u32 LE height, then u16 LE samples. */
+export function parseU16Plane(buffer: ArrayBuffer) {
+  const error = new Error("Channel tile has an unexpected size.");
+  if (buffer.byteLength < 8) throw error;
+  const header = new DataView(buffer, 0, 8);
+  const width = header.getUint32(0, true);
+  const height = header.getUint32(4, true);
+  if (!width || !height || buffer.byteLength !== 8 + 2 * width * height)
+    throw error;
+  // Supported desktop targets are little-endian, so samples need no swapping.
+  return { width, height, plane: new Uint16Array(buffer, 8, width * height) };
+}
+
+async function channelPlane(url: string, signal: AbortSignal, bits: 8 | 16) {
   const response = await fetch(url, { signal });
   if (!response.ok)
     throw new Error(`Channel tile failed (${response.status}).`);
+  if (bits === 16) return parseU16Plane(await response.arrayBuffer());
   const bitmap = await createImageBitmap(await response.blob(), {
     colorSpaceConversion: "none",
   });
@@ -163,7 +198,7 @@ export function bindColorRenderer(
           await event.getData("context2d");
         const { width, height } = context.canvas;
         const rgba = context.getImageData(0, 0, width, height).data;
-        data = { width, height, planes: splitChannels(rgba, count) };
+        data = { width, height, bits: 8, planes: splitChannels(rgba, count) };
         alpha = component(rgba, 3);
       }
       if (
@@ -227,8 +262,10 @@ export function bindColorRenderer(
         apertureChannelMode: image.channelMode ?? false,
       };
       if (!image.channelMode || !count) return wrapped;
+      const bits = image.sampleBits === 16 ? 16 : 8;
+      const extension = bits === 16 ? "u16" : "png";
       const getTileUrl = (level: number, x: number, y: number) =>
-        `${baseUrl}/channels/0/${isPreview ? "preview.png" : `tiles/${level}/${x}_${y}.png`}`;
+        `${baseUrl}/channels/0/${isPreview ? `preview.${extension}` : `tiles/${level}/${x}_${y}.${extension}`}`;
       return {
         ...wrapped,
         getTileUrl,
@@ -252,6 +289,7 @@ export function bindColorRenderer(
                           `/channels/${first + offset}/`,
                         ),
                         controller.signal,
+                        bits,
                       ),
                   ),
                 )),
@@ -266,9 +304,10 @@ export function bindColorRenderer(
               )
             )
               throw new Error("Channel tile dimensions differ.");
-            const data = {
+            const data: Planes = {
               width,
               height,
+              bits,
               planes: channels.map((channel) => channel.plane),
             };
             if (isPreview) onPreviewPlanes?.(image.id, data);

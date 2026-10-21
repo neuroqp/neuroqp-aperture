@@ -21,7 +21,6 @@ export const dimensionPanelMarkup = `
     </div>
     <p id="dimension-projection-status" class="dimension-scope" role="status" hidden></p>
     <p id="dimension-calibration" class="dimension-scope" hidden></p>
-    <p id="dimension-display" class="dimension-scope" hidden>16-bit display ranges adapt to each frame and channel. Brightness across frames is not quantitative.</p>
     <p id="dimension-scope" class="dimension-scope" hidden>Browsing only. Annotation editing and saving are unavailable.</p>
   </section>`;
 
@@ -106,7 +105,6 @@ export function bindDimensionNavigation(
           ? "Maximum intensity across Z"
           : "Maximum intensity across Time";
     get("dimension-scope").hidden = !image?.readOnly;
-    get("dimension-display").hidden = !image?.displayRanges?.length;
     const calibration = image?.calibration;
     const calibrationText = [
       calibration?.pixelWidthUm

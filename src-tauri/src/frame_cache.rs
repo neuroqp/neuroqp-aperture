@@ -268,8 +268,8 @@ impl Cache {
         self.convert_display(output, selection, metadata, frame, background, cancel)
     }
 
-    /// Keep the raw frame's lease while normalizing its separate display copy,
-    /// then cache it again unless the source changed.
+    /// Keep the raw frame's lease while writing its display TIFF, then cache it
+    /// again unless the source changed.
     fn convert_display(
         &mut self,
         output: &Path,
@@ -279,13 +279,8 @@ impl Cache {
         background: bool,
         cancel: Option<&AtomicBool>,
     ) -> Result<ExtractedFrame, String> {
-        let display_bytes = if frame.raw.bytes == 2 {
-            frame.raw.pixels.len() as u64 / 2
-        } else {
-            0
-        };
-        let result = match self.reserve(display_bytes + FRAME_OVERHEAD + metadata_bytes(&metadata), background)? {
-            Some(_display) => frames::write_frame(&frame.raw, metadata, output, true, cancel),
+        let result = match self.reserve(FRAME_OVERHEAD + metadata_bytes(&metadata), background)? {
+            Some(_display) => frames::write_frame(&frame.raw, metadata, output, cancel),
             None => Err(format!("{} display conversion does not fit the application memory budget. Increase the limit in Settings.", self.format)),
         };
         let source = self.check_source();
@@ -399,10 +394,7 @@ impl Cache {
         }
         self.check_source()?;
         frames::check_cancel(Some(cancel))?;
-        let display_bytes = if bytes == 2 { frame_bytes / 2 } else { 0 };
-        let _display = self.reserve(display_bytes + FRAME_OVERHEAD, false)?
-            .ok_or_else(|| format!("{} projection display conversion does not fit the application memory budget. Increase the limit in Settings.", self.format))?;
-        let result = frames::write_frame(&accumulator, metadata, output, true, Some(cancel));
+        let result = frames::write_frame(&accumulator, metadata, output, Some(cancel));
         if let Err(error) = self
             .check_source()
             .and_then(|_| frames::check_cancel(Some(cancel)))
@@ -649,11 +641,9 @@ mod tests {
         let output = temp.join("display.tif");
         let description = cache.extract_display(&output, first, false, None).unwrap();
         assert_eq!(description.display_ranges, [[1, 3], [2, 4]]);
-        assert_eq!(strip(&output), [0, 0, 255, 255]);
-        let original: Vec<u8> = [1u16, 2, 3, 4]
-            .into_iter()
-            .flat_map(u16::to_le_bytes)
-            .collect();
+        assert_eq!(description.sample_bits, 16);
+        let original = le(&[1, 2, 3, 4]);
+        assert_eq!(strip(&output), original);
         assert_eq!(cache.frames[0].1.raw.pixels, original);
         assert_eq!(cache.retained_bytes(), 8);
         assert_eq!(
@@ -709,6 +699,10 @@ mod tests {
         std::fs::remove_dir_all(temp).unwrap();
     }
 
+    fn le(samples: &[u16]) -> Vec<u8> {
+        samples.iter().flat_map(|v| v.to_le_bytes()).collect()
+    }
+
     fn projection_source() -> Vec<u8> {
         synthetic_samples(
             16,
@@ -727,7 +721,7 @@ mod tests {
     }
 
     #[test]
-    fn projections_max_original_unsigned_samples_before_normalizing_and_keep_cached_frames() {
+    fn projections_keep_original_unsigned_maxima_and_cached_frames() {
         let temp = temporary();
         let source = temp.join("projections.nd2");
         let bytes = projection_source();
@@ -747,14 +741,14 @@ mod tests {
                     ..Selection::default()
                 },
                 [[50000, 60000], [20, 30]],
-                [255, 255, 0, 0],
+                [60000, 30, 50000, 20],
                 2,
             ),
             (
                 Projection::Time,
                 Selection::default(),
                 [[1000, 65000], [100, 200]],
-                [0, 0, 255, 255],
+                [1000, 100, 65000, 200],
                 2,
             ),
             (
@@ -765,7 +759,7 @@ mod tests {
                     ..Selection::default()
                 },
                 [[62000, 65000], [150, 200]],
-                [0, 0, 255, 255],
+                [62000, 150, 65000, 200],
                 4,
             ),
             (
@@ -775,7 +769,7 @@ mod tests {
                     ..Selection::default()
                 },
                 [[700, 800], [70, 80]],
-                [0, 0, 255, 255],
+                [700, 70, 800, 80],
                 4,
             ),
         ]
@@ -790,7 +784,7 @@ mod tests {
                 })
                 .unwrap();
             assert_eq!(result.display_ranges, ranges);
-            assert_eq!(strip(&output), pixels);
+            assert_eq!(strip(&output), le(&pixels));
             assert_eq!(result.channels.len(), 2);
             assert_eq!((result.dimensions.z, result.dimensions.time), (2, 2));
             let canonical = projection.canonical(selection);
@@ -809,8 +803,8 @@ mod tests {
             assert_eq!(cache.cached_count(), 1);
             assert_eq!(cache.frames[0].1.raw.pixels.as_ptr(), raw_pointer);
         }
-        // Per-frame normalization produces [0,0,255,255] and [255,255,0,0].
-        // Their maximum would be white everywhere; original-intensity Z max is not.
+        // Maxima use original intensities; per-frame normalization would make
+        // [0,0,255,255] and [255,255,0,0], whose maximum is white everywhere.
         assert_eq!(std::fs::read(&source).unwrap(), bytes);
         drop(cache);
         assert_eq!(budget.status().unwrap().used_bytes, 0);
@@ -847,11 +841,13 @@ mod tests {
                     |_| {},
                 )
                 .unwrap();
+            let maxima = [40, 100, 60, 50, 70, 30];
+            assert!(result.rgb);
             if bits == 8 {
-                assert_eq!(strip(&output), [40, 100, 60, 50, 70, 30]);
+                assert_eq!(strip(&output), maxima.map(|v: u16| v as u8));
                 assert!(result.display_ranges.is_empty());
             } else {
-                assert_eq!(strip(&output), [36, 255, 109, 73, 146, 0]);
+                assert_eq!(strip(&output), le(&maxima));
                 assert_eq!(result.display_ranges, [[30, 100]; 3]);
             }
             assert_eq!(
@@ -898,7 +894,7 @@ mod tests {
             )
             .unwrap();
         assert_eq!(result.display_ranges, [[62000, 65000], [150, 200]]);
-        assert_eq!(strip(&output), [0, 0, 255, 255]);
+        assert_eq!(strip(&output), le(&[62000, 150, 65000, 200]));
         assert_eq!(cache.cached_count(), 0);
         let status = budget.status().unwrap();
         assert!(status.used_bytes <= status.limit_bytes);
@@ -949,7 +945,7 @@ mod tests {
                 |_| {},
             )
             .unwrap();
-        assert_eq!(strip(&output), [255, 255, 0, 0]);
+        assert_eq!(strip(&output), le(&[60000, 30, 50000, 20]));
         let ordinary = temp.join("ordinary-cancelled.tif");
         assert!(cache
             .extract_projection(
@@ -1263,7 +1259,7 @@ mod tests {
             .extract_display(&output, Selection::default(), false, None)
             .unwrap();
         assert_eq!(result.display_ranges, [[1, 3], [2, 4]]);
-        assert_eq!(strip(&output), [0, 0, 255, 255]);
+        assert_eq!(strip(&output), le(&[1, 2, 3, 4]));
         assert_eq!(std::fs::read(&source).unwrap(), bytes);
         drop(cache);
         assert_eq!(budget.status().unwrap().used_bytes, 0);

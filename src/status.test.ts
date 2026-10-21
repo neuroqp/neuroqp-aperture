@@ -14,6 +14,8 @@ const image = (patch: Partial<ImageState> = {}): ImageState => ({
   tilesReady: true,
   progress: null,
   error: null,
+  sampleBits: 8,
+  rgb: false,
   ...patch,
 });
 const status = (patch: Partial<StatusInput> = {}) =>

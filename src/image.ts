@@ -12,8 +12,11 @@ export type ImageState = {
   error: string | null;
   detail?: string;
   orientation?: number;
-  channels?: { name: string; color: string }[];
+  channels?: { name: string; color: string; domain: [number, number] }[];
   channelMode?: boolean;
+  sampleBits: 8 | 16;
+  /** The three channels are R, G, B samples of one acquisition. */
+  rgb: boolean;
   readOnly?: boolean;
   projection?: ProjectionMode;
   displayRanges?: [number, number][];
@@ -193,9 +196,9 @@ export class PlaneNavigation {
   }
 }
 
-/** Keep the detail cache near 32 MiB, allowing source planes and CPU composites. */
-export function imageTileCacheCount(channels = 3) {
-  const tileBytes = 256 ** 2 * (Math.max(1, channels) * 2 + 8);
+/** Keep the detail cache near 32 MiB, allowing source planes at their sample width and CPU composites. */
+export function imageTileCacheCount(channels = 3, bytesPerSample = 1) {
+  const tileBytes = 256 ** 2 * (Math.max(1, channels) * bytesPerSample * 2 + 8);
   return Math.max(1, Math.min(128, Math.floor((32 * 1024 ** 2) / tileBytes)));
 }
 
@@ -217,7 +220,7 @@ export function tileFailure(
     !url.startsWith(`${currentUrl}/`)
   )
     return null;
-  return /\/preview\.(jpg|png)$/.test(url)
+  return /\/preview\.(jpg|png|u16)$/.test(url)
     ? "Could not display the image preview."
     : "Detail could not load. Preview remains available.";
 }

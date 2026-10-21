@@ -270,3 +270,130 @@ test("color layouts initialize after empty metadata and reset when channel ident
       false,
     );
 });
+
+const wide = [0, 65535] as const;
+const histogram = (...values: number[]) => {
+  const bins = new Uint32Array(65536);
+  for (const value of values) bins[value]++;
+  return bins;
+};
+
+test("16-bit connections use source units clamped to their channel domain", () => {
+  const settings = defaultColorSettings([
+    { id: "0", name: "DAPI", domain: wide },
+    { id: "1", name: "Phase" },
+  ]);
+  assert.deepEqual(
+    settings.connections.map(({ minimum, maximum }) => [minimum, maximum]),
+    [
+      [0, 65535],
+      [0, 255],
+    ],
+  );
+  const narrow = setColorConnectionRange(settings, 1, {
+    minimum: 1000,
+    maximum: 1001,
+  });
+  assert.deepEqual(
+    [narrow.connections[0].minimum, narrow.connections[0].maximum],
+    [1000, 1001],
+  );
+  assert.equal(
+    adjustColorConnection(narrow, 1, "maximum", 99999).connections[0].maximum,
+    65535,
+  );
+  assert.equal(
+    adjustColorConnection(narrow, 1, "minimum", 2000).connections[0].minimum,
+    1000,
+  );
+  assert.equal(
+    adjustColorConnection(narrow, 2, "maximum", 4000).connections[1].maximum,
+    255,
+  );
+  const clamped = setColorConnectionRange(settings, 1, {
+    minimum: 70000,
+    maximum: 80000,
+  }).connections[0];
+  assert.deepEqual([clamped.minimum, clamped.maximum], [65534, 65535]);
+  const dimmed = adjustColorConnection(narrow, 1, "brightness", 40);
+  assert.deepEqual(resetColorConnection(dimmed, 1).connections[0], {
+    ...narrow.connections[0],
+    minimum: 0,
+    maximum: 65535,
+    brightness: 100,
+  });
+  const added = connectColor(narrow, "0", "Magenta").connections.at(-1)!;
+  assert.deepEqual([added.minimum, added.maximum], [0, 65535]);
+  assert.deepEqual(copyColorSettings(narrow).domains, narrow.domains);
+});
+
+test("16-bit initial ranges use occupied samples, share RGB ranges and widen constant planes", async () => {
+  const { initialColorRanges } = await import("./color-settings.ts");
+  const channels = [
+    { id: "0", name: "Red", color: "#ff0000", domain: wide },
+    { id: "1", name: "Green", color: "#00ff00", domain: wide },
+    { id: "2", name: "Blue", color: "#0000ff", domain: wide },
+  ];
+  const histograms = [
+    histogram(1200, 1500),
+    histogram(900, 1100),
+    histogram(65535),
+  ];
+  const ranges = (rgb: boolean) =>
+    initialColorRanges(
+      defaultColorSettings(channels),
+      channels,
+      histograms,
+      rgb,
+    ).connections.map(({ minimum, maximum, brightness }) => [
+      minimum,
+      maximum,
+      brightness,
+    ]);
+  assert.deepEqual(ranges(false), [
+    [1200, 1500, 100],
+    [900, 1100, 100],
+    [65534, 65535, 100],
+  ]);
+  assert.deepEqual(ranges(true), [
+    [900, 65535, 100],
+    [900, 65535, 100],
+    [900, 65535, 100],
+  ]);
+  const constant = initialColorRanges(
+    defaultColorSettings(channels.slice(0, 1)),
+    channels.slice(0, 1),
+    [histogram(300, 300)],
+    false,
+  ).connections[0];
+  assert.deepEqual([constant.minimum, constant.maximum], [300, 301]);
+  const missing = initialColorRanges(
+    defaultColorSettings(channels.slice(0, 1)),
+    channels.slice(0, 1),
+    [null],
+    false,
+  ).connections[0];
+  assert.deepEqual([missing.minimum, missing.maximum], [0, 65535]);
+});
+
+test("compatible frames, which keep their ranges, require identical channel domains", async () => {
+  const { sameColorChannels } = await import("./color-settings.ts");
+  const channels = [{ id: "0", name: "DAPI", domain: wide }];
+  assert.equal(
+    sameColorChannels(channels, [
+      { id: "0", name: "DAPI", domain: [0, 65535] },
+    ]),
+    true,
+  );
+  assert.equal(
+    sameColorChannels(channels, [{ ...channels[0], domain: [0, 255] }]),
+    false,
+  );
+  assert.equal(
+    sameColorChannels(
+      [{ id: "0", name: "DAPI" }],
+      [{ id: "0", name: "DAPI", domain: [0, 255] }],
+    ),
+    true,
+  );
+});

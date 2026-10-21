@@ -34,11 +34,11 @@ stays separate; unprojected dimensions and Channel remain available. A projected
 axis shows “Max of N” and disables its range. Clear the toggles to return to the
 first slice of each projected axis. Viewport and compatible Color settings survive.
 
-Maxima are calculated from original unsigned samples before display normalization.
+Maxima are calculated from original unsigned samples and displayed unchanged.
 The reducer reserves a full-depth accumulator, reads one input frame at a time,
 borrows cached inputs, and drops uncached inputs after reducing them. Additional projection workspace
 does not grow with the number of Z/time frames. Cancellation is checked between
-frames and during reduction, normalization and writing; one dependency decode
+frames and during reduction and writing; one dependency decode
 still finishes before yielding. Finished projections have separate canonical
 cache keys and reuse the disk cache. Automatic projection preloading is disabled.
 These are display projections, not scientific exports.
@@ -56,14 +56,13 @@ Cache identity includes the source fingerprint and selected coordinates. Complet
 display caches and preloaded previews are reused within the existing bounded disk cache. Changing the
 displayed channel does not reread ND2 or regenerate tiles.
 
-For 16-bit data, taking only the high byte would erase low-valued fluorescence.
-The disposable display cache instead maps each selected scalar channel's minimum
-and maximum to 0–255. RGB uses one shared range. Constant zero planes stay black;
-constant nonzero planes become white. The original ranges remain in image state
-and the cache manifest. Eight-bit samples keep their values. This is display
-normalization; it does not modify the ND2 source or provide a scientific export.
-Brightness across frames or channels is not quantitatively comparable after this
-automatic normalization.
+The disposable display TIFF keeps the original samples: 16-bit frames become
+lossless 16-bit display planes, and 8-bit samples keep their values. Color
+ranges use source units (0–65535 for 16-bit). The sampled minimum and maximum of
+each selected frame remain in image state and the cache manifest; RGB shares one
+range. Nothing is normalized per frame, so brightness stays comparable across
+frames and channels. The display cache does not modify the ND2 source or provide
+a scientific export.
 
 Settings > General sets the image cache and decoding budget, default 4 GiB,
 shared across all Aperture windows. Retained raw frames, parser/codec workspaces,
@@ -97,8 +96,8 @@ application association was added.
 ## Validation and reproducibility
 
 Mandatory Rust tests generate small ND2 containers in memory. They check exact
-P/Z/T/channel addressing, unsigned 8/16-bit values, RGB sample order, display
-normalization, malformed actual chunk lengths, unchanged source bytes, backend
+P/Z/T/channel addressing, unsigned 8/16-bit values, RGB sample order, lossless
+16-bit display samples, malformed actual chunk lengths, unchanged source bytes, backend
 navigation, invalid selections and coordinate-specific cache reuse. Budget tests
 cover shared admission, shrinking/lowering, crash cleanup, pressure hysteresis,
 raw-cache eviction, source replacement and chunk-map validation. Native memory
@@ -140,9 +139,8 @@ is saved locally as `rgb.nd2`.
 
 ## Next decisions
 
-Prioritize persistent source-intensity display ranges across frames, large-frame
-memory/latency measurements on representative laboratory acquisitions, and a
-dimension-aware annotation format before calling this complete ND2 support.
+Prioritize large-frame memory/latency measurements on representative
+laboratory acquisitions and a dimension-aware annotation format before calling this complete ND2 support.
 Broader vendor metadata, ROIs and irregular experiment loops should follow actual
 sample requirements. The dependency currently enables codecs for other formats
 through its supporting codec crate; an upstream feature split could reduce this

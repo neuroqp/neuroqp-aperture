@@ -2,7 +2,7 @@ import assert from "node:assert/strict";
 import type OpenSeadragon from "openseadragon";
 import test from "node:test";
 import { composeColorPixels } from "./color-renderer.ts";
-import { createGpuColorDrawer, gpuColorLookup } from "./gpu-color-drawer.ts";
+import { createGpuColorDrawer, routeTexture } from "./gpu-color-drawer.ts";
 import {
   colorPresets,
   type ColorConnection,
@@ -17,28 +17,81 @@ const route = (
   brightness = 100,
 ): ColorConnection => ({ id: 1, source, color, minimum, maximum, brightness });
 
-test("GPU lookup keeps clipped route sums above one until final composition", () => {
+type Packed = ReturnType<typeof routeTexture>;
+// Mirror the shader's texelFetch(ivec2(texel % width, texel / width)).
+const texel = ({ data, width }: Packed, index: number) => {
+  const x = index % width,
+    y = Math.floor(index / width);
+  return [...data.subarray((y * width + x) * 4, (y * width + x) * 4 + 4)];
+};
+// Float32 emulation of the fragment shader's integer-channel path.
+function shade(packed: Packed, planes: ArrayLike<number>[], pixel: number) {
+  const f = Math.fround;
+  const sum = [0, 0, 0];
+  for (let route = 0; route < packed.count; route++) {
+    const [channel, minimum, maximum, brightness] = texel(packed, 2 * route);
+    const color = texel(packed, 2 * route + 1);
+    if (channel >= planes.length) continue;
+    const ramp = f(f(planes[channel][pixel] - minimum) / f(maximum - minimum));
+    const intensity = f(Math.max(0, Math.min(1, ramp)) * brightness);
+    for (let component = 0; component < 3; component++)
+      sum[component] = f(sum[component] + f(intensity * color[component]));
+  }
+  return sum.map((value) => Math.round(Math.max(0, Math.min(1, value)) * 255));
+}
+
+test("route texture packs every route of 32 inputs × 39 outputs in two-texel rows", () => {
+  const colors: Record<string, string> = { ...colorPresets };
+  for (let channel = 0; channel < 32; channel++)
+    colors[`channel:${channel}`] =
+      `#${(channel * 7 + 1).toString(16).padStart(2, "0")}40c0`;
+  const names = Object.keys(colors);
   const settings: ColorSettings = {
-    colors: { ...colorPresets },
-    connections: [
-      route("0", "Red", 50, 150),
-      route("0", "Yellow", 0, 200),
-      route("31", "Blue", 128, 255),
-    ],
+    colors,
+    connections: Array.from({ length: 32 * names.length }, (_, index) => ({
+      ...route(
+        String(index % 32),
+        names[Math.floor(index / 32)],
+        index % 1000,
+        1000 + index,
+        index % 101,
+      ),
+      id: index + 1,
+    })),
   };
-  const lookup = gpuColorLookup(settings);
-  assert.equal(lookup.length, 256 * 32 * 4);
-  assert.equal(lookup[255 * 4], 2);
-  assert.equal(lookup[255 * 4 + 1], 1);
-  assert.equal(lookup[255 * 4 + 2], 0);
-  assert.equal(lookup[0], 0);
-  assert.equal(lookup[100 * 4], 1);
-  assert.equal(lookup[100 * 4 + 1], 0.5);
-  assert.equal(lookup[(31 * 256 + 255) * 4 + 2], 1);
-  assert.equal(lookup[31 * 256 * 4 + 2], 0);
+  assert.equal(settings.connections.length, 1248);
+  for (const width of [1024, 5]) {
+    const packed = routeTexture(settings, width);
+    assert.equal(packed.count, 1248);
+    assert.equal(packed.height, Math.ceil(2496 / width));
+    assert.equal(packed.data.length, width * packed.height * 4);
+    settings.connections.forEach((connection, index) => {
+      const hex = colors[connection.color];
+      assert.deepEqual(texel(packed, 2 * index), [
+        Number(connection.source),
+        connection.minimum,
+        connection.maximum,
+        Math.fround(connection.brightness / 100),
+      ]);
+      assert.deepEqual(
+        texel(packed, 2 * index + 1),
+        [1, 3, 5]
+          .map((at) => Math.fround(parseInt(hex.slice(at, at + 2), 16) / 255))
+          .concat(0),
+      );
+    });
+  }
+  // With an odd width, route 2 ends row 0 and continues at the start of row 1.
+  const narrow = routeTexture(settings, 5);
+  const at = (x: number, y: number) => [
+    ...narrow.data.subarray((y * 5 + x) * 4, (y * 5 + x) * 4 + 4),
+  ];
+  assert.deepEqual(at(4, 0), [2, 2, 1002, Math.fround(0.02)]);
+  assert.deepEqual(at(0, 1), [1, 0, 0, 0]);
+  assert.equal(routeTexture({ colors, connections: [] }, 1024).height, 1);
 });
 
-test("GPU float lookup agrees with CPU for all intensities and 32-channel routes", () => {
+test("GPU route math agrees with the CPU composite for 32 channels of 8- and 16-bit samples", () => {
   const settings: ColorSettings = {
     colors: { ...colorPresets, custom: "#1d9e78" },
     connections: Array.from({ length: 32 }, (_, channel) =>
@@ -55,40 +108,42 @@ test("GPU float lookup agrees with CPU for all intensities and 32-channel routes
     route("4", "custom", 35, 190),
     route("4", "Blue", 110, 111),
   );
-  const planes = Array.from({ length: 32 }, (_, channel) =>
-    Uint8Array.from(
-      { length: 256 },
-      (_, value) => (value + channel * 23) % 256,
-    ),
-  );
-  const before = planes.map((plane) => plane.slice());
-  const expected = composeColorPixels(planes, settings);
-  const lookup = gpuColorLookup(settings);
-  for (let value = 0; value < 256; value++) {
-    for (let component = 0; component < 3; component++) {
-      let sum = 0;
-      for (let channel = 0; channel < 32; channel++)
-        sum = Math.fround(
-          sum +
-            lookup[(channel * 256 + planes[channel][value]) * 4 + component],
+  const packed = routeTexture(settings, 1024);
+  for (const scale of [1, 257]) {
+    const planes = Array.from({ length: 32 }, (_, channel) =>
+      Uint16Array.from(
+        { length: 256 },
+        (_, value) => ((value + channel * 23) % 256) * scale,
+      ),
+    );
+    const expected = composeColorPixels(planes, settings);
+    for (let pixel = 0; pixel < 256; pixel++) {
+      const actual = shade(packed, planes, pixel);
+      for (let component = 0; component < 3; component++)
+        assert.ok(
+          Math.abs(actual[component] - expected[pixel * 4 + component]) <= 1,
         );
-      const actual = Math.round(Math.max(0, Math.min(1, sum)) * 255);
-      assert.ok(Math.abs(actual - expected[value * 4 + component]) <= 1);
     }
   }
-  assert.deepEqual(planes, before);
 });
 
-test("changing settings builds only a new small lookup, preserving disconnected black", () => {
+test("adjacent 16-bit values stay distinct at a one-unit range on GPU and CPU", () => {
   const settings: ColorSettings = {
     colors: { ...colorPresets },
-    connections: [route("0", "Gray")],
+    connections: [route("0", "Gray", 1000, 1001)],
   };
-  const original = gpuColorLookup(settings, 1);
-  settings.connections = [];
-  assert.ok(gpuColorLookup(settings, 1).every((value) => value === 0));
-  assert.equal(original[255 * 4], 1);
-  assert.equal(original[128 * 4 + 1], Math.fround(128 / 255));
+  const plane = Uint16Array.of(0, 999, 1000, 1001, 1002, 65535);
+  const packed = routeTexture(settings, 1024);
+  assert.deepEqual(
+    Array.from(plane, (_, pixel) => shade(packed, [plane], pixel)[0]),
+    [0, 0, 0, 255, 255, 255],
+  );
+  assert.deepEqual(
+    Array.from(
+      composeColorPixels([plane], settings).filter((_, at) => at % 4 === 0),
+    ),
+    [0, 0, 0, 255, 255, 255],
+  );
 });
 
 test("a context failure after OSD's support probe falls back without losing cached data", async () => {
@@ -154,6 +209,8 @@ function replayHarness() {
   const calls = {
     lookups: [] as Float32Array[],
     sourceUploads: 0,
+    storage: [] as unknown[][],
+    samples: [] as unknown[][],
     selections: 0,
     draws: 0,
     forceRedraws: 0,
@@ -165,9 +222,19 @@ function replayHarness() {
       getProgramParameter: () => true,
       getUniformLocation: (_: unknown, name: string) => name,
       getAttribLocation: () => 0,
+      getParameter: () => 4096,
+      R8UI: "R8UI",
+      R16UI: "R16UI",
+      RED_INTEGER: "RED_INTEGER",
+      UNSIGNED_BYTE: "UNSIGNED_BYTE",
+      UNSIGNED_SHORT: "UNSIGNED_SHORT",
       texSubImage2D: (...args: unknown[]) =>
         calls.lookups.push((args.at(-1) as Float32Array).slice()),
-      texSubImage3D: () => calls.sourceUploads++,
+      texStorage3D: (...args: unknown[]) => calls.storage.push(args),
+      texSubImage3D: (...args: unknown[]) => {
+        calls.sourceUploads++;
+        calls.samples.push(args);
+      },
       drawArrays: () => calls.draws++,
     },
     {
@@ -247,7 +314,7 @@ function replayHarness() {
   data = drawer.internalCacheCreate(
     {
       type: "aperturePlanes",
-      data: { width: 1, height: 1, planes: [new Uint8Array([128])] },
+      data: { width: 1, height: 1, bits: 8, planes: [new Uint8Array([128])] },
     } as unknown as OpenSeadragon.CacheRecord,
     {} as OpenSeadragon.Tile,
   );
@@ -299,7 +366,10 @@ test("cached recoloring coalesces edits and renders the newest state without til
   await Promise.resolve();
   assert.equal(calls.draws, 1);
   assert.equal(calls.lookups.length, 1);
-  assert.equal(calls.lookups[0][128 * 4], 0);
+  assert.deepEqual(
+    [...calls.lookups[0].subarray(0, 8)],
+    [0, 150, 200, 1, 1, 1, 1, 0],
+  );
   assert.equal(canvas.dataset.colorRevision, "2");
   assert.equal(calls.selections, 0);
   assert.equal(calls.sourceUploads, 0);
@@ -327,24 +397,7 @@ test("destroy cancels a queued color replay", async () => {
   assert.equal(calls.forceRedraws, 0);
 });
 
-test("GPU lookup scales clipped brightness before summing routes", () => {
-  const lookup = gpuColorLookup({
-    colors: { ...colorPresets },
-    connections: [
-      route("0", "Red", 50, 150, 50),
-      route("0", "Green", 0, 255, 0),
-      route("1", "Red", 0, 255, 25),
-    ],
-  });
-  assert.equal(lookup[0], 0);
-  assert.equal(lookup[100 * 4], 0.25);
-  assert.equal(lookup[150 * 4], 0.5);
-  assert.equal(lookup[255 * 4], 0.5);
-  assert.equal(lookup[255 * 4 + 1], 0);
-  assert.equal(lookup[(256 + 255) * 4], 0.25);
-});
-
-test("brightness refresh updates the GPU lookup without uploading source textures", async () => {
+test("brightness refresh updates GPU route data without uploading source textures", async () => {
   const { drawer, calls, settings } = replayHarness();
   settings({
     colors: { ...colorPresets },
@@ -353,8 +406,33 @@ test("brightness refresh updates the GPU lookup without uploading source texture
   drawer.refreshColors();
   await Promise.resolve();
   assert.equal(calls.draws, 1);
-  assert.equal(calls.lookups[0][255 * 4], 0.5);
+  assert.equal(calls.lookups[0][3], 0.5);
   assert.equal(calls.sourceUploads, 0);
   assert.equal(calls.selections, 0);
+  drawer.destroy();
+});
+
+test("channel tiles upload integer textures at their sample width", () => {
+  const { drawer, calls } = replayHarness();
+  calls.storage.length = calls.samples.length = 0;
+  const create = (bits: 8 | 16, plane: Uint8Array | Uint16Array) =>
+    drawer.internalCacheCreate(
+      {
+        type: "aperturePlanes",
+        data: { width: 3, height: 1, bits, planes: [plane] },
+      } as unknown as OpenSeadragon.CacheRecord,
+      {} as OpenSeadragon.Tile,
+    );
+  const wide = Uint16Array.of(1000, 1001, 65535);
+  assert.ok(create(16, wide));
+  assert.equal(calls.storage[0][2], "R16UI");
+  assert.deepEqual(calls.samples[0].slice(-3), [
+    "RED_INTEGER",
+    "UNSIGNED_SHORT",
+    wide,
+  ]);
+  assert.ok(create(8, Uint8Array.of(0, 1, 255)));
+  assert.equal(calls.storage[1][2], "R8UI");
+  assert.equal(calls.samples[1].at(-2), "UNSIGNED_BYTE");
   drawer.destroy();
 });

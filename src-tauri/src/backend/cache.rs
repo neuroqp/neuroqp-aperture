@@ -27,6 +27,8 @@ pub(super) struct CacheManifest {
     pub(super) orientation: u8,
     pub(super) channels: Vec<Channel>,
     pub(super) channel_mode: bool,
+    pub(super) sample_bits: u8,
+    pub(super) rgb: bool,
     pub(super) planes: Vec<Plane>,
     pub(super) native: Vec<NativeLevel>,
     #[serde(default)]
@@ -153,6 +155,8 @@ pub(super) fn write_manifest(job: &Job, dir: &Path) -> Result<(), String> {
         orientation: state.orientation,
         channels: state.channels,
         channel_mode: state.channel_mode,
+        sample_bits: state.sample_bits,
+        rgb: state.rgb,
         planes: job.planes.lock().unwrap().clone(),
         native: job.native.lock().unwrap().clone(),
         dimensions: state.dimensions,
@@ -183,6 +187,12 @@ pub(super) fn cached_manifest(job: &Job, dir: &Path) -> Option<CacheManifest> {
         || !(1..=8).contains(&manifest.orientation)
         || manifest.channels.is_empty()
         || manifest.channels.len() > channels::MAX_CHANNELS as usize
+        || !matches!(manifest.sample_bits, 8 | 16)
+        || (manifest.sample_bits == 16 && !manifest.channel_mode)
+        || manifest
+            .channels
+            .iter()
+            .any(|channel| channel.domain != channels::domain(manifest.sample_bits))
         || manifest.planes.len() != manifest.channels.len()
         || manifest
             .planes
@@ -537,15 +547,13 @@ mod tests {
             .unwrap()
             .clone();
         let manifest = fs::read(dir.join("manifest.json")).unwrap();
-        let preview_metadata = fs::metadata(dir.join("preview.jpg")).unwrap();
+        let preview = dir.join("channels/0/preview.png");
+        let preview_metadata = fs::metadata(&preview).unwrap();
         fs::remove_file(dir.join("manifest.json")).unwrap();
         backend.open(&source).unwrap();
         assert!(wait_ready(&backend).detail.contains("Reused"));
         assert_eq!(
-            fs::metadata(dir.join("preview.jpg"))
-                .unwrap()
-                .modified()
-                .unwrap(),
+            fs::metadata(&preview).unwrap().modified().unwrap(),
             preview_metadata.modified().unwrap()
         );
         assert!(dir.join("manifest.json").is_file());
@@ -583,7 +591,7 @@ mod tests {
         // Reenter this same job's state mutex from its callback.
         *callback_job.lock().unwrap() = Some(Arc::downgrade(&job));
         job.update(|state| state.detail = "Reused cache notification check".into());
-        fs::write(dir.join("preview.jpg"), b"broken preview").unwrap();
+        fs::write(&preview, b"broken preview").unwrap();
         backend.open(&source).unwrap();
         assert!(!wait_ready(&backend).detail.contains("Reused"));
         // Same path with a changed source cannot reuse its previous descriptor.

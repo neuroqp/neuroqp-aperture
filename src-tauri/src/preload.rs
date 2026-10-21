@@ -446,6 +446,8 @@ pub(crate) fn run(context: &LoadContext, foreground: &Arc<Job>) {
                     selection,
                     dimensions: metadata.dimensions,
                     channels: metadata.channels,
+                    sample_bits: metadata.sample_bits,
+                    rgb: metadata.rgb,
                     projection: Projection::None,
                 },
                 acquisition.clone(),
