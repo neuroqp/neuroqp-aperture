@@ -15,6 +15,7 @@ export type ImageState = {
   channels?: { name: string; color: string; domain: [number, number] }[];
   channelMode?: boolean;
   sampleBits: 8 | 16;
+  displayFallback?: boolean;
   /** The three channels are R, G, B samples of one acquisition. */
   rgb: boolean;
   readOnly?: boolean;

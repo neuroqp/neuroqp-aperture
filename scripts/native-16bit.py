@@ -1,11 +1,11 @@
 #!/usr/bin/env python3
 """Validate 16-bit display in an owned native Aperture session (stdlib WebDriver).
 
-Parent orchestration builds the app and starts tauri-driver with owned
-XDG_CACHE_HOME and TMPDIR. This script writes small deterministic fixtures to the
-ignored test-data/16bit/ (16-bit gray, RGB16, ImageJ 3-channel, 3-band multiband
-and an 8-bit RGB control), opens each through the real Open handler with only the
-chooser response substituted, and checks:
+Build the application, then run inside scripts/headless-session --driver 4446,
+which isolates cache/config directories. This script writes small deterministic
+fixtures to the ignored test-data/16bit/ (16-bit gray, RGB16, ImageJ 3-channel,
+3-band multiband and an 8-bit RGB control), opens each through the real Open
+handler with only the chooser response substituted, and checks:
 
 - `.u16` previews and full-resolution tiles equal the source samples exactly;
 - Color starts at the sampled source min/max (shared for RGB16), 0-255 for 8-bit;
@@ -26,6 +26,8 @@ import subprocess
 import time
 from http.client import RemoteDisconnected
 from urllib.request import Request, urlopen
+
+import compositor
 
 ROOT = Path(__file__).resolve().parents[1]
 TILE = 256
@@ -153,13 +155,15 @@ def fixtures(directory):
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument('binary', type=Path)
-    parser.add_argument('--driver-url', default='http://127.0.0.1:4446')
+    parser.add_argument('--driver-url', help='defaults to the session driver; must match it')
     parser.add_argument('--fixtures', type=Path, default=ROOT / 'test-data/16bit')
     parser.add_argument('--output', type=Path, default=ROOT / 'artifacts/16bit/native-16bit.json')
     parser.add_argument('--timeout', type=float, default=90)
     parser.add_argument('--renderer', choices=('gpu', 'cpu'), default='gpu',
                         help='Renderer of the first pass; the other renderer runs second for comparison.')
     args = parser.parse_args()
+    args.driver_url = compositor.driver_url(args.driver_url)
+    desktop = compositor.session()
     args.output = args.output.absolute()
     args.output.parent.mkdir(parents=True, exist_ok=True)
     binary = args.binary.resolve()
@@ -202,7 +206,7 @@ def main():
         return value
 
     sid = request('POST', '/session', retry=False, body={'capabilities': {'alwaysMatch': {
-        'browserName': 'wry', 'tauri:options': {'application': str(binary)},
+        'browserName': 'wry', 'tauri:options': {'application': str(compositor.application(binary))},
     }}})['sessionId']
     route = f'/session/{sid}'
     args.output.with_suffix('.session.json').write_text(json.dumps({'sessionId': sid}) + '\n')
@@ -232,25 +236,19 @@ def main():
         path = args.output.parent / (name + '.png')
         path.write_bytes(base64.b64decode(request('GET', route + '/screenshot')))
         report['screenshots'].append(str(path))
+        if os.environ.get('APERTURE_SESSION') == 'headless':
+            # The composited nested output, as a user would see the window.
+            path = args.output.parent / (name + '.session.png')
+            desktop.screenshot(path)
+            report['screenshots'].append(str(path))
 
     def pin_window():
-        # Tiling compositors resize clients as other windows come and go. Float
-        # only this harness-owned window at a fixed size so passes compare frames.
-        if os.environ.get('HYPRLAND_INSTANCE_SIGNATURE'):
-            owned = app_processes() - previous_processes
-            for client in json.loads(subprocess.check_output(['hyprctl', '-j', 'clients'], text=True)):
-                if client.get('pid') not in owned:
-                    continue
-                selector = json.dumps('address:' + client['address'])
-                if not client.get('floating'):
-                    floating = subprocess.run(['hyprctl', 'dispatch', 'setfloating', 'address:' + client['address']], capture_output=True, text=True)
-                    if floating.returncode:
-                        subprocess.run(['hyprctl', 'dispatch', 'hl.dsp.window.float({action="set",window=' + selector + '})'], check=True, capture_output=True)
-                subprocess.run(['hyprctl', 'dispatch', 'hl.dsp.window.resize({x=1280,y=900,window=' + selector + '})'], check=True, capture_output=True)
-                # WebKit pauses animation frames for hidden windows; keep this one
-                # visible if the desktop user switches workspaces during the run.
-                if not client.get('pinned'):
-                    subprocess.run(['hyprctl', 'dispatch', 'hl.dsp.window.pin({action="set",window=' + selector + '})'], check=True, capture_output=True)
+        # Tiling sizes clients to the output. Float only this harness-owned window
+        # at a fixed size so both passes compare frames of the same geometry.
+        owned = app_processes() - previous_processes
+        windows = [w for w in desktop.windows() if w['pid'] in owned and w['app_id'] == compositor.APP_ID]
+        assert len(windows) == 1, f'Expected exactly one owned validation window: {windows}'
+        desktop.resize(windows[0], 1280, 900)
         request('POST', route + '/window/rect', {'width': 1280, 'height': 900})
         size = lambda: js('return [innerWidth,innerHeight];')
         wait(lambda: (first := size()) and (time.sleep(.5) or True) and first == size() and first, 'stable window size')

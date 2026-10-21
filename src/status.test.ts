@@ -56,6 +56,10 @@ test("loading progress and browsing-only images describe the image state", () =>
     status({ image: image({ readOnly: true }) }).text,
     "Browsing only · annotations unavailable",
   );
+  assert.equal(
+    status({ image: image({ displayFallback: true }) }).text,
+    "8-bit display · image too large for 16-bit cache",
+  );
 });
 
 test("errors outrank progress and persist until the image changes", () => {

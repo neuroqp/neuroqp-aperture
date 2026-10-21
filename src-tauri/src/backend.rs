@@ -100,7 +100,6 @@ pub struct ImageState {
     /// The three channels are R, G and B samples of one acquisition.
     pub rgb: bool,
     /// A 16-bit source shown with 8-bit display samples to fit the cache limit.
-    #[serde(skip)]
     pub display_fallback: bool,
     pub read_only: bool,
     pub dimensions: Option<crate::frames::Dimensions>,
