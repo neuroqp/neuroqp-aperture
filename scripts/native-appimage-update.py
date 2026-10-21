@@ -75,10 +75,10 @@ def main():
     parser.add_argument('--version', required=True, help='Exact signed candidate version')
     parser.add_argument('--prior-version', default='0.0.9')
     parser.add_argument('--feed-port', type=int, default=8763)
-    parser.add_argument('--driver-url', default='http://127.0.0.1:4444')
+    parser.add_argument('--driver-url', help='defaults to the session driver; must match it')
     parser.add_argument('--output', type=Path, default=ROOT / 'artifacts/appimage-update/result.json')
     args = parser.parse_args()
-    compositor.session()  # Never open test windows on the user's desktop.
+    args.driver_url = compositor.driver_url(args.driver_url)
     if os.geteuid() == 0:
         raise RuntimeError('Run as a regular user so read-only directory permissions are enforced')
     args.candidate = args.candidate.resolve()

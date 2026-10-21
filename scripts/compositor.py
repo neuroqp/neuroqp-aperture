@@ -40,6 +40,21 @@ def session():
         'real desktop with scripts/visible-session.')
 
 
+def driver_url(requested=None):
+    """Return the session's verified tauri-driver URL; refuse any other driver.
+
+    The wrappers export APERTURE_DRIVER_URL only after checking that both driver
+    ports belong to their session, so no request can reach a desktop driver.
+    """
+    session()
+    url = os.environ.get('APERTURE_DRIVER_URL')
+    if not url:
+        raise SessionError('Start the session wrapper with --driver PORT to get a tauri-driver.')
+    if requested and requested.rstrip('/') != url:
+        raise SessionError(f'--driver-url {requested} is not this session\'s driver {url}.')
+    return url
+
+
 def application(binary):
     """Return a launcher for binary whose windows use the aperture-test app_id."""
     session()
@@ -193,7 +208,7 @@ class Hyprland(Sway):
         # wl-copy keeps serving the clipboard in the background. Without the
         # session marker it survives teardown, so a restored clipboard stays.
         env = {k: v for k, v in os.environ.items() if k != 'APERTURE_TEST_RUN'}
-        run('wl-copy', input=data, env=env)
+        run('wl-copy', input=data, env=env, start_new_session=True)
 
 
 class Wayland:
@@ -213,6 +228,7 @@ class Wayland:
     def __enter__(self):
         path = Path(os.environ['XDG_RUNTIME_DIR']) / os.environ['WAYLAND_DISPLAY']
         self.socket = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
+        self.socket.settimeout(10)
         self.socket.connect(str(path))
         self.buffer, self.last_id = b'', 1
         self.registry = self.new_id()
@@ -253,7 +269,10 @@ class Wayland:
         events = []
         while True:
             while len(self.buffer) < 8 or len(self.buffer) < struct.unpack_from('<IHH', self.buffer)[2]:
-                data = self.socket.recv(65536)
+                try:
+                    data = self.socket.recv(65536)
+                except TimeoutError:
+                    raise SessionError('The compositor did not answer within 10 s') from None
                 if not data:
                     raise SessionError('Wayland connection closed')
                 self.buffer += data

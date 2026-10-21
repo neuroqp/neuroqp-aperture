@@ -33,7 +33,7 @@ def digest(path):
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument('binary', type=Path)
-    parser.add_argument('--driver-url', default='http://127.0.0.1:4446')
+    parser.add_argument('--driver-url', help='defaults to the session driver; must match it')
     parser.add_argument('--fixtures', type=Path, default=ROOT / 'test-data/nd2')
     parser.add_argument('--real-z', type=Path)
     parser.add_argument('--real-time', type=Path)
@@ -41,6 +41,7 @@ def main():
     parser.add_argument('--timeout', type=float, default=180)
     parser.add_argument('--renderer', choices=('gpu', 'cpu'), default='gpu')
     args = parser.parse_args()
+    args.driver_url = compositor.driver_url(args.driver_url)
     binary = args.binary.resolve()
     primary = args.fixtures.resolve() / 'dims_p4z5t3c2y32x32.nd2'
     real_sources = [(mode, path.resolve()) for mode, path in

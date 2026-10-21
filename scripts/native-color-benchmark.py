@@ -363,7 +363,7 @@ def summary(values):
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--session", type=Path, required=True)
-    parser.add_argument("--driver-url", default="http://127.0.0.1:4444")
+    parser.add_argument("--driver-url", help="defaults to the session driver; must match it")
     parser.add_argument(
         "--output", type=Path, default=Path("artifacts/color-benchmark/color-benchmark.json")
     )
@@ -377,7 +377,7 @@ def main():
     parser.add_argument("--sustained", action="store_true")
     parser.add_argument("--drag-interval-ms", type=float, default=1000 / 60)
     args = parser.parse_args()
-    compositor.session()  # Never benchmark windows on the user's desktop.
+    args.driver_url = compositor.driver_url(args.driver_url)
     if args.trials < 2 or args.warmup < 2 or args.interval_ms < 1:
         parser.error("Use at least two trials/warmups and a positive input interval")
     if not all(

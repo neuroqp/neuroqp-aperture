@@ -30,7 +30,8 @@ source "$here/session-lib.sh"
 child='' driver='' sway='' root=''
 
 cleanup() {
-	trap - EXIT INT TERM
+	trap - EXIT
+	trap '' INT TERM # A second Ctrl-C must not abort the teardown.
 	[[ -n $root ]] || return 0
 	# shellcheck disable=SC2086 # Empty IDs are intentionally dropped.
 	stop_groups $child $driver
@@ -39,7 +40,7 @@ cleanup() {
 	# shellcheck disable=SC2086
 	stop_groups $sway
 	sweep_all
-	rm -rf "$root"
+	remove_root
 	[[ -z $keep ]] || echo "Kept test data in $data" >&2
 }
 trap cleanup EXIT
@@ -59,7 +60,7 @@ marker=APERTURE_TEST_RUN=$root
 # Nothing from the user's display, input or scale settings leaks in.
 clean_env=(env -u DISPLAY -u WAYLAND_DISPLAY -u WAYLAND_SOCKET -u SWAYSOCK
 	-u HYPRLAND_INSTANCE_SIGNATURE -u YDOTOOL_SOCKET -u DBUS_SESSION_BUS_ADDRESS
-	-u GDK_SCALE -u GDK_DPI_SCALE "$marker" XDG_RUNTIME_DIR="$runtime")
+	-u GDK_SCALE -u GDK_DPI_SCALE -u APERTURE_DRIVER_URL "$marker" XDG_RUNTIME_DIR="$runtime")
 
 setsid "${clean_env[@]}" WLR_BACKENDS=headless WLR_LIBINPUT_NO_DEVICES=1 WLR_RENDERER=pixman \
 	sway -c "$here/headless/sway.conf" >"$data/sway.log" 2>&1 &
@@ -100,6 +101,8 @@ if [[ -n $driver_port ]]; then
 		cat "$data/tauri-driver.log" >&2
 		exit 1
 	}
+	# Native scripts accept only this verified driver.
+	session_env+=(APERTURE_DRIVER_URL="http://127.0.0.1:$driver_port")
 fi
 
 setsid "${session_env[@]}" dbus-run-session -- "$@" &

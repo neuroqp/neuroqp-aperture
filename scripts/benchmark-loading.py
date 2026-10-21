@@ -29,7 +29,7 @@ def main():
     parser.add_argument("images", type=Path, nargs="+")
     parser.add_argument("--output", type=Path, required=True)
     parser.add_argument("--cache-root", type=Path, required=True)
-    parser.add_argument("--driver-url", default="http://127.0.0.1:4448")
+    parser.add_argument("--driver-url", help="defaults to the session driver; must match it")
     parser.add_argument("--driver-pid", type=int, help="Linux process-tree RSS sampling through preview and pyramid completion")
     parser.add_argument("--rounds", type=int, default=3)
     parser.add_argument("--warm-only", action="store_true", help="Reuse existing app caches without clearing them")
@@ -38,6 +38,7 @@ def main():
     parser.add_argument("--timeout", type=float, default=180)
     parser.add_argument("--cancel-after-preview", type=Path, action="append", default=[])
     args = parser.parse_args()
+    args.driver_url = compositor.driver_url(args.driver_url)
     if args.warm_only and args.fresh_only:
         parser.error("--warm-only and --fresh-only are mutually exclusive")
     args.output.parent.mkdir(parents=True, exist_ok=True)

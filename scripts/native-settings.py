@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Validate Settings in a native app launched by an already running tauri-driver.
+"""Validate Settings in a native app launched through the session's tauri-driver.
 
 Run inside scripts/headless-session --driver 4444, which isolates XDG_CONFIG_HOME,
 XDG_CACHE_HOME and TMPDIR.
@@ -24,9 +24,10 @@ ROOT = Path(__file__).resolve().parents[1]
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument('binary', type=Path)
-    parser.add_argument('--driver-url', default='http://127.0.0.1:4444')
+    parser.add_argument('--driver-url', help='defaults to the session driver; must match it')
     parser.add_argument('--output', type=Path, default=ROOT / 'artifacts/settings/result.json')
     args = parser.parse_args()
+    args.driver_url = compositor.driver_url(args.driver_url)
     args.output = args.output.resolve()
     args.output.parent.mkdir(parents=True, exist_ok=True)
     source = ROOT / 'tests/fixtures/gray16-stripped.tif'

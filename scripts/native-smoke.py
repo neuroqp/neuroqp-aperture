@@ -29,7 +29,7 @@ def main():
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("binary", type=Path)
     parser.add_argument("images", type=Path, nargs="+")
-    parser.add_argument("--driver-url", default="http://127.0.0.1:4444")
+    parser.add_argument("--driver-url", help="defaults to the session driver; must match it")
     parser.add_argument(
         "--output", type=Path, default=Path("artifacts/native-smoke/native-validation.json")
     )
@@ -41,6 +41,7 @@ def main():
     parser.add_argument("--window-controls", action="store_true")
     parser.add_argument("--leave-open", action="store_true")
     args = parser.parse_args()
+    args.driver_url = compositor.driver_url(args.driver_url)
     args.output.parent.mkdir(parents=True, exist_ok=True)
     error_paths = {path.resolve() for path in args.expect_error}
     cancel_paths = {path.resolve() for path in args.cancel_after_preview}

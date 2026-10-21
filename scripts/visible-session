@@ -37,12 +37,18 @@ source "$here/session-lib.sh"
 child='' root=''
 
 cleanup() {
-	trap - EXIT INT TERM
+	trap - EXIT
+	trap '' INT TERM # A second Ctrl-C must not abort the teardown.
 	[[ -n $root ]] || return 0
 	# shellcheck disable=SC2086 # An empty ID is intentionally dropped.
 	stop_groups $child
 	sweep_all
-	rm -rf "$root"
+	# The unmarked Hyprland launcher records a status once its command is gone.
+	for _ in {1..10}; do
+		[[ ! -e $root/started || -s $root/status ]] && break
+		sleep 0.1
+	done
+	remove_root
 	[[ -z $keep ]] || echo "Kept test data in $data" >&2
 }
 trap cleanup EXIT
@@ -65,7 +71,7 @@ path=$PATH
 command -v tauri-driver >/dev/null || path=$PATH:$HOME/.cargo/bin
 # A private bus keeps GTK dialogs in-process, so they share the app_id.
 session_env=(env -u DISPLAY -u WAYLAND_SOCKET -u YDOTOOL_SOCKET -u DBUS_SESSION_BUS_ADDRESS
-	"$marker" PATH="$path" GDK_BACKEND=wayland GTK_USE_PORTAL=0 NO_AT_BRIDGE=1
+	-u APERTURE_DRIVER_URL "$marker" PATH="$path" GDK_BACKEND=wayland GTK_USE_PORTAL=0 NO_AT_BRIDGE=1
 	APERTURE_SESSION=visible APERTURE_TEST_ROOT="$data" XDG_CONFIG_HOME="$data/config"
 	XDG_CACHE_HOME="$data/cache" XDG_DATA_HOME="$data/data" XDG_STATE_HOME="$data/state"
 	TMPDIR="$data/tmp")
@@ -114,6 +120,8 @@ wait_for_driver "$driver_port" test ! -s "$root/status" || {
 	cat "$data/visible.log" >&2 2>/dev/null || true
 	exit 1
 }
+# Native scripts accept only this verified driver.
+session_env+=(APERTURE_DRIVER_URL="http://127.0.0.1:$driver_port")
 
 setsid "${session_env[@]}" "$@" &
 child=$!

@@ -36,8 +36,10 @@ in-process inside the nested session. Display, input and scale variables of the
 user's desktop (`WAYLAND_DISPLAY`, `WAYLAND_SOCKET`, `DISPLAY`, `GDK_SCALE`,
 `GDK_DPI_SCALE`, ...) are removed. Both driver ports must be free, and the
 command starts only after both listeners are verified to belong to this session,
-so `tauri-driver` can never reach a driver on the user's desktop. Scripts default
-to spaced ports: 4444 (smoke, Settings, update checks, color benchmark), 4446
+so `tauri-driver` can never reach a driver on the user's desktop. The wrapper then
+exports `APERTURE_DRIVER_URL`; native scripts use only that driver and refuse to
+run without it or with a different `--driver-url`. Documented ports are spaced so
+pairs never overlap: 4444 (smoke, Settings, update checks, color benchmark), 4446
 (navigation, ND2, CZI, memory, projection) and 4448 (loading benchmark).
 `XDG_CONFIG_HOME`, `XDG_CACHE_HOME`, `XDG_DATA_HOME`, `XDG_STATE_HOME` and `TMPDIR`
 point into a temporary root, or into `--keep DIR` to keep caches and logs. Aperture's instance, image-presence and save
@@ -699,8 +701,8 @@ the previous pre-preview root-budget behavior and avoids recursively walking
 every cached tile before first pixels. Active caches are pinned against eviction.
 
 Run `python3 scripts/benchmark-loading.py --help` for the reusable native benchmark.
-Start `tauri-driver` with a dedicated `XDG_CACHE_HOME` under the output directory,
-for example ports 4445 and 4446. Ignored evidence under `artifacts/` includes
+Run it in `scripts/headless-session --driver 4448 --keep DIR` with `DIR` under the
+output directory, so its `XDG_CACHE_HOME` is dedicated. Ignored evidence under `artifacts/` includes
 `baseline-final-native.json`, `final-native.json`, `baseline-big-native.json`,
 `final-big-native.json`, `final-big-complete-native.json`, `final-big-warm-native.json`,
 `final-channels-native.json`, screenshots and `final-loading-regressions.json`.
@@ -1041,10 +1043,10 @@ retains annotations and navigation after saving needs no discard warning. All
 14 native checks passed, including pointer clicks within the title bar's drag
 region and a delayed annotation cancellation error after standalone Cancel.
 
-Repeat with `scripts/native-navigation.py`, a built debug binary and a dedicated
-`tauri-driver` session on port 4446. Supply `--large-image` for a local large TIFF;
-start the driver with `XDG_CACHE_HOME` under `artifacts/folder-navigation/cache`.
-Use an owned `TMPDIR` there too on systems with temporary-directory user quotas.
+Repeat with `scripts/native-navigation.py` and a built debug binary in
+`scripts/headless-session --driver 4446 --keep artifacts/folder-navigation/session`,
+which also owns `XDG_CACHE_HOME` and `TMPDIR`. Supply `--large-image` for a local
+large TIFF.
 Only the initial chooser result is supplied by the navigation harness; Rust IPC,
 image workers, assets, rendering and warning dialogs are native. The existing
 `native-smoke.py` separately exercises the real GTK Open picker. Owned test copies,

@@ -23,9 +23,10 @@ ROOT = Path(__file__).resolve().parents[1]
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument('binary', type=Path)
-    parser.add_argument('--driver-url', default='http://127.0.0.1:4444')
+    parser.add_argument('--driver-url', help='defaults to the session driver; must match it')
     parser.add_argument('--output', type=Path, default=ROOT / 'artifacts/update-recovery/result.json')
     args = parser.parse_args()
+    args.driver_url = compositor.driver_url(args.driver_url)
     args.output = args.output.resolve()
     args.output.parent.mkdir(parents=True, exist_ok=True)
     source = ROOT / 'tests/fixtures/gray16-stripped.tif'

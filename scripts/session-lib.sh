@@ -20,7 +20,8 @@ sweep() {
 }
 
 # Stop the process groups led by the given children of this shell: TERM, then
-# KILL after five seconds. Reap them so their files can be removed.
+# KILL once no member is left or after five seconds. Reap the leaders so their
+# files can be removed.
 stop_groups() {
 	local pid alive
 	for pid; do
@@ -29,7 +30,7 @@ stop_groups() {
 	for _ in {1..50}; do
 		alive=''
 		for pid; do
-			ps -o stat= -p "$pid" 2>/dev/null | grep -qv Z && alive=1
+			kill -0 -- "-$pid" 2>/dev/null && alive=1
 		done
 		[[ -n $alive ]] || break
 		sleep 0.1
@@ -51,9 +52,13 @@ sweep_all() {
 
 # Print the socket inodes listening on TCP port $1 (any address).
 listeners() {
+	local file files=()
+	for file in /proc/net/tcp /proc/net/tcp6; do
+		[[ -r $file ]] && files+=("$file")
+	done
 	awk -v port=":$(printf '%04X' "$1")" \
 		'$4 == "0A" && substr($2, length($2) - 4) == port { print $10 }' \
-		/proc/net/tcp /proc/net/tcp6
+		"${files[@]}"
 }
 
 # Refuse driver ports that are already taken: tauri-driver would otherwise talk
@@ -93,4 +98,9 @@ wait_for_driver() {
 	done
 	echo "tauri-driver did not listen on ports $port and $((port + 1)) from this session" >&2
 	return 1
+}
+
+# Remove the run's temporary root; a late writer may race the first attempt.
+remove_root() {
+	rm -rf "$root" 2>/dev/null || { sleep 0.2 && rm -rf "$root"; } || true
 }
