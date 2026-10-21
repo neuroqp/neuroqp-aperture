@@ -13,6 +13,9 @@ mod memory;
 mod native;
 mod nd2;
 mod nd2_metadata;
+// Wired into the backend in the OME-TIFF browsing phase.
+#[allow(dead_code)]
+mod ome_tiff;
 mod platform;
 mod preload;
 mod raw_tiff;
