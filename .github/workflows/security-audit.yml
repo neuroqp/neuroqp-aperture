@@ -1,0 +1,101 @@
+name: Security audit
+
+on:
+  schedule:
+    - cron: "41 7 * * *"
+  workflow_dispatch:
+  pull_request:
+    paths:
+      - "package.json"
+      - "pnpm-lock.yaml"
+      - "src-tauri/**/Cargo.toml"
+      - "src-tauri/Cargo.lock"
+      - ".github/dependabot.yml"
+      - ".github/workflows/security-audit.yml"
+      - "scripts/security-audit.mjs"
+
+permissions:
+  contents: read
+
+jobs:
+  javascript:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+        with:
+          persist-credentials: false
+      # Audit-only pnpm. Before 10.30.1, pnpm used only the legacy audit
+      # endpoint, which can fail for vulnerable trees. Builds keep pnpm 9.
+      - uses: pnpm/action-setup@f40ffcd9367d9f12939873eb1018b921a783ffaa # v4
+        with:
+          version: 10.34.7
+      - uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4
+        with:
+          node-version: 22.22.0
+      # pnpm audit reads pnpm-lock.yaml directly, so no install runs here.
+      - name: Verify audit policy
+        run: node scripts/security-audit.mjs --self-test
+      - name: Audit production and all dependencies
+        run: node scripts/security-audit.mjs "$RUNNER_TEMP/security-audit"
+      - name: Save audit reports
+        if: always()
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
+        with:
+          name: security-audit-javascript
+          path: ${{ runner.temp }}/security-audit/
+          retention-days: 30
+          if-no-files-found: warn
+
+  rust:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 10
+    env:
+      CARGO_AUDIT_VERSION: 0.22.2
+      CARGO_AUDIT_SHA256: 7fb9497f8594b389e5fce5ef9b92db08432996895b2e0c5a0167a69ed445c428
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+        with:
+          persist-credentials: false
+      - name: Install cargo-audit
+        run: |
+          name="cargo-audit-x86_64-unknown-linux-musl-v$CARGO_AUDIT_VERSION"
+          curl -fsSL -o "$RUNNER_TEMP/$name.tgz" "https://github.com/rustsec/rustsec/releases/download/cargo-audit%2Fv$CARGO_AUDIT_VERSION/$name.tgz"
+          echo "$CARGO_AUDIT_SHA256  $RUNNER_TEMP/$name.tgz" | sha256sum --check --strict
+          tar -xzf "$RUNNER_TEMP/$name.tgz" -C "$RUNNER_TEMP"
+          echo "$RUNNER_TEMP/$name" >> "$GITHUB_PATH"
+      # Any RustSec vulnerability fails. Unmaintained, unsound and yanked
+      # warnings stay visible without failing. Audit errors also fail.
+      - name: Audit Cargo.lock
+        run: |
+          out="$RUNNER_TEMP/cargo-audit"
+          mkdir -p "$out"
+          status=0
+          cargo-audit audit --file src-tauri/Cargo.lock --json > "$out/report.json" 2> "$out/stderr.txt" || status=$?
+          cat "$out/stderr.txt" >&2
+          printf '## Cargo audit\n\n' > "$out/summary.md"
+          if jq -e '.vulnerabilities.list and .warnings' "$out/report.json" > /dev/null 2>&1; then
+            jq -r '
+              "| Kind | Crate | Version | Advisory | Patched versions |",
+              "| --- | --- | --- | --- | --- |",
+              (
+                [.vulnerabilities.list[] | ["vulnerability", .package.name, .package.version, .advisory.id, (.versions.patched | join(" ") | if . == "" then "No published fix" else . end)]]
+                + [.warnings | to_entries[] | .key as $kind | .value[] | [$kind, .package.name, .package.version, (.advisory.id // "-"), "-"]]
+                | .[] | map(tostring | gsub("\\\\"; "\\\\") | gsub("&"; "&amp;") | gsub("<"; "&lt;") | gsub(">"; "&gt;") | gsub("\\|"; "\\|") | gsub("[\r\n]"; " "))
+                | "| " + join(" | ") + " |"
+              )
+            ' "$out/report.json" >> "$out/summary.md"
+          else
+            echo "Audit failed before producing a report. See stderr.txt in the artifact." >> "$out/summary.md"
+            [ "$status" -ne 0 ] || status=1
+          fi
+          tee -a "$GITHUB_STEP_SUMMARY" < "$out/summary.md"
+          exit "$status"
+      - name: Save audit reports
+        if: always()
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
+        with:
+          name: security-audit-rust
+          path: ${{ runner.temp }}/cargo-audit/
+          retention-days: 30
+          if-no-files-found: warn

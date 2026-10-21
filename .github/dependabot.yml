@@ -1,0 +1,33 @@
+version: 2
+updates:
+  - package-ecosystem: npm
+    directory: /
+    schedule:
+      interval: daily
+    # Security PRs are exempt from this limit; ordinary version updates stay off.
+    open-pull-requests-limit: 0
+    groups:
+      javascript-security:
+        applies-to: security-updates
+        patterns: ["*"]
+  - package-ecosystem: cargo
+    directory: /src-tauri
+    schedule:
+      interval: daily
+    open-pull-requests-limit: 0
+    groups:
+      rust-security:
+        applies-to: security-updates
+        patterns: ["*"]
+  # Dependabot alerts skip SHA-pinned actions, so only version updates can
+  # refresh these pins. They arrive as one weekly PR after a 7-day cooldown.
+  - package-ecosystem: github-actions
+    directory: /
+    schedule:
+      interval: weekly
+    cooldown:
+      default-days: 7
+    open-pull-requests-limit: 1
+    groups:
+      github-actions:
+        patterns: ["*"]
