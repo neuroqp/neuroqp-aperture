@@ -1,7 +1,8 @@
 #!/usr/bin/env python3
 """Check shared image-memory settings and ND2 preload in an owned native session.
 
-Parent starts tauri-driver with isolated persistent cache/config directories.
+Run inside scripts/headless-session --driver 4446; its isolated cache/config
+directories persist across the app restarts in this check.
 Only the chooser response is substituted. Navigation, settings, pixels and Close
 use the application's real handlers. This script does not build or start a VM.
 """
@@ -14,6 +15,8 @@ import os
 from pathlib import Path
 import time
 from urllib.request import Request, urlopen
+
+import compositor
 
 ROOT = Path(__file__).resolve().parents[1]
 GIB = 1024 ** 3
@@ -100,7 +103,7 @@ def main():
         nonlocal route
         previous = processes()
         sid = request('POST', '/session', {'capabilities': {'alwaysMatch': {
-            'browserName': 'wry', 'tauri:options': {'application': str(binary)},
+            'browserName': 'wry', 'tauri:options': {'application': str(compositor.application(binary))},
         }}})['sessionId']
         route = f'/session/{sid}'
         output.with_suffix('.session.json').write_text(json.dumps({'sessionId': sid}) + '\n')

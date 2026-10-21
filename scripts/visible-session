@@ -1,0 +1,127 @@
+#!/usr/bin/env bash
+# Run a native GUI check on the real Hyprland desktop, only when explicitly
+# needed. The GUI process starts silently on workspace 9 with app_id
+# aperture-test; the active workspace and focus never change. Input, desktop
+# screenshots and clipboard access stay disabled unless APERTURE_VISIBLE_INPUT=1.
+#
+#   scripts/visible-session [--driver PORT] [--keep DIR] -- COMMAND...
+#
+# --driver PORT  start tauri-driver on the desktop (native port PORT+1) and run
+#                COMMAND here; without it COMMAND itself is the GUI process
+# --keep DIR     keep config/cache/data/state/tmp in DIR
+set -euo pipefail
+
+usage() {
+	echo "usage: $0 [--driver PORT] [--keep DIR] -- COMMAND..." >&2
+	exit 2
+}
+
+driver_port='' keep=''
+while (($#)); do
+	case $1 in
+	--driver) driver_port=${2:?--driver needs a port} && shift 2 ;;
+	--keep) keep=${2:?--keep needs a directory} && shift 2 ;;
+	--) shift && break ;;
+	*) usage ;;
+	esac
+done
+(($#)) || usage
+[[ -n ${HYPRLAND_INSTANCE_SIGNATURE:-} ]] || {
+	echo "Visible mode needs a Hyprland session; use scripts/headless-session" >&2
+	exit 1
+}
+
+root=$(mktemp -d "${TMPDIR:-/tmp}/aperture-visible.XXXXXX")
+[[ $root =~ ^[A-Za-z0-9_./-]+$ ]] || {
+	echo "Unsupported temporary path: $root" >&2
+	exit 1
+}
+data=${keep:-$root}
+mkdir -p "$data"/{config,cache,data,state,tmp}
+data=$(cd "$data" && pwd)
+child=''
+
+# Every process started for the test carries a unique marker, including those
+# Hyprland launches, so cleanup finds them all. This shell never exports it.
+marker=APERTURE_TEST_RUN=$root
+sweep() { # Signal marked processes; fail when none are left.
+	local environ pid found=1
+	for environ in /proc/[0-9]*/environ; do
+		pid=${environ#/proc/} && pid=${pid%/environ}
+		if [[ $pid != "$$" ]] && grep -qzxF "$marker" "$environ" 2>/dev/null; then
+			kill "-$1" "$pid" 2>/dev/null && found=0
+		fi
+	done
+	return $found
+}
+
+cleanup() {
+	trap - EXIT INT TERM
+	[[ -z $child ]] || kill -TERM -- "-$child" 2>/dev/null || true
+	for _ in {1..50}; do
+		sweep TERM || break
+		sleep 0.1
+	done
+	sweep KILL || true
+	rm -rf "$root"
+	[[ -z $keep ]] || echo "Kept test data in $data" >&2
+}
+trap cleanup EXIT
+trap 'exit 130' INT
+trap 'exit 143' TERM
+
+path=$PATH
+command -v tauri-driver >/dev/null || path=$PATH:$HOME/.cargo/bin
+# A private bus keeps GTK dialogs in-process, so they share the app_id.
+session_env=(env -u DISPLAY -u YDOTOOL_SOCKET -u DBUS_SESSION_BUS_ADDRESS "$marker"
+	PATH="$path" GDK_BACKEND=wayland GTK_USE_PORTAL=0 NO_AT_BRIDGE=1 APERTURE_SESSION=visible
+	APERTURE_TEST_ROOT="$data" XDG_CONFIG_HOME="$data/config" XDG_CACHE_HOME="$data/cache"
+	XDG_DATA_HOME="$data/data" XDG_STATE_HOME="$data/state" TMPDIR="$data/tmp")
+
+# Hyprland starts the process with an exec rule; descendants inherit it.
+launch() {
+	{
+		echo '#!/usr/bin/env bash'
+		printf 'cd %q\n' "$PWD"
+		printf '%q ' "${session_env[@]}" dbus-run-session -- "$@"
+		printf '>%q 2>&1\necho $? >%q\n' "$data/visible.log" "$root/status"
+	} >"$root/launch"
+	chmod +x "$root/launch"
+	local reply
+	reply=$(hyprctl dispatch "hl.dsp.exec_cmd(\"$root/launch\", {workspace = \"9 silent\", no_initial_focus = true})")
+	[[ $reply == ok ]] || {
+		echo "Hyprland refused the launch: $reply" >&2
+		exit 1
+	}
+}
+
+if [[ -z $driver_port ]]; then
+	launch "$@"
+	until [[ -s $root/status ]]; do
+		sleep 0.2
+	done
+	exit "$(<"$root/status")"
+fi
+
+if (exec 3<>"/dev/tcp/127.0.0.1/$driver_port") 2>/dev/null; then
+	echo "Port $driver_port is already in use; choose another --driver port" >&2
+	exit 1
+fi
+launch tauri-driver --port "$driver_port" --native-port "$((driver_port + 1))"
+for _ in {1..300}; do
+	(exec 3<>"/dev/tcp/127.0.0.1/$driver_port") 2>/dev/null && break
+	[[ ! -s $root/status ]] || break
+	sleep 0.1
+done
+(exec 3<>"/dev/tcp/127.0.0.1/$driver_port") 2>/dev/null || {
+	cat "$data/visible.log" >&2 2>/dev/null || true
+	echo "tauri-driver did not start" >&2
+	exit 1
+}
+
+setsid "${session_env[@]}" "$@" &
+child=$!
+status=0
+wait "$child" || status=$?
+child=''
+exit "$status"

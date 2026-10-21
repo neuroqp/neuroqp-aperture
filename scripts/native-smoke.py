@@ -1,17 +1,28 @@
 #!/usr/bin/env python3
 """Exercise the real Linux Tauri app through WebDriver and its native chooser.
 
-Run tauri-driver first, then pass a built application binary. Requires an
-active Hyprland session, ydotool daemon, and grim. No Python packages required.
+Run inside scripts/headless-session --driver 4444 and pass a built application
+binary. Uses wtype, wl-clipboard and grim through compositor.py. No Python
+packages required.
 """
 
 import argparse
 import json
-import os
 from pathlib import Path
 import subprocess
 import time
 from urllib.request import Request, urlopen
+
+import compositor
+from compositor import APP_ID
+
+
+def region(window):
+    return window["x"], window["y"], window["width"], window["height"]
+
+
+def size(window):
+    return [window["width"], window["height"]]
 
 
 def main():
@@ -33,10 +44,8 @@ def main():
     args.output.parent.mkdir(parents=True, exist_ok=True)
     error_paths = {path.resolve() for path in args.expect_error}
     cancel_paths = {path.resolve() for path in args.cancel_after_preview}
-    env = {
-        **os.environ,
-        "YDOTOOL_SOCKET": str(Path(os.environ["XDG_RUNTIME_DIR"]) / ".ydotool_socket"),
-    }
+    desktop = compositor.session()
+    binary = compositor.application(args.binary)
 
     def request(method, route, body=None):
         data = None if body is None else json.dumps(body).encode()
@@ -65,7 +74,7 @@ def main():
             "capabilities": {
                 "alwaysMatch": {
                     "browserName": "wry",
-                    "tauri:options": {"application": str(args.binary.resolve())},
+                    "tauri:options": {"application": str(binary)},
                 }
             }
         },
@@ -108,73 +117,45 @@ def main():
           };
         """)
 
-    def keys(*values):
-        subprocess.run(
-            ["ydotool", "key", *values], env=env, check=True, stdout=subprocess.DEVNULL
+    def app_window(title=None):
+        return next(
+            (
+                w
+                for w in desktop.windows()
+                if w["app_id"] == APP_ID
+                and (w["title"] == title if title else w["title"] != "Open File")
+            ),
+            None,
         )
 
     def open_native(path):
         click("open-button")
         dialog_by = time.monotonic() + 10
-        while True:
-            active = json.loads(
-                subprocess.check_output(["hyprctl", "-j", "activewindow"])
-            )
-            if (
-                active.get("class", "").lower() in {"aperture", "com.neuroqp.aperture"}
-                and active.get("title") == "Open File"
-            ):
-                break
+        while not (dialog := app_window("Open File")):
             if time.monotonic() > dialog_by:
-                raise TimeoutError("Native file chooser did not gain focus")
+                raise TimeoutError("Native file chooser did not appear")
             time.sleep(0.15)
-        keys("29:1", "38:1", "38:0", "29:0")  # Ctrl+L focuses GTK's location entry.
+        desktop.focus(dialog)
+        time.sleep(0.3)
+        desktop.keys("ctrl+l")  # Focus GTK's location entry.
         time.sleep(0.5)
-        previous_clipboard = subprocess.run(
-            ["wl-paste", "--no-newline"],
-            stdout=subprocess.PIPE,
-            stderr=subprocess.DEVNULL,
-        )
-        subprocess.run(["wl-copy"], input=str(path.absolute()).encode(), check=True)
-        keys("29:1", "30:1", "30:0", "29:0")  # Select the location field's contents.
-        keys("29:1", "47:1", "47:0", "29:0")  # Paste the exact Unicode path.
+        previous_clipboard = desktop.clipboard()
+        desktop.set_clipboard(str(path.absolute()).encode())
+        desktop.keys("ctrl+a")  # Select the location field's contents.
+        desktop.keys("ctrl+v")  # Paste the exact Unicode path.
         time.sleep(1)
         selected_at = time.monotonic()
-        keys("28:1", "28:0")
+        desktop.keys("Return")
         time.sleep(0.5)
-        active = json.loads(subprocess.check_output(["hyprctl", "-j", "activewindow"]))
-        if (
-            active.get("class", "").lower() == "aperture"
-            and active.get("title") == "Open File"
-        ):
-            keys("28:1", "28:0")
+        dialog = app_window("Open File")
+        if dialog and dialog["focused"]:
+            desktop.keys("Return")
         time.sleep(0.3)
-        dialogs = [
-            w
-            for w in json.loads(subprocess.check_output(["hyprctl", "-j", "clients"]))
-            if w.get("class") == "aperture" and w.get("title") == "Open File"
-        ]
-        if dialogs:
+        if dialog := app_window("Open File"):
             # Open button center observed in this machine's GTK chooser screenshots.
-            dialog = dialogs[0]
-            x, y = dialog["at"][0] + dialog["size"][0] - 47, dialog["at"][1] + 23
-            subprocess.run(
-                [
-                    "hyprctl",
-                    "eval",
-                    f"hl.dispatch(hl.dsp.cursor.move({{x = {x}, y = {y}}}))",
-                ],
-                check=True,
-                stdout=subprocess.DEVNULL,
-            )
-            subprocess.run(
-                ["ydotool", "click", "0xC0"],
-                env=env,
-                check=True,
-                stdout=subprocess.DEVNULL,
-            )
-        if previous_clipboard.returncode == 0:
-            subprocess.run(["wl-copy"], input=previous_clipboard.stdout, check=True)
+            desktop.click(dialog["x"] + dialog["width"] - 47, dialog["y"] + 23)
+        if previous_clipboard is not None:
+            desktop.set_clipboard(previous_clipboard)
         return selected_at
 
     records = []
@@ -187,13 +168,7 @@ def main():
         startup = time.monotonic() - started
         initial = state()
         assert initial["saveDisabled"], "Save must be disabled"
-        windows = json.loads(subprocess.check_output(["hyprctl", "-j", "clients"]))
-        app_pid = next(
-            w["pid"]
-            for w in windows
-            if w.get("class", "").lower() in {"aperture", "com.neuroqp.aperture"}
-            and w.get("title") != "Open File"
-        )
+        app_pid = app_window()["pid"]
 
         def tree_rss_mb():
             rows = [
@@ -236,14 +211,7 @@ def main():
                     and not last.get("fitDisabled")
                 ):
                     action_started = time.monotonic()
-                    windows = json.loads(
-                        subprocess.check_output(["hyprctl", "-j", "clients"])
-                    )
-                    window = next(
-                        w
-                        for w in windows
-                        if w.get("class") == "aperture" and w.get("title") == "Aperture"
-                    )
+                    window = app_window("Aperture")
                     click("zoom-in-button")
                     point = js(
                         "const r=document.querySelector('#viewer').getBoundingClientRect(); return {x:Math.round(r.x+r.width/2), y:Math.round(r.y+r.height/2)};"
@@ -281,16 +249,9 @@ def main():
                     )
                     pan_zoom_seconds = time.monotonic() - action_started
                     time.sleep(0.3)
-                    x, y = window["at"]
-                    width, height = window["size"]
-                    subprocess.run(
-                        [
-                            "grim",
-                            "-g",
-                            f"{x},{y} {width}x{height}",
-                            str(args.output.parent / "cancel-loading-zoom.native.png"),
-                        ],
-                        check=True,
+                    desktop.screenshot(
+                        args.output.parent / "cancel-loading-zoom.native.png",
+                        region(window),
                     )
                     preview_screenshot_seconds = time.monotonic() - start
                     click("cancel-button")
@@ -339,25 +300,10 @@ def main():
                 time.sleep(0.25)
                 click("fit-button")
                 time.sleep(0.3)
-            windows = json.loads(subprocess.check_output(["hyprctl", "-j", "clients"]))
-            window = next(
-                (
-                    w
-                    for w in windows
-                    if w.get("class", "").lower()
-                    in {"aperture", "com.neuroqp.aperture"}
-                    and w.get("title") != "Open File"
-                ),
-                None,
-            )
-            if window and window.get("mapped"):
-                x, y = window["at"]
-                width, height = window["size"]
+            window = app_window()
+            if window:
                 screenshot = args.output.parent / (image.name + ".native.png")
-                subprocess.run(
-                    ["grim", "-g", f"{x},{y} {width}x{height}", str(screenshot)],
-                    check=True,
-                )
+                desktop.screenshot(screenshot, region(window))
                 record["screenshot"] = str(screenshot)
                 record["window"] = window
             records.append(record)
@@ -425,15 +371,8 @@ def main():
                 "source_unchanged"
             ], "Source size or modification timestamp changed"
         if args.window_controls:
-            subprocess.run(
-                [
-                    "hyprctl",
-                    "eval",
-                    'local w = hl.get_windows({class = "aperture"})[1]; hl.dispatch(hl.dsp.window.float({action = "set", window = w})); hl.dispatch(hl.dsp.focus({window = w}))',
-                ],
-                check=True,
-                stdout=subprocess.DEVNULL,
-            )
+            desktop.float(app_window("Aperture"))
+            desktop.focus(app_window("Aperture"))
             time.sleep(0.7)
             controls = {}
 
@@ -450,13 +389,7 @@ def main():
                             "args": [],
                         },
                     ),
-                    "window": next(
-                        w
-                        for w in json.loads(
-                            subprocess.check_output(["hyprctl", "-j", "clients"])
-                        )
-                        if w.get("class") == "aperture" and w.get("title") == "Aperture"
-                    ),
+                    "window": app_window("Aperture"),
                 }
 
             controls["before"] = control_state()
@@ -468,54 +401,29 @@ def main():
             controls["restored"] = control_state()
             controls["maximize_result"] = (
                 "changed"
-                if controls["before"]["window"]["size"]
-                != controls["maximized"]["window"]["size"]
+                if size(controls["before"]["window"])
+                != size(controls["maximized"]["window"])
                 else "ignored_by_compositor"
             )
             args.output.with_suffix(".controls.json").write_text(
                 json.dumps(controls, indent=2) + "\n"
             )
-            subprocess.run(
-                [
-                    "hyprctl",
-                    "eval",
-                    'local w = hl.get_windows({class = "aperture"})[1]; hl.dispatch(hl.dsp.window.float({action = "set", window = w})); hl.dispatch(hl.dsp.window.resize({x = 640, y = 400, relative = false, window = w})); hl.dispatch(hl.dsp.focus({window = w}))',
-                ],
-                check=True,
-                stdout=subprocess.DEVNULL,
-            )
+            desktop.resize(app_window("Aperture"), 640, 400)
+            desktop.focus(app_window("Aperture"))
             time.sleep(0.5)
-            window = next(
-                w
-                for w in json.loads(
-                    subprocess.check_output(["hyprctl", "-j", "clients"])
-                )
-                if w.get("class") == "aperture" and w.get("title") == "Aperture"
-            )
+            window = app_window("Aperture")
             controls["minimum_requested"] = [640, 400]
-            controls["minimum_actual"] = window["size"]
+            controls["minimum_actual"] = size(window)
             args.output.with_suffix(".controls.json").write_text(
                 json.dumps(controls, indent=2) + "\n"
             )
             assert js("return document.body.scrollWidth <= window.innerWidth;")
-            x, y = window["at"]
-            subprocess.run(
-                [
-                    "grim",
-                    "-g",
-                    f"{x},{y} {window['size'][0]}x{window['size'][1]}",
-                    str(args.output.parent / "minimum-window.native.png"),
-                ],
-                check=True,
+            desktop.screenshot(
+                args.output.parent / "minimum-window.native.png", region(window)
             )
             click("close-button")
             time.sleep(0.7)
-            assert not any(
-                w.get("class") == "aperture"
-                for w in json.loads(
-                    subprocess.check_output(["hyprctl", "-j", "clients"])
-                )
-            )
+            assert not any(w["app_id"] == APP_ID for w in desktop.windows())
             print(
                 "Native Close passed; compositor maximize/resize results recorded separately.",
                 flush=True,

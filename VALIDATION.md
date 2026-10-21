@@ -13,6 +13,78 @@ records the tested source/checksum identities, upgrade fixtures, preserved asset
 production verification and observation limits. Windows 10 remains unverified
 and Windows publisher signing remains pending.
 
+# Native GUI test sessions
+
+Native scripts refuse to start outside one of two session wrappers. Older entries
+below that mention Hyprland, `ydotool` or starting `tauri-driver` by hand predate
+them.
+
+## Headless (default)
+
+```sh
+scripts/headless-session --driver 4444 -- python3 scripts/native-smoke.py \
+  src-tauri/target/debug/aperture tests/fixtures/gray16-stripped.tif --window-controls
+scripts/headless-session --driver 4446 --keep artifacts/folder-navigation/session -- \
+  python3 scripts/native-navigation.py src-tauri/target/debug/aperture --large-image ...
+```
+
+`headless-session` starts a nested Sway (`scripts/headless/sway.conf`, one
+1920 by 1080 virtual output, pixman renderer) with a private `XDG_RUNTIME_DIR`,
+then runs the command, and with `--driver PORT` also `tauri-driver` (native port
+PORT+1), under a private D-Bus. Without a portal, the GTK file chooser runs
+in-process inside the nested session. `XDG_CONFIG_HOME`, `XDG_CACHE_HOME`,
+`XDG_DATA_HOME`, `XDG_STATE_HOME` and `TMPDIR` point into a temporary root, or into
+`--keep DIR` to keep caches and logs. Aperture's instance, image-presence and save
+locks live under `XDG_CACHE_HOME`, so a test instance never coordinates with an
+Aperture window the user has open. Exit, failure, Ctrl-C and TERM stop every
+process started in the session and remove the temporary root. The command's exit
+status is returned.
+
+Scripts drive windows through `scripts/compositor.py`: window lists and
+float/resize/focus via `swaymsg`, screenshots with `grim` and the clipboard with
+`wl-copy`/`wl-paste`, all on the nested display. Headless Sway has no input
+devices, so keys and clicks add a temporary virtual keyboard (standard US
+keymap) or pointer. `wtype` is used only for text: its generated keymaps break
+Return, Escape and Ctrl shortcuts in GTK dialogs. Scripts launch the app through
+an `aperture-test` symlink, giving every window, including GTK dialogs, the
+Wayland app_id `aperture-test`. WebKit needs no extra environment: WebGL2 reports
+`WebKit WebGL` and the viewer uses its GPU renderer.
+
+To watch a run, install `wayvnc` (`sudo pacman -S wayvnc`), start it inside the
+session and connect a VNC viewer to `127.0.0.1:5900`:
+
+```sh
+scripts/headless-session --driver 4444 -- sh -c \
+  'wayvnc 127.0.0.1 5900 & python3 scripts/native-smoke.py ...'
+```
+
+## Visible (opt-in)
+
+Use the real desktop only when asked to, or when a problem does not reproduce
+headless:
+
+```sh
+scripts/visible-session --driver 4444 -- python3 scripts/... src-tauri/target/debug/aperture
+```
+
+`visible-session` asks Hyprland to start `tauri-driver` (or, without `--driver`,
+the command itself) with the exec rule `workspace 9 silent` and
+`no_initial_focus`. Children inherit the rule, so the active workspace and focus
+do not change. The same isolated directories, private D-Bus and `aperture-test`
+app_id apply. To keep any stray test window off the active workspace, add this to
+`~/.config/hypr/hyprland.lua`:
+
+```lua
+o.window("^aperture-test$", { workspace = "9 silent", no_initial_focus = true })
+```
+
+In visible mode, `compositor.py` lists windows and floats or resizes only
+`aperture-test` windows. Focus, keys, clicks, screenshots and the clipboard raise
+an error unless `APERTURE_VISIBLE_INPUT=1` is set. Then `ydotool` types into
+whatever window has focus, and focusing the test window switches to workspace 9.
+Windows on a hidden workspace do not paint, so WebDriver screenshots time out
+there unless workspace 9 is shown.
+
 # Linux validation
 
 Validated the real Tauri debug binary on October 8, 2026 using WebKitWebDriver,

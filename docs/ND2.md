@@ -119,11 +119,11 @@ cargo test --manifest-path src-tauri/Cargo.toml --locked public_nd2_metadata -- 
 pnpm test
 pnpm build
 cargo build --manifest-path src-tauri/Cargo.toml --locked --features custom-protocol
-# Start tauri-driver with owned XDG_CACHE_HOME and TMPDIR, then:
-python3 scripts/native-nd2.py src-tauri/target/debug/aperture
-python3 scripts/native-nd2.py src-tauri/target/debug/aperture --renderer cpu
-python3 scripts/native-memory.py src-tauri/target/debug/aperture
-python3 scripts/native-projection.py src-tauri/target/debug/aperture
+# Each native check runs in a headless session (see VALIDATION.md):
+scripts/headless-session --driver 4446 -- python3 scripts/native-nd2.py src-tauri/target/debug/aperture
+scripts/headless-session --driver 4446 -- python3 scripts/native-nd2.py src-tauri/target/debug/aperture --renderer cpu
+scripts/headless-session --driver 4446 -- python3 scripts/native-memory.py src-tauri/target/debug/aperture
+scripts/headless-session --driver 4446 -- python3 scripts/native-projection.py src-tauri/target/debug/aperture
 ```
 
 Public acquisitions and generated evidence stay in ignored `test-data/nd2/` and

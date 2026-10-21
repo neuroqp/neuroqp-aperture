@@ -1,9 +1,9 @@
 #!/usr/bin/env python3
 """Measure first image draw in the native Tauri app, using its real renderer/IPC.
 
-Start tauri-driver with XDG_CACHE_HOME pointing inside --output's directory.
-The chooser response alone is supplied by the harness; Open still uses the real
-frontend and backend. No source pixels or annotations are changed. Cache-cold
+Run inside scripts/headless-session --driver 4445 --keep DIR, with DIR inside
+--output's directory. The chooser response alone is supplied by the harness;
+Open still uses the real frontend and backend. No source pixels or annotations are changed. Cache-cold
 means no completed app cache, not a cold operating-system filesystem cache.
 """
 
@@ -19,6 +19,8 @@ import statistics
 import threading
 import time
 from urllib.request import Request, urlopen
+
+import compositor
 
 
 def main():
@@ -76,7 +78,7 @@ def main():
 
     sid = request("POST", "/session", {"capabilities": {"alwaysMatch": {
         "browserName": "wry",
-        "tauri:options": {"application": str(args.binary.resolve())},
+        "tauri:options": {"application": str(compositor.application(args.binary))},
     }}})["sessionId"]
     args.output.with_suffix(".session.json").write_text(json.dumps({"sessionId": sid}) + "\n")
     route = f"/session/{sid}"

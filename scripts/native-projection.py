@@ -1,9 +1,10 @@
 #!/usr/bin/env python3
 """Validate ND2 max projections in an owned native Aperture session.
 
-Parent starts tauri-driver with isolated cache/config directories and builds the
-application. Only the chooser response is supplied here. Numeric reduction is
-covered by Rust tests; this checks real UI, IPC, caches and displayed pixels.
+Build the application, then run inside scripts/headless-session --driver 4446,
+which isolates cache/config directories. Only the chooser response is supplied
+here. Numeric reduction is covered by Rust tests; this checks real UI, IPC,
+caches and displayed pixels.
 """
 
 import argparse
@@ -14,6 +15,8 @@ import os
 from pathlib import Path
 import time
 from urllib.request import Request, urlopen
+
+import compositor
 
 ROOT = Path(__file__).resolve().parents[1]
 GIB = 1024 ** 3
@@ -198,7 +201,7 @@ def main():
     try:
         previous_processes = processes()
         sid = request('POST', '/session', {'capabilities': {'alwaysMatch': {
-            'browserName': 'wry', 'tauri:options': {'application': str(binary)},
+            'browserName': 'wry', 'tauri:options': {'application': str(compositor.application(binary))},
         }}})['sessionId']
         route = f'/session/{sid}'
         output.with_suffix('.session.json').write_text(json.dumps({'sessionId': sid}) + '\n')

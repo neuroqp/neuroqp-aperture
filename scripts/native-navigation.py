@@ -1,11 +1,11 @@
 #!/usr/bin/env python3
 """Validate folder navigation in the native Linux app through WebDriver and Rust IPC.
 
-Start tauri-driver on 4446 with XDG_CACHE_HOME inside artifacts/folder-navigation.
-Use an owned TMPDIR there too when /tmp has a per-user quota.
-Only the file chooser response is supplied. Navigation, annotation editing and
-saving use UI handlers and the production backend. Native warning dialogs use
-Hyprland/ydotool by default; --bridge-dialogs explicitly reduces dialog coverage.
+Run inside scripts/headless-session --driver 4446 (use --keep for a cache under
+artifacts/folder-navigation). Only the file chooser response is supplied.
+Navigation, annotation editing and saving use UI handlers and the production
+backend. Native warning dialogs are answered through compositor.py by default;
+--bridge-dialogs explicitly reduces dialog coverage.
 No Python packages required. Test files and screenshots remain outside Git.
 """
 
@@ -13,12 +13,13 @@ import argparse
 import base64
 import json
 from http.client import RemoteDisconnected
-import os
 from pathlib import Path
 import shutil
-import subprocess
 import time
 from urllib.request import Request, urlopen
+
+import compositor
+from compositor import APP_ID
 
 
 ROOT = Path(__file__).resolve().parents[1]
@@ -37,6 +38,8 @@ def main():
     args = parser.parse_args()
     args.output = args.output.absolute()
     args.output.parent.mkdir(parents=True, exist_ok=True)
+    desktop = compositor.session()
+    binary = compositor.application(args.binary)
     corpus = args.output.parent / 'corpus' / str(time.time_ns())
     corpus.mkdir(parents=True)
     fixtures = ROOT / 'tests/fixtures'
@@ -89,7 +92,7 @@ def main():
         return value
 
     sid = request('POST', '/session', {'capabilities': {'alwaysMatch': {
-        'browserName': 'wry', 'tauri:options': {'application': str(args.binary.resolve())},
+        'browserName': 'wry', 'tauri:options': {'application': str(binary)},
     }}})['sessionId']
     route = f'/session/{sid}'
     args.output.with_suffix('.session.json').write_text(json.dumps({'sessionId': sid}) + '\n')
@@ -137,24 +140,21 @@ def main():
         return ready(path)
 
     def resize(width, height):
-        windows = [w for w in json.loads(subprocess.check_output(['hyprctl', '-j', 'clients']))
-                   if w.get('class') == 'aperture' and w.get('title') == 'Aperture']
+        windows = [w for w in desktop.windows() if w['app_id'] == APP_ID and w['title'] == 'Aperture']
         assert len(windows) == 1, 'Expected only the owned validation window'
         command = Path(f"/proc/{windows[0]['pid']}/cmdline").read_bytes().split(b'\0')
-        assert command[0] == str(args.binary.resolve()).encode(), command
-        float_window = '' if windows[0]['floating'] else 'hl.dispatch(hl.dsp.window.float({action="set",window=w}));'
-        subprocess.run(['hyprctl', 'eval',
-                        f'local w=hl.get_windows({{class="aperture"}})[1];{float_window}hl.dispatch(hl.dsp.window.resize({{x={width},y={height},relative=false,window=w}}));hl.dispatch(hl.dsp.focus({{window=w}}))'],
-                       check=True, stdout=subprocess.DEVNULL)
+        assert command[0] == str(binary).encode(), command
+        desktop.resize(windows[0], width, height)
+        desktop.focus(windows[0])
         actual = wait(lambda: js('return {width:window.innerWidth,height:window.innerHeight};'), 'native window size')
         time.sleep(.4)
         actual = js('return {width:window.innerWidth,height:window.innerHeight};')
         assert actual == {'width':width,'height':height}, (width,height,actual)
 
-    def screenshot(name, desktop=False):
+    def screenshot(name, whole_screen=False):
         path = args.output.parent / (name + '.png')
-        if desktop:
-            subprocess.run(['grim', str(path)], check=True)
+        if whole_screen:
+            desktop.screenshot(path)
         else:
             path.write_bytes(base64.b64decode(request('GET', route + '/screenshot')))
         report['screenshots'].append(str(path))
@@ -200,8 +200,6 @@ def main():
     def point_position():
         return js("const v=window.__apertureViewer,r=v.canvas.getBoundingClientRect(),b=v.world.getItemAt(0).getBounds(),p=v.viewport.pixelFromPoint(b.getCenter(),true);return {x:r.left+p.x,y:r.top+p.y};")
 
-    env = {**os.environ, 'YDOTOOL_SOCKET': str(Path(os.environ.get('XDG_RUNTIME_DIR', '/run/user/1000')) / '.ydotool_socket')}
-
     def warning(discard):
         if args.bridge_dialogs:
             js('window.__navigationTest.discard=arguments[0];', [discard])
@@ -209,18 +207,17 @@ def main():
         if args.bridge_dialogs:
             return
         def native_dialog():
-            windows = json.loads(subprocess.check_output(['hyprctl', '-j', 'clients']))
-            return next((w for w in windows if w.get('title') == 'Unsaved annotations'), None)
+            return next((w for w in desktop.windows()
+                         if w['app_id'] == APP_ID and w['title'] == 'Unsaved annotations'), None)
         dialog = wait(native_dialog, 'native discard warning', 10)
         time.sleep(.4)
-        screenshot('warning-discard' if discard else 'warning-cancel', desktop=True)
+        screenshot('warning-discard' if discard else 'warning-cancel', whole_screen=True)
         if discard:
             # Tauri's GTK custom-buttons dialog orders Discard before Cancel.
-            x, y = dialog['at'][0] + dialog['size'][0] / 4, dialog['at'][1] + dialog['size'][1] - 24
-            subprocess.run(['hyprctl', 'eval', f'hl.dispatch(hl.dsp.cursor.move({{x = {x}, y = {y}}}))'], check=True, stdout=subprocess.DEVNULL)
-            subprocess.run(['ydotool', 'click', '0xC0'], env=env, check=True, stdout=subprocess.DEVNULL)
+            desktop.click(dialog['x'] + dialog['width'] / 4, dialog['y'] + dialog['height'] - 24)
         else:
-            subprocess.run(['ydotool', 'key', '1:1', '1:0'], env=env, check=True, stdout=subprocess.DEVNULL)
+            desktop.focus(dialog)
+            desktop.keys('Escape')
         wait(lambda: not native_dialog(), 'warning dismissed', 10)
         time.sleep(.1)
 
@@ -252,7 +249,7 @@ def main():
         expected = [str(files / name) for name, _ in names]
         assert invoke('folder_images', {'path': expected[0]}) == expected
         extensions = invoke('image_extensions')
-        assert set(extensions) == {'jpg', 'jpeg', 'png', 'bmp', 'tif', 'tiff', 'webp'}, extensions
+        assert set(extensions) == {'jpg', 'jpeg', 'png', 'bmp', 'tif', 'tiff', 'webp', 'nd2', 'czi'}, extensions
         open_ready(files / names[0][0])
         options = js('return window.__navigationTest.openOptions;')
         assert options['options']['filters'][0]['extensions'] == extensions, options

@@ -1,7 +1,8 @@
 #!/usr/bin/env python3
 """Check update failure/unsaved guards in the native Linux app via tauri-driver.
 
-Start tauri-driver with isolated XDG_CACHE_HOME/XDG_CONFIG_HOME and an owned TMPDIR.
+Run inside scripts/headless-session --driver 4444, which isolates XDG_CACHE_HOME,
+XDG_CONFIG_HOME and TMPDIR.
 Only chooser/confirmation responses and update feed/download are supplied by this
 check. Pointer edits, TIFF saving and development-mode install rejection are real.
 This does not install an update or validate native dialog rendering.
@@ -13,6 +14,8 @@ from pathlib import Path
 import shutil
 import time
 from urllib.request import Request, urlopen
+
+import compositor
 
 ROOT = Path(__file__).resolve().parents[1]
 
@@ -40,7 +43,7 @@ def main():
         return value
 
     session = request('POST', '/session', {'capabilities': {'alwaysMatch': {
-        'browserName': 'wry', 'tauri:options': {'application': str(args.binary.resolve())}}}})
+        'browserName': 'wry', 'tauri:options': {'application': str(compositor.application(args.binary))}}}})
     route = '/session/' + session['sessionId']
 
     def js(code):

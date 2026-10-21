@@ -1,0 +1,137 @@
+#!/usr/bin/env bash
+# Run a command inside a private, invisible Sway session (the default for native
+# GUI checks). Nothing reaches the user's desktop, clipboard or input devices.
+#
+#   scripts/headless-session [--driver PORT] [--keep DIR] -- COMMAND...
+#
+# --driver PORT  also start tauri-driver on PORT (native port PORT+1)
+# --keep DIR     keep config/cache/data/state/tmp and logs in DIR
+set -euo pipefail
+
+usage() {
+	echo "usage: $0 [--driver PORT] [--keep DIR] -- COMMAND..." >&2
+	exit 2
+}
+
+driver_port='' keep=''
+while (($#)); do
+	case $1 in
+	--driver) driver_port=${2:?--driver needs a port} && shift 2 ;;
+	--keep) keep=${2:?--keep needs a directory} && shift 2 ;;
+	--) shift && break ;;
+	*) usage ;;
+	esac
+done
+(($#)) || usage
+
+here=$(cd "$(dirname "$0")" && pwd)
+root=$(mktemp -d "${TMPDIR:-/tmp}/aperture-headless.XXXXXX")
+data=${keep:-$root}
+mkdir -p "$data"/{config,cache,data,state,tmp}
+data=$(cd "$data" && pwd)
+runtime=$root/runtime
+mkdir -m 0700 "$runtime"
+child='' driver='' sway=''
+
+# Every process started in the session carries a unique marker, so cleanup also
+# finds descendants that left their process group. This shell never exports it.
+marker=APERTURE_TEST_RUN=$root
+sweep() { # Signal marked processes; fail when none are left.
+	local environ pid found=1
+	for environ in /proc/[0-9]*/environ; do
+		pid=${environ#/proc/} && pid=${pid%/environ}
+		if [[ $pid != "$$" ]] && grep -qzxF "$marker" "$environ" 2>/dev/null; then
+			kill "-$1" "$pid" 2>/dev/null && found=0
+		fi
+	done
+	return $found
+}
+
+stop_groups() {
+	local pid alive
+	for pid in "$@"; do
+		kill -TERM -- "-$pid" 2>/dev/null || true
+	done
+	for _ in {1..50}; do
+		alive=''
+		for pid in "$@"; do
+			kill -0 "$pid" 2>/dev/null && alive=1
+		done
+		[[ -n $alive ]] || return 0
+		sleep 0.1
+	done
+}
+
+cleanup() {
+	trap - EXIT INT TERM
+	# shellcheck disable=SC2086 # Empty IDs are intentionally dropped.
+	stop_groups $child $driver
+	for _ in {1..30}; do
+		sweep TERM || break
+		sleep 0.1
+	done
+	sweep KILL || true
+	# shellcheck disable=SC2086
+	stop_groups $sway
+	rm -rf "$root"
+	[[ -z $keep ]] || echo "Kept test data in $data" >&2
+}
+trap cleanup EXIT
+trap 'exit 130' INT
+trap 'exit 143' TERM
+
+clean_env=(env -u DISPLAY -u WAYLAND_DISPLAY -u SWAYSOCK -u HYPRLAND_INSTANCE_SIGNATURE
+	-u YDOTOOL_SOCKET -u DBUS_SESSION_BUS_ADDRESS XDG_RUNTIME_DIR="$runtime")
+
+setsid "${clean_env[@]}" WLR_BACKENDS=headless WLR_LIBINPUT_NO_DEVICES=1 WLR_RENDERER=pixman \
+	sway -c "$here/headless/sway.conf" >"$data/sway.log" 2>&1 &
+sway=$!
+
+socket='' ipc=''
+until [[ -n $socket && -n $ipc ]] && swaymsg -s "$ipc" -t get_version >/dev/null 2>&1; do
+	kill -0 "$sway" 2>/dev/null || {
+		cat "$data/sway.log" >&2
+		echo "Nested Sway exited" >&2
+		exit 1
+	}
+	sleep 0.1
+	for path in "$runtime"/wayland-*; do
+		[[ -S $path ]] && socket=${path##*/}
+	done
+	for path in "$runtime"/sway-ipc.*.sock; do
+		[[ -S $path ]] && ipc=$path
+	done
+done
+
+path=$PATH
+command -v tauri-driver >/dev/null || path=$PATH:$HOME/.cargo/bin
+session_env=("${clean_env[@]}" "$marker" PATH="$path" WAYLAND_DISPLAY="$socket" SWAYSOCK="$ipc"
+	GDK_BACKEND=wayland GTK_USE_PORTAL=0 NO_AT_BRIDGE=1 APERTURE_SESSION=headless
+	APERTURE_TEST_ROOT="$data" XDG_CONFIG_HOME="$data/config" XDG_CACHE_HOME="$data/cache"
+	XDG_DATA_HOME="$data/data" XDG_STATE_HOME="$data/state" TMPDIR="$data/tmp")
+
+if [[ -n $driver_port ]]; then
+	if (exec 3<>"/dev/tcp/127.0.0.1/$driver_port") 2>/dev/null; then
+		echo "Port $driver_port is already in use; choose another --driver port" >&2
+		exit 1
+	fi
+	setsid "${session_env[@]}" dbus-run-session -- \
+		tauri-driver --port "$driver_port" --native-port "$((driver_port + 1))" \
+		>"$data/tauri-driver.log" 2>&1 &
+	driver=$!
+	until (exec 3<>"/dev/tcp/127.0.0.1/$driver_port") 2>/dev/null; do
+		kill -0 "$driver" 2>/dev/null || {
+			cat "$data/tauri-driver.log" >&2
+			echo "tauri-driver exited" >&2
+			exit 1
+		}
+		sleep 0.1
+	done
+fi
+
+setsid "${session_env[@]}" dbus-run-session -- "$@" &
+child=$!
+status=0
+wait "$child" || status=$?
+child=''
+exit "$status"
