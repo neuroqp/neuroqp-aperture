@@ -99,10 +99,6 @@ class Sway:
         with Wayland() as wayland:
             wayland.keys(combos)
 
-    def type_text(self, text):
-        # wtype's generated keymap suits text, not GTK shortcuts; see Wayland.keys.
-        run('wtype', '-s', '300', '--', text)
-
     def click(self, x, y):
         """Left-click at layout coordinates.
 
@@ -179,10 +175,6 @@ class Hyprland(Sway):
             codes = [*modifiers, key]
             self._ydotool('key', *[f'{c}:1' for c in codes], *[f'{c}:0' for c in reversed(codes)])
 
-    def type_text(self, text):
-        self._desktop('Keyboard input')
-        self._ydotool('type', '--', text)
-
     def click(self, x, y):
         self._desktop('Pointer input')
         run('hyprctl', 'eval', f'hl.dispatch(hl.dsp.cursor.move({{x = {x}, y = {y}}}))')
@@ -198,7 +190,10 @@ class Hyprland(Sway):
 
     def set_clipboard(self, data):
         self._desktop('Changing the clipboard')
-        super().set_clipboard(data)
+        # wl-copy keeps serving the clipboard in the background. Without the
+        # session marker it survives teardown, so a restored clipboard stays.
+        env = {k: v for k, v in os.environ.items() if k != 'APERTURE_TEST_RUN'}
+        run('wl-copy', input=data, env=env)
 
 
 class Wayland:

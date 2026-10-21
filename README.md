@@ -191,7 +191,7 @@ Measured native application results and limitations are recorded in
 
 Native application checks run in a private, invisible Sway session by default,
 so they never open windows or use the keyboard, mouse or clipboard of your
-desktop. Install `sway`, `wtype`, `grim`, `wl-clipboard`, `tauri-driver` and
+desktop. Install `sway`, `grim`, `wl-clipboard`, `tauri-driver` and
 WebKitWebDriver, then run:
 
 ```sh

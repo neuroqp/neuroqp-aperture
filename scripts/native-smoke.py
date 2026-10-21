@@ -2,8 +2,8 @@
 """Exercise the real Linux Tauri app through WebDriver and its native chooser.
 
 Run inside scripts/headless-session --driver 4444 and pass a built application
-binary. Uses wtype, wl-clipboard and grim through compositor.py. No Python
-packages required.
+binary. Uses wl-clipboard and grim through compositor.py. No Python packages
+required.
 """
 
 import argparse

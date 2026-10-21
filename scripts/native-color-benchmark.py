@@ -1,8 +1,10 @@
 #!/usr/bin/env python3
 """Benchmark an already-open native Tauri image, without opening or decoding it.
 
-Start tauri-driver and the app separately, open an existing pyramid, then run:
-  python3 scripts/native-color-benchmark.py --session artifacts/color-session.json
+Inside one scripts/headless-session --driver 4444, open an existing pyramid and
+keep the app open, then benchmark it:
+  python3 scripts/native-smoke.py BINARY PYRAMID --leave-open --output artifacts/color.json
+  python3 scripts/native-color-benchmark.py --session artifacts/color.session.json
 
 Inputs follow the real color-panel input handler at event-loop intervals. Timing
 does not read pixels. A separate correctness pass checks framebuffer changes.
@@ -16,6 +18,8 @@ import math
 from pathlib import Path
 from urllib.error import HTTPError
 from urllib.request import Request, urlopen
+
+import compositor
 
 
 SCRIPT = r"""
@@ -373,6 +377,7 @@ def main():
     parser.add_argument("--sustained", action="store_true")
     parser.add_argument("--drag-interval-ms", type=float, default=1000 / 60)
     args = parser.parse_args()
+    compositor.session()  # Never benchmark windows on the user's desktop.
     if args.trials < 2 or args.warmup < 2 or args.interval_ms < 1:
         parser.error("Use at least two trials/warmups and a positive input interval")
     if not all(

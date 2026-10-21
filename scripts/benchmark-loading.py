@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """Measure first image draw in the native Tauri app, using its real renderer/IPC.
 
-Run inside scripts/headless-session --driver 4445 --keep DIR, with DIR inside
+Run inside scripts/headless-session --driver 4448 --keep DIR, with DIR inside
 --output's directory. The chooser response alone is supplied by the harness;
 Open still uses the real frontend and backend. No source pixels or annotations are changed. Cache-cold
 means no completed app cache, not a cold operating-system filesystem cache.
@@ -29,7 +29,7 @@ def main():
     parser.add_argument("images", type=Path, nargs="+")
     parser.add_argument("--output", type=Path, required=True)
     parser.add_argument("--cache-root", type=Path, required=True)
-    parser.add_argument("--driver-url", default="http://127.0.0.1:4445")
+    parser.add_argument("--driver-url", default="http://127.0.0.1:4448")
     parser.add_argument("--driver-pid", type=int, help="Linux process-tree RSS sampling through preview and pyramid completion")
     parser.add_argument("--rounds", type=int, default=3)
     parser.add_argument("--warm-only", action="store_true", help="Reuse existing app caches without clearing them")

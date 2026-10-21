@@ -32,22 +32,28 @@ scripts/headless-session --driver 4446 --keep artifacts/folder-navigation/sessio
 1920 by 1080 virtual output, pixman renderer) with a private `XDG_RUNTIME_DIR`,
 then runs the command, and with `--driver PORT` also `tauri-driver` (native port
 PORT+1), under a private D-Bus. Without a portal, the GTK file chooser runs
-in-process inside the nested session. `XDG_CONFIG_HOME`, `XDG_CACHE_HOME`,
-`XDG_DATA_HOME`, `XDG_STATE_HOME` and `TMPDIR` point into a temporary root, or into
-`--keep DIR` to keep caches and logs. Aperture's instance, image-presence and save
+in-process inside the nested session. Display, input and scale variables of the
+user's desktop (`WAYLAND_DISPLAY`, `WAYLAND_SOCKET`, `DISPLAY`, `GDK_SCALE`,
+`GDK_DPI_SCALE`, ...) are removed. Both driver ports must be free, and the
+command starts only after both listeners are verified to belong to this session,
+so `tauri-driver` can never reach a driver on the user's desktop. Scripts default
+to spaced ports: 4444 (smoke, Settings, update checks, color benchmark), 4446
+(navigation, ND2, CZI, memory, projection) and 4448 (loading benchmark).
+`XDG_CONFIG_HOME`, `XDG_CACHE_HOME`, `XDG_DATA_HOME`, `XDG_STATE_HOME` and `TMPDIR`
+point into a temporary root, or into `--keep DIR` to keep caches and logs. Aperture's instance, image-presence and save
 locks live under `XDG_CACHE_HOME`, so a test instance never coordinates with an
 Aperture window the user has open. Exit, failure, Ctrl-C and TERM stop every
-process started in the session and remove the temporary root. The command's exit
-status is returned.
+process started in the session (TERM, then KILL after a grace period), then the
+compositor, and remove the temporary root. The command's exit status is returned.
 
 Scripts drive windows through `scripts/compositor.py`: window lists and
 float/resize/focus via `swaymsg`, screenshots with `grim` and the clipboard with
 `wl-copy`/`wl-paste`, all on the nested display. Headless Sway has no input
 devices, so keys and clicks add a temporary virtual keyboard (standard US
-keymap) or pointer. `wtype` is used only for text: its generated keymaps break
-Return, Escape and Ctrl shortcuts in GTK dialogs. Scripts launch the app through
-an `aperture-test` symlink, giving every window, including GTK dialogs, the
-Wayland app_id `aperture-test`. WebKit needs no extra environment: WebGL2 reports
+keymap) or pointer. Scripts that launch the app through
+`compositor.application()` start it via an `aperture-test` symlink; GTK derives
+the Wayland app_id `aperture-test` from it for the main window and its dialogs.
+`native-appimage-update.py` launches an AppImage and keeps its own app_id. WebKit needs no extra environment: WebGL2 reports
 `WebKit WebGL` and the viewer uses its GPU renderer.
 
 To watch a run, install `wayvnc` (`sudo pacman -S wayvnc`), start it inside the
@@ -69,10 +75,13 @@ scripts/visible-session --driver 4444 -- python3 scripts/... src-tauri/target/de
 
 `visible-session` asks Hyprland to start `tauri-driver` (or, without `--driver`,
 the command itself) with the exec rule `workspace 9 silent` and
-`no_initial_focus`. Children inherit the rule, so the active workspace and focus
-do not change. The same isolated directories, private D-Bus and `aperture-test`
-app_id apply. To keep any stray test window off the active workspace, add this to
-`~/.config/hypr/hyprland.lua`:
+`no_initial_focus`, keeping the desktop's own display scale. The same isolated
+directories, private D-Bus and port checks apply. On October 21, 2026, one
+WebDriver launch put the first main window on workspace 9 while the active
+workspace and focus stayed unchanged. Dialogs, app restarts and AppImage
+relaunches were not verified in visible mode. Add this rule to
+`~/.config/hypr/hyprland.lua` so every `aperture-test` window, including dialogs
+and later windows, stays off the active workspace:
 
 ```lua
 o.window("^aperture-test$", { workspace = "9 silent", no_initial_focus = true })
@@ -81,7 +90,8 @@ o.window("^aperture-test$", { workspace = "9 silent", no_initial_focus = true })
 In visible mode, `compositor.py` lists windows and floats or resizes only
 `aperture-test` windows. Focus, keys, clicks, screenshots and the clipboard raise
 an error unless `APERTURE_VISIBLE_INPUT=1` is set. Then `ydotool` types into
-whatever window has focus, and focusing the test window switches to workspace 9.
+whatever window has focus, focusing the test window switches to workspace 9, and
+a clipboard restored by a script outlives the session.
 Windows on a hidden workspace do not paint, so WebDriver screenshots time out
 there unless workspace 9 is shown.
 
