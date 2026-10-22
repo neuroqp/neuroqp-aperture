@@ -228,6 +228,7 @@ def main():
     parser.add_argument('--driver-url', help='defaults to the session driver; must match it')
     parser.add_argument('--fixtures', type=Path, default=ROOT / 'test-data/ome')
     parser.add_argument('--public', type=Path, help='directory with public OME-TIFF samples')
+    parser.add_argument('--big', type=Path, help='OME-TIFF whose single planes exceed 256 MiB')
     parser.add_argument('--renderer', choices=('gpu', 'cpu'), default='gpu')
     parser.add_argument('--output', type=Path)
     parser.add_argument('--timeout', type=float, default=120)
@@ -255,7 +256,7 @@ def main():
 
     previous_processes = app_processes()
 
-    def request(method, path, body=None, retry=True):
+    def request(method, path, body=None, retry=None):
         req = Request(args.driver_url + path, method=method,
                       data=None if body is None else json.dumps(body).encode(),
                       headers={'Content-Type': 'application/json'})
@@ -263,7 +264,9 @@ def main():
             with urlopen(req, timeout=max(30, args.timeout)) as response:
                 value = json.load(response).get('value')
         except (ConnectionError, RemoteDisconnected) as error:
-            if not retry:
+            # WebKitWebDriver occasionally resets a connection. Retry GETs and
+            # read-only scripts once, visibly; never repeat input or commands.
+            if not (method == 'GET' if retry is None else retry):
                 raise
             report.setdefault('driverRetries', []).append({'method': method, 'path': path, 'error': repr(error)})
             time.sleep(1)
@@ -272,29 +275,30 @@ def main():
             raise RuntimeError(value)
         return value
 
-    sid = request('POST', '/session', retry=False, body={'capabilities': {'alwaysMatch': {
+    sid = request('POST', '/session', body={'capabilities': {'alwaysMatch': {
         'browserName': 'wry', 'tauri:options': {'application': str(compositor.application(binary))},
     }}})['sessionId']
     route = f'/session/{sid}'
     args.output.with_suffix('.session.json').write_text(json.dumps({'sessionId': sid}) + '\n')
 
-    def js(script, values=None, asynchronous=False):
+    def js(script, values=None, asynchronous=False, read_only=False):
+        # Only scripts that change nothing may be retried after a reset.
         return request('POST', route + '/execute/' + ('async' if asynchronous else 'sync'),
-                       {'script': script, 'args': values or []})
+                       {'script': script, 'args': values or []}, retry=read_only)
 
-    def invoke(command, values=None):
+    def invoke(command, values=None, read_only=False):
         return js('const done=arguments[arguments.length-1];window.__TAURI_INTERNALS__.invoke(arguments[0],arguments[1]).then(done,e=>done({error:String(e)}));',
-                  [command, values or {}], True)
+                  [command, values or {}], True, read_only)
 
     def state():
-        return invoke('image_state')
+        return invoke('image_state', read_only=True)
 
     def ui():
         return js("""const g=id=>document.getElementById(id);return {phase:g('viewer').dataset.phase,name:g('filename').textContent,
           status:g('status').textContent,statusError:g('status').classList.contains('error'),count:g('dimension-count').textContent,
           dimensionName:g('dimension-name').textContent,projectionStatus:g('dimension-projection-status').hidden?null:g('dimension-projection-status').textContent,
           maxZDisabled:g('dimension-max-z').disabled,maxTimeDisabled:g('dimension-max-time').disabled,scope:!g('dimension-scope').hidden,
-          pointsDisabled:g('points-button').disabled,saveDisabled:g('save-button').disabled,items:window.__apertureViewer.world.getItemCount()};""")
+          pointsDisabled:g('points-button').disabled,saveDisabled:g('save-button').disabled,items:window.__apertureViewer.world.getItemCount()};""", read_only=True)
 
     def wait(predicate, description, timeout=None):
         deadline = time.monotonic() + (timeout or args.timeout)
@@ -355,7 +359,7 @@ def main():
         """The backend selection is ready and every viewer item draws it."""
         return js("""const v=window.__apertureViewer,n=v.world.getItemCount();
           return document.getElementById('viewer').dataset.phase==='ready' && n>0 &&
-            Array.from({length:n},(_,i)=>v.world.getItemAt(i)).every(item=>item.source.getTileUrl(item.source.maxLevel,0,0).includes('/'+arguments[0]+'/') && item.getFullyLoaded());""", [s['id']])
+            Array.from({length:n},(_,i)=>v.world.getItemAt(i)).every(item=>item.source.getTileUrl(item.source.maxLevel,0,0).includes('/'+arguments[0]+'/') && item.getFullyLoaded());""", [s['id']], read_only=True)
 
     def ready(path, previous_id, expect_error=False, projection=None):
         def current():
@@ -406,7 +410,7 @@ def main():
           const base=url.split('/'+s.id+'/')[0]+'/'+s.id;
           const encode=b=>{let t='';for(let i=0;i<b.length;i+=32768)t+=String.fromCharCode.apply(null,b.subarray(i,i+32768));return btoa(t);};
           Promise.all(paths.map(p=>fetch(base+p).then(async r=>({status:r.status,type:r.headers.get('content-type'),
-            data:r.ok?encode(new Uint8Array(await r.arrayBuffer())):''})))).then(done,e=>done({error:String(e)}));""", [s, paths], True)
+            data:r.ok?encode(new Uint8Array(await r.arrayBuffer())):''})))).then(done,e=>done({error:String(e)}));""", [s, paths], True, read_only=True)
         assert isinstance(result, list), result
         assert all(r['status'] == 200 for r in result), [(p, r['status']) for p, r in zip(paths, result)]
         return [base64.b64decode(r['data']) for r in result]
@@ -471,6 +475,37 @@ def main():
         denied = invoke('load_annotations', {'id': s['id']})
         assert 'browsing-only' in str(denied.get('error', '')), denied
         return view
+
+    def big_plane(path):
+        """Planes above 256 MiB open, browse and preload without frames."""
+        started = time.monotonic()
+        previous = state()['id']
+        stub_open(path)
+        s = wait(lambda: (v := state()) and v['path'] == str(path) and v['id'] != previous and v['phase'] == 'ready' and v,
+                 'big plane ready', 900)
+        w, h = s['width'], s['height']
+        assert w * h * 2 > 256 * 1024 * 1024 and s['sampleBits'] == 16, s
+        assert s['projectionUnavailable'] and ui()['maxZDisabled'] and ui()['maxTimeDisabled'], s
+        result = {'width': w, 'height': h, 'channels': len(s['channels']), 'readySeconds': round(time.monotonic() - started, 1),
+                  'detail': s['detail']}
+        wait(lambda: displayed(s), 'big plane displayed', 120)
+        # Full-resolution tile 0_0 of each channel equals an independent libvips read.
+        level = (max(w, h) - 1).bit_length()
+        bodies = fetch(s, [f'/channels/{c}/tiles/{level}/0_0.u16' for c in range(len(s['channels']))])
+        for c, body in enumerate(bodies):
+            tw, th, values = decode(body, 16)
+            assert values == vips_plane(path, c, TILE, TILE, crop=True), ('big tile', c)
+        result['tilesMatchLibvips'] = len(bodies)
+        preload = wait(lambda: (v := invoke('nd2_preload_status', read_only=True)) and v['previewsReady'] >= 2 and v,
+                       'big preview preloaded', 900)
+        result['preload'] = preload
+        started = time.monotonic()
+        s = navigate('time', 1, path)
+        result['nextTimeSeconds'] = round(time.monotonic() - started, 1)
+        result['nextDetail'] = s['detail']
+        bodies = fetch(s, [f'/channels/0/tiles/{level}/0_0.u16'])
+        assert decode(bodies[0], 16)[2] == vips_plane(path, 2, TILE, TILE, crop=True), 'big tile at T 2'
+        return result
 
     try:
         start()
@@ -566,6 +601,9 @@ def main():
         screenshot('projection-unavailable')
         checks['projectionUnavailable'] = view
 
+        if args.big:
+            checks['big'] = big_plane(args.big.resolve())
+
         if args.public:
             checks['public'] = public_samples(args.public, open_ready, navigate, fetch, decode, state)
 
@@ -603,10 +641,17 @@ def main():
     print(json.dumps({'passed': report['passed'], 'checks': list(report['checks']), 'report': str(args.output)}, indent=2))
 
 
-def vips_plane(path, page, width, height):
-    """Samples of one page read independently through the libvips tools."""
+def vips_plane(path, page, width, height, crop=False):
+    """Samples of one page (or its top-left corner) read independently by libvips."""
     raw = Path(os.environ.get('TMPDIR', '/tmp')) / f'ome-page-{os.getpid()}.raw'
-    subprocess.run(['vips', 'rawsave', f'{path}[page={page},n=1]', str(raw)], check=True, capture_output=True)
+    if crop:
+        region = raw.with_suffix('.v')
+        subprocess.run(['vips', 'crop', f'{path}[page={page},n=1]', str(region), '0', '0', str(width), str(height)],
+                       check=True, capture_output=True)
+        subprocess.run(['vips', 'rawsave', str(region), str(raw)], check=True, capture_output=True)
+        region.unlink()
+    else:
+        subprocess.run(['vips', 'rawsave', f'{path}[page={page},n=1]', str(raw)], check=True, capture_output=True)
     data = raw.read_bytes()
     raw.unlink()
     if len(data) == width * height * 2:

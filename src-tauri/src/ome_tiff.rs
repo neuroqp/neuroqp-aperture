@@ -39,6 +39,12 @@ const MAX_IFDS: u64 = 1 << 21;
 const MAX_IFD_ENTRIES: u64 = 1 << 16;
 /// Bounded read of a member's ImageDescription for its root UUID.
 const HEADER_BYTES: u64 = 64 * 1024;
+/// OME UUIDs are `urn:uuid:` plus 36 characters; longer values are rejected.
+const MAX_UUID_BYTES: usize = 256;
+/// Canonical member paths longer than this are rejected.
+const MAX_PATH_BYTES: usize = 4096;
+/// Retained per member: summary, path, UUIDs and lookup entries.
+const MEMBER_BYTES: u64 = 1024 + MAX_PATH_BYTES as u64 + 2 * MAX_UUID_BYTES as u64;
 
 fn error(message: impl std::fmt::Display) -> String {
     format!("OME-TIFF: {message}")
@@ -51,6 +57,9 @@ pub(crate) struct Dataset {
     pub series: Vec<Series>,
     /// Series whose C/Z/T sizes, pixel type or samples differ from series 0.
     pub skipped: usize,
+    /// Other files that defined the mapping: an opened companion or a
+    /// `BinaryOnly` metadata file that is not itself a member.
+    pub dependencies: Vec<PathBuf>,
 }
 
 #[derive(Clone, Debug)]
@@ -92,15 +101,26 @@ impl Series {
         } else {
             (c, self.logical_channels())
         };
-        self.planes[(c + count * (z + self.size_z * t)) as usize]
+        let index =
+            (c as usize) + count as usize * (z as usize + self.size_z as usize * t as usize);
+        self.planes.get(index).copied().flatten()
     }
 }
 
+/// A companion, a TIFF whose first description has an OME root, or one whose
+/// description mentions OME-XML that the root probe cannot place, so it gets
+/// the OME path's explicit errors instead of the editable ordinary-TIFF path.
 pub(crate) fn detect(path: &Path) -> Result<bool, String> {
     if is_companion(path) {
         return Ok(true);
     }
-    Ok(Tiff::open(path)?.is_some_and(|tiff| tiff.ome_uuid().is_ok_and(|root| root.is_some())))
+    let Some(tiff) = Tiff::open(path)? else {
+        return Ok(false);
+    };
+    Ok(match tiff.root() {
+        Ok(Root::Ome(_)) => true,
+        _ => tiff.mentions_ome()?,
+    })
 }
 
 pub(crate) fn open(path: &Path, budget: &Arc<Budget>) -> Result<(Dataset, Reservation), String> {
@@ -127,7 +147,9 @@ pub(crate) fn open(path: &Path, budget: &Arc<Budget>) -> Result<(Dataset, Reserv
         read_text(len, budget, |bytes| tiff.read(offset, bytes))?
     };
     let (name, uuid) = match from_xml(&text, budget, &mut origin)? {
-        Metadata::Dataset(dataset, reservation) => return Ok((dataset, reservation)),
+        Metadata::Dataset(dataset, reservation) => {
+            return Ok((with_dependencies(dataset, [path]), reservation))
+        }
         Metadata::BinaryOnly(name, uuid) => (name, uuid),
     };
     drop(text);
@@ -146,9 +168,21 @@ pub(crate) fn open(path: &Path, budget: &Arc<Budget>) -> Result<(Dataset, Reserv
         None => read_file(&metadata, budget)?,
     };
     match from_xml(&text, budget, &mut origin)? {
-        Metadata::Dataset(dataset, reservation) => Ok((dataset, reservation)),
+        Metadata::Dataset(dataset, reservation) => {
+            Ok((with_dependencies(dataset, [path, metadata]), reservation))
+        }
         Metadata::BinaryOnly(..) => unreachable!("BinaryOnly requires XML in the opened TIFF"),
     }
+}
+
+/// At most two paths, covered by the dataset's fixed reservation allowance.
+fn with_dependencies<const N: usize>(mut dataset: Dataset, files: [PathBuf; N]) -> Dataset {
+    for file in files {
+        if !dataset.members.contains(&file) && !dataset.dependencies.contains(&file) {
+            dataset.dependencies.push(file);
+        }
+    }
+    dataset
 }
 
 pub(crate) fn is_companion(path: &Path) -> bool {
@@ -245,7 +279,7 @@ fn from_xml(text: &str, budget: &Arc<Budget>, origin: &mut Origin) -> Result<Met
     if root.tag_name().name() != "OME" {
         return Err(error("the XML root is not an OME element."));
     }
-    let uuid = root.attribute("UUID");
+    let uuid = root.attribute("UUID").map(checked_uuid).transpose()?;
     if origin.xml_in_opened {
         origin.opened_uuid = uuid.map(str::to_owned);
     }
@@ -267,7 +301,11 @@ fn from_xml(text: &str, budget: &Arc<Budget>, origin: &mut Origin) -> Result<Met
             .ok_or_else(|| error("BinaryOnly has no MetadataFile."))?;
         return Ok(Metadata::BinaryOnly(
             name.into(),
-            binary.attribute("UUID").map(str::to_owned),
+            binary
+                .attribute("UUID")
+                .map(checked_uuid)
+                .transpose()?
+                .map(str::to_owned),
         ));
     }
     let (dataset, reservation) = build(root, origin, budget)?;
@@ -327,15 +365,23 @@ fn build(
             _ => skipped += 1,
         }
     }
-    let mut total = 0;
-    for (series, ..) in &kept {
-        total += u64::from(series.logical_channels())
-            * u64::from(series.size_z)
-            * u64::from(series.size_t);
-    }
-    if total > MAX_PLANES {
-        return Err(error(format!("more than {MAX_PLANES} planes.")));
-    }
+    // Each series is already within MAX_PLANES; the sum cannot overflow.
+    let total = kept
+        .iter()
+        .try_fold(0u64, |total, (series, ..)| {
+            total
+                .checked_add(plane_count(series)?)
+                .filter(|total| *total <= MAX_PLANES)
+        })
+        .ok_or_else(|| error(format!("more than {MAX_PLANES} planes.")))?;
+    // Member summaries are allocated while resolving references; reserve their
+    // bounded size first. The retained reservation below replaces this one.
+    let references = kept
+        .iter()
+        .map(|(_, pixels, _)| children(*pixels, "TiffData").count() as u64)
+        .sum::<u64>()
+        .clamp(1, MAX_MEMBERS as u64);
+    let workspace = budget.require(references * MEMBER_BYTES, &budget_error())?;
     let mut members = Members {
         origin,
         files: Vec::new(),
@@ -350,7 +396,9 @@ fn build(
         }
     }
     let entry = std::mem::size_of::<Option<PlaneRef>>() as u64;
+    // 2 × MAX_PATH_BYTES covers up to two dependency paths.
     let retained = 4096
+        + 2 * MAX_PATH_BYTES as u64
         + total * entry
         + kept.iter().map(|(series, ..)| bytes(series)).sum::<u64>()
         + members
@@ -359,6 +407,7 @@ fn build(
             .map(|file| (std::mem::size_of::<PathBuf>() + file.path.as_os_str().len()) as u64)
             .sum::<u64>();
     let reservation = budget.require(retained, &budget_error())?;
+    drop(workspace);
     let mut assigned = 0;
     let series = kept
         .into_iter()
@@ -379,9 +428,18 @@ fn build(
             members,
             series,
             skipped,
+            dependencies: Vec::new(),
         },
         reservation,
     ))
+}
+
+/// Logical planes of a series; `describe` keeps this within `MAX_PLANES`.
+fn plane_count(series: &Series) -> Option<u64> {
+    u64::from(series.logical_channels())
+        .checked_mul(u64::from(series.size_z))?
+        .checked_mul(u64::from(series.size_t))
+        .filter(|count| *count <= MAX_PLANES)
 }
 
 fn bytes(series: &Series) -> u64 {
@@ -521,6 +579,19 @@ fn describe<'a, 'd>(
             })
             .collect()
     };
+    let size_z = size("SizeZ")?;
+    let size_t = size("SizeT")?;
+    let logical = if rgb { 1 } else { samples.len() as u64 };
+    // Checked before any plane table exists; this also bounds all index math.
+    if logical
+        .checked_mul(u64::from(size_z))
+        .and_then(|count| count.checked_mul(u64::from(size_t)))
+        .is_none_or(|count| count > MAX_PLANES)
+    {
+        return Err(error(format!(
+            "image {number} has more than {MAX_PLANES} planes."
+        )));
+    }
     let series = Series {
         name: image
             .attribute("Name")
@@ -529,8 +600,8 @@ fn describe<'a, 'd>(
             .unwrap_or_else(|| format!("Position {number}")),
         width: size("SizeX")?,
         height: size("SizeY")?,
-        size_z: size("SizeZ")?,
-        size_t: size("SizeT")?,
+        size_z,
+        size_t,
         channels,
         rgb,
         sample_bits,
@@ -601,6 +672,15 @@ fn reference<'d>(data: Node<'d, '_>) -> (Option<&'d str>, Option<&'d str>) {
         uuid.text().map(str::trim).filter(|s| !s.is_empty()),
         uuid.attribute("FileName").filter(|s| !s.is_empty()),
     )
+}
+
+fn checked_uuid(uuid: &str) -> Result<&str, String> {
+    if uuid.len() > MAX_UUID_BYTES {
+        return Err(error(format!(
+            "a UUID is longer than {MAX_UUID_BYTES} bytes."
+        )));
+    }
+    Ok(uuid)
 }
 
 fn planes<'d>(
@@ -705,6 +785,9 @@ impl<'d> Members<'_, 'd> {
         if let Some(index) = self.references.get(&(uuid, name)) {
             return Ok(*index);
         }
+        if let Some(uuid) = uuid {
+            checked_uuid(uuid)?;
+        }
         if self.references.len() >= MAX_MEMBERS {
             return Err(error(format!(
                 "more than {MAX_MEMBERS} member file references."
@@ -735,8 +818,17 @@ impl<'d> Members<'_, 'd> {
                 let tiff =
                     Tiff::open(&path)?.ok_or_else(|| error(format!("{label} is not a TIFF.")))?;
                 let index = self.files.len() as u16;
+                let root = match tiff.root()? {
+                    Root::Ome(uuid) => uuid,
+                    Root::Other => None,
+                    Root::Unknown => {
+                        return Err(error(format!(
+                            "the OME-XML root of {label} cannot be read within its description."
+                        )))
+                    }
+                };
                 self.files.push(Member {
-                    root: tiff.ome_uuid()?.flatten(),
+                    root,
                     ifds: tiff.ifds(&mut self.walked)?,
                     path: path.clone(),
                     uuid: None,
@@ -788,6 +880,11 @@ fn confined(directory: &Path, name: &str) -> Result<PathBuf, String> {
     }
     let path = std::fs::canonicalize(directory.join(name))
         .map_err(|e| error(format!("member file {name:?} cannot be opened: {e}")))?;
+    if path.as_os_str().len() > MAX_PATH_BYTES {
+        return Err(error(format!(
+            "member file {name:?} has a path that is too long."
+        )));
+    }
     if !path.starts_with(directory) || !path.is_file() {
         return Err(error(format!(
             "member file {name:?} resolves outside the dataset folder."
@@ -839,6 +936,46 @@ fn root_start(text: &[u8]) -> Option<(&[u8], Option<&[u8]>)> {
             uuid = Some(&rest[1..close]);
         }
         rest = &rest[close + 1..];
+    }
+}
+
+enum Root {
+    /// An OME root with its `UUID` attribute, if any.
+    Ome(Option<String>),
+    /// Not XML, or XML with another root.
+    Other,
+    /// XML whose prolog or root start tag does not end within the probe.
+    Unknown,
+}
+
+/// A byte range of a TIFF read in windows of at most `HEADER_BYTES`.
+struct Text<'a> {
+    tiff: &'a Tiff,
+    at: u64,
+    end: u64,
+}
+
+impl Text<'_> {
+    fn window(&self, len: u64) -> Result<Vec<u8>, String> {
+        let mut bytes = vec![0; len.min(self.end.saturating_sub(self.at)) as usize];
+        self.tiff.read(self.at, &mut bytes)?;
+        Ok(bytes)
+    }
+
+    /// Advances past `pattern`; false when the range ends first.
+    fn skip_past(&mut self, pattern: &[u8]) -> Result<bool, String> {
+        loop {
+            let window = self.window(HEADER_BYTES)?;
+            if let Some(at) = window.windows(pattern.len()).position(|w| w == pattern) {
+                self.at += (at + pattern.len()) as u64;
+                return Ok(true);
+            }
+            if window.len() < HEADER_BYTES as usize {
+                return Ok(false);
+            }
+            // Keep an overlap so a pattern across windows is still found.
+            self.at += (window.len() - (pattern.len() - 1)) as u64;
+        }
     }
 }
 
@@ -971,16 +1108,73 @@ impl Tiff {
         Ok(None)
     }
 
-    /// `Some(uuid)` when the first page describes an OME root.
-    fn ome_uuid(&self) -> Result<Option<Option<String>>, String> {
+    /// The first description's root element, read in bounded windows so that
+    /// a long prolog never needs the whole XML in memory.
+    fn root(&self) -> Result<Root, String> {
         let Some((offset, len)) = self.description()? else {
-            return Ok(None);
+            return Ok(Root::Other);
         };
-        let mut bytes = vec![0; len.min(HEADER_BYTES) as usize];
-        self.read(offset, &mut bytes)?;
-        Ok(root_start(&bytes)
-            .filter(|(name, _)| *name == b"OME")
-            .map(|(_, uuid)| uuid.map(|uuid| String::from_utf8_lossy(uuid).into_owned())))
+        let mut text = Text {
+            tiff: self,
+            at: offset,
+            end: offset + len.min(MAX_XML_BYTES),
+        };
+        if text.window(3)? == b"\xEF\xBB\xBF" {
+            text.at += 3;
+        }
+        loop {
+            let window = text.window(HEADER_BYTES)?;
+            let blank = window.len() - window.trim_ascii_start().len();
+            if blank > 0 {
+                text.at += blank as u64;
+                continue;
+            }
+            let terminator: &[u8] = if window.starts_with(b"<?") {
+                b"?>"
+            } else if window.starts_with(b"<!--") {
+                b"-->"
+            } else if window.starts_with(b"<") {
+                return Ok(match root_start(&window) {
+                    Some((b"OME", uuid)) => Root::Ome(
+                        uuid.map(|uuid| {
+                            std::str::from_utf8(uuid)
+                                .map_err(|_| error("a root UUID is not UTF-8."))
+                                .and_then(checked_uuid)
+                                .map(str::to_owned)
+                        })
+                        .transpose()?,
+                    ),
+                    Some(_) => Root::Other,
+                    None => Root::Unknown,
+                });
+            } else {
+                // Empty or not XML.
+                return Ok(Root::Other);
+            };
+            text.at += 2;
+            if !text.skip_past(terminator)? {
+                return Ok(Root::Unknown);
+            }
+        }
+    }
+
+    /// Whether the first description mentions an OME element anywhere in its
+    /// first 32 MiB, including prefixed names.
+    fn mentions_ome(&self) -> Result<bool, String> {
+        let Some((offset, len)) = self.description()? else {
+            return Ok(false);
+        };
+        for pattern in [&b"<OME"[..], b":OME"] {
+            let mut text = Text {
+                tiff: self,
+                at: offset,
+                end: offset + len.min(MAX_XML_BYTES),
+            };
+            if text.skip_past(pattern)? {
+                return Ok(true);
+            }
+        }
+        Ok(false)
     }
 }
 
@@ -1724,6 +1918,212 @@ mod tests {
         let message = parse(&text, &budget).map(|_| ()).unwrap_err();
         assert!(message.contains("memory budget"), "{message}");
         assert_eq!(budget.status().unwrap().used_bytes, 0);
+    }
+
+    #[test]
+    fn plane_counts_are_checked_before_any_table_or_index() {
+        let dir = temporary();
+        // Both products wrap in 32 bits; neither may open or index.
+        for (c, z, t, channels) in [
+            (32, 134_234_113, 4_294_443_040_u64, ""),
+            (4, 2_147_418_113, 2_147_549_185, ""),
+            (1, 1 << 20, 2, r#"<Channel SamplesPerPixel="1"/>"#),
+        ] {
+            let xml = ome(
+                "urn:uuid:a",
+                &format!(
+                    r#"<Image ID="Image:0" Name="A"><Pixels ID="Pixels:0" DimensionOrder="XYCZT" Type="uint8" SizeX="1" SizeY="1" SizeC="{c}" SizeZ="{z}" SizeT="{t}">{channels}<TiffData IFD="0" PlaneCount="1"/></Pixels></Image>"#
+                ),
+            );
+            expect_error(opened(&dir, 1, &xml), "planes");
+        }
+        // A wrapped series after a valid first one is skipped, never indexed.
+        let xml = ome(
+            "urn:uuid:a",
+            &format!(
+                "{}{}",
+                image("A", "XYZCT", "uint8", [1, 1, 1], "", "<TiffData/>"),
+                image(
+                    "B",
+                    "XYZCT",
+                    "uint8",
+                    [4, 2_147_418_113, 2_147_549_185],
+                    "",
+                    "<TiffData/>"
+                )
+            ),
+        );
+        let dataset = opened(&dir, 1, &xml).unwrap();
+        assert_eq!((dataset.series.len(), dataset.skipped), (1, 1));
+        assert_eq!(dataset.series[0].plane(0, 0, 1), None);
+        assert_eq!(dataset.series[0].plane(0, u32::MAX, u32::MAX), None);
+    }
+
+    #[test]
+    fn root_probes_read_past_long_prologs_and_never_guess() {
+        let dir = temporary();
+        let comment = format!("<!-- {} -->", "x".repeat(70 * 1024));
+        let body = image("A", "XYZCT", "uint8", [1, 2, 1], "", "<TiffData/>");
+        let late = format!(
+            r#"<?xml version="1.0"?>{comment}<OME xmlns="{NS}" UUID="urn:uuid:a">{body}</OME>"#
+        );
+        let path = dir.join("late.tif");
+        write_tiff(&path, false, true, 2, Some(&late));
+        assert!(detect(&path).unwrap());
+        let dataset = open(&path, &budget(&dir)).unwrap().0;
+        assert_eq!(page(&dataset.series[0], 0, 1, 0), Some((0, 1)));
+        // OME-XML the probe cannot place still takes the OME path and fails there.
+        for text in [
+            format!("<!-- unterminated {comment}<OME xmlns=\"{NS}\"/>"),
+            format!("<!DOCTYPE OME><OME xmlns=\"{NS}\"/>"),
+            format!(
+                "<OME xmlns=\"{NS}\" {} UUID=\"u\">",
+                "a=\"b\" ".repeat(20_000)
+            ),
+        ] {
+            write_tiff(&path, false, true, 1, Some(&text));
+            assert!(detect(&path).unwrap());
+            assert!(open(&path, &budget(&dir)).is_err());
+        }
+        write_tiff(&path, false, true, 1, Some("ImageJ=1.54\nimages=1\n"));
+        assert!(!detect(&path).unwrap());
+        // A member UUID after a long prolog is still compared with its reference.
+        let reference = |uuid: &str| {
+            ome(
+                "urn:uuid:a",
+                &image(
+                    "A",
+                    "XYZCT",
+                    "uint8",
+                    [1, 1, 1],
+                    "",
+                    &format!(r#"<TiffData><UUID FileName="b.ome.tif">{uuid}</UUID></TiffData>"#),
+                ),
+            )
+        };
+        write_tiff(
+            &dir.join("b.ome.tif"),
+            false,
+            true,
+            1,
+            Some(&format!(
+                r#"{comment}<OME xmlns="{NS}" UUID="urn:uuid:b"/>"#
+            )),
+        );
+        assert!(opened(&dir, 1, &reference("urn:uuid:b")).is_ok());
+        expect_error(
+            opened(&dir, 1, &reference("urn:uuid:other")),
+            "has UUID urn:uuid:b",
+        );
+        // An unreadable member root is an error, not an absent UUID.
+        write_tiff(
+            &dir.join("b.ome.tif"),
+            false,
+            true,
+            1,
+            Some(&format!("<!-- {}", "x".repeat(70 * 1024))),
+        );
+        expect_error(opened(&dir, 1, &reference("urn:uuid:b")), "cannot be read");
+    }
+
+    #[test]
+    fn uuids_and_member_summaries_are_bounded_and_reserved() {
+        let dir = temporary();
+        let long = format!("urn:uuid:{}", "a".repeat(300));
+        let reference = |file: &str, uuid: &str, z: u32| {
+            format!(
+                r#"<TiffData FirstZ="{z}" PlaneCount="1"><UUID FileName="{file}">{uuid}</UUID></TiffData>"#
+            )
+        };
+        let xml = |body: String, z: u32| {
+            ome(
+                "urn:uuid:a",
+                &image("A", "XYZCT", "uint8", [1, z, 1], "", &body),
+            )
+        };
+        write_tiff(&dir.join("m0.tif"), false, true, 1, None);
+        expect_error(
+            opened(&dir, 1, &xml(reference("m0.tif", &long, 0), 1)),
+            "UUID is longer",
+        );
+        expect_error(opened(&dir, 1, &ome(&long, "")), "UUID is longer");
+        write_tiff(
+            &dir.join("m0.tif"),
+            false,
+            true,
+            1,
+            Some(&format!(r#"<OME xmlns="{NS}" UUID="{long}"/>"#)),
+        );
+        expect_error(
+            opened(&dir, 1, &xml(reference("m0.tif", "urn:uuid:m", 0), 1)),
+            "UUID is longer",
+        );
+        // Many members: their summaries are admitted before resolution.
+        let count = 300;
+        for index in 0..count {
+            write_tiff(&dir.join(format!("m{index}.tif")), false, true, 1, None);
+        }
+        let body: String = (0..count)
+            .map(|index| {
+                reference(
+                    &format!("m{index}.tif"),
+                    &format!("urn:uuid:{index}"),
+                    index,
+                )
+            })
+            .collect();
+        let dataset = opened(&dir, 1, &xml(body.clone(), count)).unwrap();
+        assert_eq!(dataset.members.len(), count as usize);
+        let budget = budget(&dir);
+        budget.set_limit(MIN_LIMIT_BYTES).unwrap();
+        let available = budget.status().unwrap().available_bytes;
+        let full = budget
+            .try_reserve(available - u64::from(count) * MEMBER_BYTES / 2, false)
+            .unwrap()
+            .unwrap();
+        let path = dir.join("many.ome.tif");
+        write_tiff(&path, false, true, 1, Some(&xml(body, count)));
+        let message = open(&path, &budget).map(|_| ()).unwrap_err();
+        assert!(message.contains("memory budget"), "{message}");
+        drop(full);
+        assert_eq!(budget.status().unwrap().used_bytes, 0);
+    }
+
+    #[test]
+    fn opened_companions_and_metadata_files_are_dependencies() {
+        let dir = temporary();
+        let data = dir.join("data.ome.tif");
+        let companion = dir.join("set.companion.ome");
+        write_tiff(
+            &data,
+            false,
+            true,
+            1,
+            Some(&ome(
+                "urn:uuid:data",
+                r#"<BinaryOnly MetadataFile="set.companion.ome" UUID="urn:uuid:meta"/>"#,
+            )),
+        );
+        std::fs::write(
+            &companion,
+            ome(
+                "urn:uuid:meta",
+                &image(
+                    "A",
+                    "XYZCT",
+                    "uint8",
+                    [1, 1, 1],
+                    "",
+                    r#"<TiffData><UUID FileName="data.ome.tif">urn:uuid:data</UUID></TiffData>"#,
+                ),
+            ),
+        )
+        .unwrap();
+        for path in [&data, &companion] {
+            let dataset = open(path, &budget(&dir)).unwrap().0;
+            assert_eq!(dataset.members, [data.canonicalize().unwrap()]);
+            assert_eq!(dataset.dependencies, [companion.canonicalize().unwrap()]);
+        }
     }
 
     #[test]

@@ -821,6 +821,14 @@ impl Job {
         self.ome.get().map_or(Ok(()), |source| source.verify())
     }
 
+    /// Checks the member file a lazily read plane comes from.
+    pub(crate) fn verify_plane(&self, plane: &Plane) -> Result<(), String> {
+        match self.ome.get() {
+            Some(source) if self.lazy_planes() => source.verify_member(plane.member),
+            _ => Ok(()),
+        }
+    }
+
     async fn tile_permit(
         &self,
         slots: Arc<tokio::sync::Semaphore>,

@@ -329,9 +329,11 @@ on Open, folder navigation or Close. Cancellation or save failure must retain un
   pyramid is generated, with the 8-bit fallback for oversized 16-bit pyramids.
   A plane the dataset does not store fails only that selection with a visible
   error; navigation continues.
-- Fingerprint every member file. Cache keys include all member identities. A
-  changed or missing member fails the selection before cache reuse, after
-  evaluation and before publishing, naming the file; reopening reads it again.
+- Fingerprint every member file, an opened companion and a `BinaryOnly`
+  metadata file; cache keys include all of their identities. A changed or
+  missing file fails the selection before cache reuse, after evaluation and
+  before publishing, and on-demand native tiles check their member before reading
+  and before publishing; errors name the file, and reopening reads it again.
 - Z max, Time max and both work as for ND2 when the projected frame fits 256 MiB;
   otherwise the Dimensions panel disables them and shows why. Pages are reduced
   one at a time into an accumulator admitted before reading. Preloading builds

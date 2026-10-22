@@ -329,6 +329,10 @@ fn native_tile(
             return Ok(bytes);
         }
     }
+    // On-demand OME-TIFF detail must come from the member as it was opened.
+    if let Some(plane) = &plane {
+        job.verify_plane(plane)?;
+    }
     let number = job.process_number.fetch_add(1, Ordering::Relaxed);
     let resized = job.work.join(format!("tile-{number}.v"));
     let partial = job.work.join(format!("tile-{number}.partial.{extension}"));
@@ -394,6 +398,9 @@ fn native_tile(
         }
         if tree_size(&job.root) > CACHE_LIMIT {
             return Err("Display cache limit reached.".into());
+        }
+        if let Some(plane) = &plane {
+            job.verify_plane(plane)?;
         }
         let _access = job.cache_access.lock().unwrap();
         let tiles = tiles(&job.dir.lock().unwrap());

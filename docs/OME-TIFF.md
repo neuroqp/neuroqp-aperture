@@ -9,7 +9,11 @@ Python or vendor library in the application.
 ## Opening
 
 A TIFF is an OME-TIFF when its first page's ImageDescription has an `OME` root
-element, so `.tif`, `.tiff`, `.ome.tif` and `.ome.tiff` names all work. A
+element, so `.tif`, `.tiff`, `.ome.tif` and `.ome.tiff` names all work. The root
+probe reads past any XML declaration and comments in 64 KiB windows, within the
+32 MiB XML bound. A description that mentions OME-XML the probe cannot place,
+such as one behind a DOCTYPE, also takes the OME path and fails there with an
+explicit error rather than opening as an editable TIFF. A
 `*.companion.ome` file can be chosen in Open (its filter lists `companion.ome`)
 or given on the command line. Folder navigation lists TIFF members but not
 companions, so a multi-file set is not listed twice; opening any member with the
@@ -20,14 +24,20 @@ full metadata, or with `BinaryOnly` metadata, opens the whole dataset.
 `FileName`, and `BinaryOnly` whose `MetadataFile` is a companion XML file or
 another OME-TIFF. Member files must be relative names that stay inside the
 opened file's folder after resolving links; a member's own OME `UUID` must
-match its reference. A `UUID` without `FileName` may only name the opened file.
+match its reference; a member whose OME root cannot be read is an error. UUIDs
+are limited to 256 bytes and member paths to 4096 bytes. A `UUID` without
+`FileName` may only name the opened file. Every member must exist: a missing
+member blocks opening the whole set.
 Contradictory mappings, pages beyond a member's page count and unknown members
 reject the dataset. Planes that no `TiffData` maps are allowed.
 
 Metadata is limited to 32 MiB of XML, 2 M markup nodes and attributes, 64
 namespace declarations, 4096 images and member files, 32 channels per image and
-1 M planes. Raw markup is counted and the parser's memory reserved before
-parsing; only compact summaries are kept.
+1 M planes in total and per series, checked before any plane table is built.
+Raw markup is counted and the parser's memory and member summaries are reserved
+before they are allocated; only compact summaries are kept. Position and channel
+names together are limited to 48 KiB of navigation metadata, as for ND2, so a
+large screening plate with thousands of named wells can be refused.
 
 ## Browsing
 
@@ -61,10 +71,12 @@ the navigation direction within the disk-cache bounds; it never decodes frames.
 
 ## Changed files
 
-Every member file is fingerprinted when the dataset opens, and display-cache
-keys include all member identities. Before reusing a cache, after generating
-previews and before publishing a cache, the members are checked again. A
-changed or missing member fails the selection with `OME-TIFF dataset changed
+Every member file, an opened companion and a `BinaryOnly` metadata file are
+fingerprinted when the dataset opens, and display-cache keys include all of
+their identities. Before reusing a cache, after generating previews and before
+publishing a cache, these files are checked again. Native detail tiles read on
+demand check their member before reading and again before publishing the tile. A
+changed or missing file fails the selection with `OME-TIFF dataset changed
 on disk; reopen it.` and the file name. Reopening reads the metadata and
 fingerprints again. Members are not held open, because datasets can have more
 member files than common open-file limits.
@@ -87,9 +99,11 @@ disabled in the UI and rejected by the backend, so OME-XML is never rewritten.
 ## Validation
 
 Rust tests write small OME-TIFFs: 8/16-bit planes across C/Z/T, plain `.tif`
-names, multi-file sets, `BinaryOnly` with a companion or an OME-TIFF metadata
+names, long prologs before the root, wrapped plane counts, oversized UUIDs and
+many members, multi-file sets, `BinaryOnly` with a companion or an OME-TIFF metadata
 file, RGB16 across Z/T with a skipped series, unstored planes, power-of-two and
-factor-3 SubIFD pyramids, a changed secondary member after caching, read-only
+factor-3 SubIFD pyramids, a changed secondary member after caching or before a
+native tile, changed companion metadata, read-only
 rejection, projection maxima, admission and cancellation.
 
 ```sh

@@ -32,15 +32,17 @@ use std::{
     sync::{atomic::AtomicBool, Arc},
 };
 
-/// An opened dataset and the identity of every member file (the plan's
-/// `MemberSet`). Paths are fingerprinted rather than held open: datasets can
+/// An opened dataset and the identity of every file it depends on (the
+/// plan's `MemberSet`): members, then an opened companion or `BinaryOnly`
+/// metadata file. Paths are fingerprinted rather than held open: datasets can
 /// have thousands of members, above common open-file limits.
 pub(crate) struct Source {
     dataset: ome_tiff::Dataset,
     fingerprints: Vec<Fingerprint>,
-    /// Hash of every member's path and identity, part of display-cache keys.
+    /// Hash of every file's path and identity, part of display-cache keys.
     pub identity: u64,
     _metadata: Reservation,
+    _fingerprints: Reservation,
 }
 
 /// One selected frame's navigation metadata and geometry.
@@ -55,10 +57,13 @@ pub(crate) struct Frame {
 impl Source {
     pub fn open(path: &Path, budget: &Arc<Budget>) -> Result<Self, String> {
         let (dataset, metadata) = ome_tiff::open(path, budget)?;
+        let files = dataset.members.len() + dataset.dependencies.len();
+        let reservation = budget.require(
+            (files * std::mem::size_of::<Fingerprint>()) as u64,
+            "OME-TIFF: metadata does not fit the application memory budget.",
+        )?;
         let mut hasher = DefaultHasher::new();
-        let fingerprints = dataset
-            .members
-            .iter()
+        let fingerprints = Self::files(&dataset)
             .map(|member| {
                 let print = fingerprint(member)
                     .ok()
@@ -73,17 +78,30 @@ impl Source {
             fingerprints,
             identity: hasher.finish(),
             _metadata: metadata,
+            _fingerprints: reservation,
         })
     }
 
-    /// A changed or missing member fails the selection; the user reopens.
+    fn files(dataset: &ome_tiff::Dataset) -> impl Iterator<Item = &PathBuf> {
+        dataset.members.iter().chain(&dataset.dependencies)
+    }
+
+    /// A changed or missing file fails the selection; the user reopens.
     pub fn verify(&self) -> Result<(), String> {
-        for (member, expected) in self.dataset.members.iter().zip(&self.fingerprints) {
-            if fingerprint(member).ok().flatten().as_ref() != Some(expected) {
-                return Err(changed(member));
-            }
+        for (file, expected) in Self::files(&self.dataset).zip(&self.fingerprints) {
+            check(file, expected)?;
         }
         Ok(())
+    }
+
+    /// Checks one member before and after reading pixels from it on demand.
+    pub fn verify_member(&self, member: u32) -> Result<(), String> {
+        let expected = self
+            .fingerprints
+            .get(member as usize)
+            .filter(|_| (member as usize) < self.dataset.members.len())
+            .ok_or("Invalid OME-TIFF member file.")?;
+        check(self.member(member)?, expected)
     }
 
     pub fn member(&self, index: u32) -> Result<&Path, String> {
@@ -157,6 +175,14 @@ impl Source {
             }));
         }
         Ok(planes)
+    }
+}
+
+fn check(file: &Path, expected: &Fingerprint) -> Result<(), String> {
+    if fingerprint(file).ok().flatten().as_ref() == Some(expected) {
+        Ok(())
+    } else {
+        Err(changed(file))
     }
 }
 
@@ -1223,6 +1249,115 @@ pub(crate) mod tests {
             backend.current.lock().unwrap().clone().unwrap().cache_key(),
             cached
         );
+        backend.shutdown();
+        fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn native_tiles_check_their_member_before_reading_and_publishing() {
+        if !vips() {
+            return;
+        }
+        let root = root("native-member");
+        let size = (90, 54);
+        let data = r#"<TiffData PlaneCount="1"><UUID FileName="a.ome.tif">urn:uuid:a</UUID></TiffData><TiffData FirstZ="1" PlaneCount="1"><UUID FileName="b.tif">urn:uuid:b</UUID></TiffData>"#;
+        let a = root.join("a.ome.tif");
+        let b = root.join("b.tif");
+        write_tiff(
+            &a,
+            &[pyramid_page(0, 0, size, 2)],
+            Some(&ome(
+                "urn:uuid:a",
+                &image("S", "uint16", size, [1, 2, 1], "", data),
+            )),
+        );
+        write_tiff(&b, &[pyramid_page(1, 0, size, 2)], None);
+        let backend = Backend::new(root.join("cache")).unwrap();
+        backend.open(&a).unwrap();
+        wait_ready(&backend);
+        assert_eq!(select(&backend, 1, 0, None).phase, Phase::Ready);
+        let job = backend.current.lock().unwrap().clone().unwrap();
+        assert!(job.native.lock().unwrap().len() > 1);
+        let level = max_level(size.0, size.1);
+        let tile = |level| Asset::ChannelTile {
+            channel: 0,
+            level,
+            x: 0,
+            y: 0,
+        };
+        assert_eq!(samples(&backend, tile(level)), expected(16, 1, 0, size, 0));
+        let replacement = root.join("replacement.tif");
+        write_tiff(&replacement, &[pyramid_page(9, 0, size, 2)], None);
+        fs::rename(&replacement, &b).unwrap();
+        let (status, error) = read_asset(&job, tile(level - 1)).unwrap_err();
+        assert_eq!(status, 500);
+        assert!(
+            error.contains("changed on disk") && error.contains("b.tif"),
+            "{error}"
+        );
+        let published = job.dir.lock().unwrap().join("channels/0/native_tiles");
+        assert!(!published.join(format!("{}-0-0.png", level - 1)).exists());
+        backend.shutdown();
+        fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn changed_companion_metadata_changes_the_cache_key() {
+        if !vips() {
+            return;
+        }
+        let root = root("companion-key");
+        let size = (8, 6);
+        let data = root.join("data.ome.tif");
+        let companion = root.join("set.companion.ome");
+        write_tiff(
+            &data,
+            &plane_pages(16, 0, 2, size, 1),
+            Some(&ome(
+                "urn:uuid:data",
+                r#"<BinaryOnly MetadataFile="set.companion.ome" UUID="urn:uuid:meta"/>"#,
+            )),
+        );
+        let metadata = |name: &str| {
+            ome(
+                "urn:uuid:meta",
+                &image(
+                    "Set",
+                    "uint16",
+                    size,
+                    [1, 2, 1],
+                    &format!(r#"<Channel Name="{name}"/>"#),
+                    r#"<TiffData PlaneCount="2"><UUID FileName="data.ome.tif">urn:uuid:data</UUID></TiffData>"#,
+                ),
+            )
+        };
+        fs::write(&companion, metadata("Before")).unwrap();
+        let original = fs::read(&data).unwrap();
+        let backend = Backend::new(root.join("cache")).unwrap();
+        backend.open(&data).unwrap();
+        let first = wait_ready(&backend);
+        assert_eq!(first.channels[0].name, "Before");
+        let key = backend.current.lock().unwrap().clone().unwrap().cache_key();
+        let replacement = root.join("replacement.ome");
+        fs::write(&replacement, metadata("After")).unwrap();
+        fs::rename(&replacement, &companion).unwrap();
+        // The open dataset notices its changed metadata file.
+        let failed = select(&backend, 1, 0, None);
+        let error = failed.error.unwrap();
+        assert!(
+            error.contains("changed on disk") && error.contains("set.companion.ome"),
+            "{error}"
+        );
+        // Reopening the unchanged binary member reads the new metadata.
+        backend.open(&data).unwrap();
+        let reopened = wait_ready(&backend);
+        assert_eq!(reopened.channels[0].name, "After");
+        assert!(!reopened.detail.contains("Reused"), "{reopened:?}");
+        assert_ne!(
+            backend.current.lock().unwrap().clone().unwrap().cache_key(),
+            key
+        );
+        assert_eq!(fs::read(&data).unwrap(), original);
         backend.shutdown();
         fs::remove_dir_all(root).unwrap();
     }
