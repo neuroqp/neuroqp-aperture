@@ -8,12 +8,15 @@ caches and displayed pixels.
 """
 
 import argparse
+from array import array
 import base64
 import hashlib
 import json
 import os
 from pathlib import Path
+import sys
 import time
+from http.client import RemoteDisconnected
 from urllib.request import Request, urlopen
 
 import compositor
@@ -55,29 +58,39 @@ def main():
     route = None
     original_limit = None
 
-    def request(method, path, body=None):
+    def request(method, path, body=None, retry=None):
         req = Request(args.driver_url + path, method=method,
                       data=None if body is None else json.dumps(body).encode(),
                       headers={'Content-Type': 'application/json'})
-        with urlopen(req, timeout=max(30, args.timeout)) as response:
-            value = json.load(response).get('value')
+        try:
+            with urlopen(req, timeout=max(30, args.timeout)) as response:
+                value = json.load(response).get('value')
+        except (ConnectionError, RemoteDisconnected) as error:
+            # WebKitWebDriver occasionally resets a connection. Retry GETs and
+            # read-only scripts once, visibly; never repeat input or commands.
+            if not (method == 'GET' if retry is None else retry):
+                raise
+            print(f'Driver connection reset, retrying {method} {path}: {error!r}', file=sys.stderr)
+            time.sleep(1)
+            return request(method, path, body, False)
         if isinstance(value, dict) and value.get('error') and 'message' in value:
             raise RuntimeError(value)
         return value
 
-    def js(script, values=None, asynchronous=False):
+    def js(script, values=None, asynchronous=False, read_only=False):
+        # Only scripts that change nothing may be retried after a reset.
         return request('POST', route + '/execute/' + ('async' if asynchronous else 'sync'),
-                       {'script': script, 'args': values or []})
+                       {'script': script, 'args': values or []}, retry=read_only)
 
-    def invoke(command, values=None):
+    def invoke(command, values=None, read_only=False):
         return js('const done=arguments[arguments.length-1];window.__TAURI_INTERNALS__.invoke(arguments[0],arguments[1]).then(done,e=>done({error:String(e)}));',
-                  [command, values or {}], True)
+                  [command, values or {}], True, read_only)
 
     def state():
-        return invoke('image_state')
+        return invoke('image_state', read_only=True)
 
     def memory():
-        value = invoke('memory_status')
+        value = invoke('memory_status', read_only=True)
         assert isinstance(value, dict) and 'usedBytes' in value and 'limitBytes' in value, value
         assert 0 <= value['usedBytes'] <= value['limitBytes'], value
         report['memorySamples'].append(value)
@@ -120,7 +133,7 @@ def main():
           return document.getElementById('viewer').dataset.phase==='ready' && v.world.getItemCount()>0 &&
             Array.from({length:v.world.getItemCount()},(_,i)=>v.world.getItemAt(i)).every(item=>item.source.getTileUrl(item.source.maxLevel,0,0).includes('/'+arguments[0]+'/')) &&
             v.world.getItemAt(0).getTilesToDraw().some(tile=>tile.tile.loaded);
-        """, [value['id']]), 'visible matching projection id')
+        """, [value['id']], read_only=True), 'visible matching projection id')
         return value
 
     def open_ready(path):
@@ -149,17 +162,30 @@ def main():
         return value
 
     def plane_hash(value):
+        return [hashlib.sha256(channel).hexdigest() for channel in preview_planes(value)]
+
+    def samples(value):
+        # 32x32 previews are full resolution; skip the 8-byte `.u16` size prefix.
+        return [array('H', channel[8:]) for channel in preview_planes(value)]
+
+    def preview_planes(value):
         data = js("""
           const done=arguments[arguments.length-1],s=arguments[0],source=window.__apertureViewer.world.getItemAt(0).source;
           const url=source.getTileUrl(source.maxLevel,0,0);
           if(!url.includes('/'+s.id+'/')){done({error:'Displayed source id mismatch'});return;}
           const base=url.split('/'+s.id+'/')[0]+'/'+s.id;
-          Promise.all(s.channels.map((_,c)=>fetch(base+'/channels/'+c+'/preview.png').then(r=>{
+          // 16-bit planes use raw samples: u32 LE width, u32 LE height, u16 LE values.
+          const ext=s.sampleBits===16?'u16':'png';
+          Promise.all(s.channels.map((_,c)=>fetch(base+'/channels/'+c+'/preview.'+ext).then(r=>{
             if(!r.ok)throw new Error('Tile '+r.status);return r.arrayBuffer();
-          }).then(b=>Array.from(new Uint8Array(b))))).then(done,e=>done({error:String(e)}));
-        """, [value], True)
+          }).then(b=>{
+            const d=new DataView(b);
+            if(ext==='u16'&&(b.byteLength<8||b.byteLength!==8+2*d.getUint32(0,true)*d.getUint32(4,true)))throw new Error('Invalid .u16 length');
+            return Array.from(new Uint8Array(b));
+          }))).then(done,e=>done({error:String(e)}));
+        """, [value], True, read_only=True)
         assert isinstance(data, list), data
-        return [hashlib.sha256(bytes(channel)).hexdigest() for channel in data]
+        return [bytes(channel) for channel in data]
 
     def framebuffer():
         value = js("""
@@ -182,7 +208,7 @@ def main():
         return value
 
     def display():
-        return js("const b=window.__apertureViewer.viewport.getBounds();return {brightness:document.getElementById('color-range-brightness')?.value,bounds:[b.x,b.y,b.width,b.height]};")
+        return js("const b=window.__apertureViewer.viewport.getBounds();return {brightness:document.getElementById('color-range-brightness')?.value,bounds:[b.x,b.y,b.width,b.height]};", read_only=True)
 
     def retained(expected):
         current = display()
@@ -208,7 +234,7 @@ def main():
         output.with_suffix('.session.json').write_text(json.dumps({'sessionId': sid}) + '\n')
         url = request('GET', route + '/url').split('?')[0]
         request('POST', route + '/url', {'url': url + '?colorBenchmark=1' + ('&colorRenderer=cpu' if args.renderer == 'cpu' else '')})
-        wait(lambda: js('return !!window.__apertureViewer && !!window.__TAURI_INTERNALS__;'), 'startup', False)
+        wait(lambda: js('return !!window.__apertureViewer && !!window.__TAURI_INTERNALS__;', read_only=True), 'startup', False)
         js("""
           window.__projectionTest={path:null};const original=window.fetch;
           window.fetch=function(url,options){
@@ -221,15 +247,35 @@ def main():
         reduced = invoke('set_memory_budget', {'limitBytes': GIB // 4})
         assert reduced.get('limitBytes') == GIB // 4, reduced
         source = open_ready(primary)
+        assert source['sampleBits'] == 16 and source['channelMode'], source
+        # Original samples of every Z/time plane at position 0, through the real UI.
+        originals = {}
+        for t_index in range(source['dimensions']['time']):
+            for z_index in range(source['dimensions']['z']):
+                axis('time')
+                range_value(t_index + 1)
+                axis('z')
+                range_value(z_index + 1)
+                originals[z_index, t_index] = samples(ready(primary, z=z_index, time_index=t_index))
+        axis('time')
+        range_value(1)
+        axis('z')
+        range_value(1)
+        source = ready(primary)
         source_hash = plane_hash(source)
+
+        def expected_maximum(mode):
+            chosen = [planes for (z_index, t_index), planes in originals.items()
+                      if (mode in ('z', 'zTime') or z_index == 0) and (mode in ('time', 'zTime') or t_index == 0)]
+            return [array('H', map(max, *(planes[c] for planes in chosen))) for c in range(len(chosen[0]))]
         unadjusted = framebuffer()
         click('color-button')
-        wait(lambda: js("return !!document.getElementById('color-range-brightness') && !document.getElementById('color-range-brightness').disabled;"), 'color brightness control')
+        wait(lambda: js("return !!document.getElementById('color-range-brightness') && !document.getElementById('color-range-brightness').disabled;", read_only=True), 'color brightness control')
         js("const e=document.getElementById('color-range-brightness');e.value='60';e.dispatchEvent(new Event('input',{bubbles:true}));")
         adjusted = framebuffer()
         assert adjusted['hash'] != unadjusted['hash'], (unadjusted, adjusted)
         click('zoom-in-button')
-        wait(lambda: js('const p=window.__apertureViewer.viewport;return Math.abs(p.getZoom(true)-p.getZoom())<1e-8;'), 'settled zoom')
+        wait(lambda: js('const p=window.__apertureViewer.viewport;return Math.abs(p.getZoom(true)-p.getZoom())<1e-8;', read_only=True), 'settled zoom')
         expected_display = display()
         assert expected_display['brightness'] == '60', expected_display
         projection_hashes = {}
@@ -237,13 +283,15 @@ def main():
             value = project(mode)
             projected_hash = plane_hash(value)
             assert projected_hash != source_hash, (mode, projected_hash, source_hash)
+            # Maxima are displayed as original samples, without normalization.
+            assert samples(value) == expected_maximum(mode), mode
             retained(expected_display)
             pixels = framebuffer()
             for projected_axis in ({'z': ['z'], 'time': ['time'], 'zTime': ['z', 'time']}[mode]):
                 axis(projected_axis)
-                assert js("return document.getElementById('dimension-range').disabled && document.getElementById('dimension-count').textContent.startsWith('Max of ');"), projected_axis
+                assert js("return document.getElementById('dimension-range').disabled && document.getElementById('dimension-count').textContent.startsWith('Max of ');", read_only=True), projected_axis
             projection_hashes[mode] = projected_hash
-            report['checks'][mode] = {'hashes': projected_hash, 'pixels': pixels, 'preload': no_projection_preload()}
+            report['checks'][mode] = {'hashes': projected_hash, 'exactOriginalMaxima': True, 'pixels': pixels, 'preload': no_projection_preload()}
             cleared = project('none')
             assert plane_hash(cleared) == source_hash
             retained(expected_display)
@@ -259,7 +307,7 @@ def main():
         axis('channel')
         range_value(2)
         assert state()['id'] == moved['id']
-        assert js("return document.getElementById('dimension-count').textContent==='2 / 3';")
+        assert js("return document.getElementById('dimension-count').textContent==='2 / 3';", read_only=True)
         single_pixels = framebuffer()
         assert single_pixels['hash'] != composite_pixels['hash'], (single_pixels, composite_pixels)
         range_value(1)
@@ -282,10 +330,10 @@ def main():
             assert not isinstance(result, dict) or not result.get('error'), result
 
         singleton_metadata()
-        wait(lambda: js("return ['dimension-max-z','dimension-max-time'].every(id=>{const e=document.getElementById(id);return e.checked && !e.disabled;});"), 'active singleton projections remain clearable')
+        wait(lambda: js("return ['dimension-max-z','dimension-max-time'].every(id=>{const e=document.getElementById(id);return e.checked && !e.disabled;});", read_only=True), 'active singleton projections remain clearable')
         project('time')
         singleton_metadata()
-        wait(lambda: js("const z=document.getElementById('dimension-max-z'),t=document.getElementById('dimension-max-time');return !z.checked && z.disabled && t.checked && !t.disabled;"), 'inactive singleton Z disabled, active Time clearable')
+        wait(lambda: js("const z=document.getElementById('dimension-max-z'),t=document.getElementById('dimension-max-time');return !z.checked && z.disabled && t.checked && !t.disabled;", read_only=True), 'inactive singleton Z disabled, active Time clearable')
         cleared = project('none')
         assert plane_hash(cleared) == source_hash
         retained(expected_display)
@@ -313,7 +361,7 @@ def main():
         assert plane_hash(rapid) == projection_hashes['zTime']
         report['checks']['rapidTogglesCoalesceAndRetainVisibleView'] = continuity
         js("document.getElementById('dimension-max-z').click();document.getElementById('cancel-button').click();")
-        wait(lambda: js("return document.getElementById('viewer').dataset.phase==='cancelled';"), 'projection cancellation')
+        wait(lambda: js("return document.getElementById('viewer').dataset.phase==='cancelled';", read_only=True), 'projection cancellation')
         recovered = open_ready(primary)
         assert plane_hash(recovered) == source_hash
         framebuffer()

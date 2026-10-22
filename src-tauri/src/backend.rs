@@ -1,5 +1,6 @@
 pub(crate) mod assets;
 pub(crate) mod cache;
+pub(crate) mod ome;
 mod process;
 pub(crate) mod pyramid;
 
@@ -19,17 +20,64 @@ use std::{
     process::Child,
     sync::{
         atomic::{AtomicBool, AtomicU64, Ordering},
-        Arc, Mutex,
+        Arc, Mutex, OnceLock,
     },
     task::Poll,
     thread,
     time::{Duration, Instant, SystemTime, UNIX_EPOCH},
 };
 
+/// Two 32-channel 8-bit overview sets during replacement and a 32 MiB
+/// tile-cache allowance. Browser/runtime overhead and GPU differ.
+const BROWSER_BYTES: u64 = 96 * 1024 * 1024;
+const DISPLAY_MEMORY_ERROR: &str = "Image display does not fit the shared memory budget. Close another image window or increase the limit in Settings.";
+
+/// Extra display memory for 16-bit channel planes: the second byte of each
+/// 1024-pixel overview sample in both overview sets, the encoded PNG and
+/// decoded body of each concurrent `.u16` preview response (at most 16), and
+/// the viewer's 65536-bin histogram per channel plus one temporary. The tile
+/// cache keeps its byte budget.
+fn wide_display_bytes(channels: u64) -> u64 {
+    const PREVIEW: u64 = 1024 * 1024 * 2;
+    const HISTOGRAM: u64 = 65536 * 4;
+    channels * (PREVIEW + HISTOGRAM) + channels.min(16) * 2 * PREVIEW + 2 * HISTOGRAM
+}
+
 pub const IMAGE_EXTENSIONS: &[&str] = &[
     "jpg", "jpeg", "png", "bmp", "tif", "tiff", "webp", "nd2", "czi",
 ];
 static NEXT_ID: AtomicU64 = AtomicU64::new(1);
+
+/// Open also accepts an OME-TIFF companion, which folder navigation omits so a
+/// multi-file dataset is not listed twice.
+pub const COMPANION_EXTENSION: &str = "companion.ome";
+
+fn openable(path: &Path) -> bool {
+    supported_image(path) || crate::ome_tiff::is_companion(path)
+}
+
+/// ND2 and CZI by extension; OME-TIFF by its first page's OME-XML or a companion.
+fn detect_format(
+    path: &Path,
+    source: &Path,
+    budget: &Arc<crate::memory::Budget>,
+) -> Result<Option<crate::frames::Format>, String> {
+    if let Some(format) = crate::frames::Format::from_path(path) {
+        return Ok(Some(format));
+    }
+    let tiff = path
+        .extension()
+        .and_then(|extension| extension.to_str())
+        .is_some_and(|extension| {
+            ["tif", "tiff"]
+                .iter()
+                .any(|t| extension.eq_ignore_ascii_case(t))
+        });
+    Ok(
+        ((tiff || crate::ome_tiff::is_companion(path)) && crate::ome_tiff::detect(source, budget)?)
+            .then_some(crate::frames::Format::OmeTiff),
+    )
+}
 
 fn supported_image(path: &Path) -> bool {
     path.extension()
@@ -79,11 +127,21 @@ pub struct ImageState {
     pub detail: String,
     pub channels: Vec<Channel>,
     pub channel_mode: bool,
+    /// Display sample width: 16 only for lossless 16-bit channel planes.
+    pub sample_bits: u8,
+    /// The three channels are R, G and B samples of one acquisition.
+    pub rgb: bool,
+    /// A 16-bit source shown with 8-bit display samples to fit the cache limit.
+    pub display_fallback: bool,
     pub read_only: bool,
     pub dimensions: Option<crate::frames::Dimensions>,
     pub calibration: Option<crate::frames::Calibration>,
     pub display_ranges: Vec<[u16; 2]>,
     pub projection: crate::frames::Projection,
+    /// OME-TIFF series left out because their dimensions differ from series 0.
+    pub skipped_series: u32,
+    /// Why max projections cannot be offered for the selected position.
+    pub projection_unavailable: Option<String>,
 }
 
 /// Serialized as the frontend's lowercase `ImageState.phase` strings.
@@ -101,7 +159,11 @@ pub(crate) struct FrameSelection {
     pub selection: crate::frames::Selection,
     pub dimensions: crate::frames::Dimensions,
     pub channels: Vec<Channel>,
+    pub sample_bits: u8,
+    pub rgb: bool,
     pub projection: crate::frames::Projection,
+    pub skipped_series: u32,
+    pub projection_unavailable: Option<String>,
 }
 
 type Notifier = Arc<dyn Fn(&ImageState) + Send + Sync>;
@@ -113,6 +175,7 @@ pub struct Job {
     pub dir: Mutex<PathBuf>,
     pub input: PathBuf,
     pub source: PathBuf,
+    pub(crate) format: Option<crate::frames::Format>,
     selection: Option<crate::frames::Selection>,
     pub(crate) projection: crate::frames::Projection,
     pub(crate) acquisition: Option<Arc<crate::preload::Acquisition>>,
@@ -125,10 +188,13 @@ pub struct Job {
     native: Mutex<Vec<NativeLevel>>,
     planes: Mutex<Vec<Plane>>,
     root: PathBuf,
-    cache_key: String,
+    /// OME-TIFF jobs add their members' identity once the dataset is open.
+    cache_key: Mutex<String>,
+    ome: OnceLock<Arc<ome::Source>>,
     process_number: AtomicU64,
     decoder: Mutex<Option<Arc<crate::decoder::Decoder>>>,
     decoder_memory: Mutex<Option<DecoderMemory>>,
+    display_memory: Mutex<Option<crate::memory::Reservation>>,
     frame_memory: AtomicU64,
     processes: Mutex<HashMap<u64, Arc<Mutex<Child>>>>,
     notifier: Option<Notifier>,
@@ -285,7 +351,11 @@ impl Backend {
                 selection,
                 dimensions,
                 channels: state.channels,
+                sample_bits: state.sample_bits,
+                rgb: state.rgb,
                 projection,
+                skipped_series: state.skipped_series,
+                projection_unavailable: state.projection_unavailable,
             }),
         )
     }
@@ -302,18 +372,19 @@ impl Backend {
         {
             let mut browser = self.browser_memory.lock().unwrap();
             if browser.is_none() {
-                // Two 32-channel overview sets during replacement and a 32 MiB
-                // tile-cache allowance. Browser/runtime overhead and GPU differ.
-                *browser = Some(self.memory.require(96 * 1024 * 1024, "Image display does not fit the shared memory budget. Close another image window or increase the limit in Settings.")?);
+                *browser = Some(self.memory.require(BROWSER_BYTES, DISPLAY_MEMORY_ERROR)?);
             }
         }
-        let acquisition = if let Some(format) = crate::frames::Format::from_path(path) {
+        let acquisition = if let Some(format) = detect_format(path, &source, &self.memory)? {
             let identity =
                 crate::instances::fingerprint(&source).map_err(|error| error.to_string())?;
             let mut current = self.acquisition.lock().unwrap();
-            if current
-                .as_ref()
-                .is_none_or(|item| !item.matches(format, &source, &identity))
+            // Reopening an OME-TIFF re-reads its metadata and member identities.
+            let reopen = format == crate::frames::Format::OmeTiff && frame.is_none();
+            if reopen
+                || current
+                    .as_ref()
+                    .is_none_or(|item| !item.matches(format, &source, &identity))
             {
                 if let Some(old) = current.take() {
                     old.stop();
@@ -527,9 +598,9 @@ impl LoadContext {
             .and_then(|s| s.to_str())
             .unwrap_or("")
             .to_ascii_lowercase();
-        if !supported_image(path) {
+        if !openable(path) {
             return Err(
-                "Supported formats: JPEG, PNG, BMP, WebP, TIFF, BigTIFF, Nikon ND2 and Zeiss CZI."
+                "Supported formats: JPEG, PNG, BMP, WebP, TIFF, BigTIFF, OME-TIFF, Nikon ND2 and Zeiss CZI."
                     .into(),
             );
         }
@@ -537,7 +608,7 @@ impl LoadContext {
             .as_ref()
             .map(|frame| frame.projection)
             .unwrap_or_default();
-        let format = crate::frames::Format::from_path(path);
+        let format = acquisition.as_ref().map(|acquisition| acquisition.format());
         let selection = format.map(|_| {
             frame
                 .as_ref()
@@ -569,7 +640,9 @@ impl LoadContext {
             NEXT_ID.fetch_add(1, Ordering::Relaxed)
         );
         let mut hasher = DefaultHasher::new();
-        "aperture-display-v5-area-preview".hash(&mut hasher);
+        // Bump when display samples change: v6 keeps 16-bit channel planes
+        // unless a generated pyramid would exceed half the cache limit.
+        "aperture-display-v6-16bit-fallback-half-cache".hash(&mut hasher);
         source.hash(&mut hasher);
         metadata.len().hash(&mut hasher);
         #[cfg(unix)]
@@ -614,9 +687,25 @@ impl LoadContext {
         } else {
             alias
         };
-        let (dimensions, initial_channels) = frame
-            .map(|frame| (Some(frame.dimensions), frame.channels))
-            .unwrap_or_default();
+        let (
+            dimensions,
+            initial_channels,
+            sample_bits,
+            rgb,
+            skipped_series,
+            projection_unavailable,
+        ) = frame
+            .map(|frame| {
+                (
+                    Some(frame.dimensions),
+                    frame.channels,
+                    frame.sample_bits,
+                    frame.rgb,
+                    frame.skipped_series,
+                    frame.projection_unavailable,
+                )
+            })
+            .unwrap_or((None, Vec::new(), 8, false, 0, None));
         let initial = ImageState {
             id,
             revision: 0,
@@ -641,11 +730,16 @@ impl LoadContext {
             detail: "Reading image metadata…".into(),
             channels: initial_channels,
             channel_mode: selection.is_some(),
+            sample_bits,
+            rgb,
+            display_fallback: false,
             read_only: selection.is_some(),
             dimensions,
             calibration: None,
             display_ranges: Vec::new(),
             projection,
+            skipped_series,
+            projection_unavailable,
         };
         let job = Arc::new(Job {
             state: Mutex::new(initial.clone()),
@@ -654,6 +748,7 @@ impl LoadContext {
             dir: Mutex::new(dir.clone()),
             input,
             source,
+            format,
             selection,
             projection,
             acquisition,
@@ -665,10 +760,12 @@ impl LoadContext {
             native: Mutex::new(Vec::new()),
             planes: Mutex::new(Vec::new()),
             root: self.root.clone(),
-            cache_key,
+            cache_key: Mutex::new(cache_key),
+            ome: OnceLock::new(),
             process_number: AtomicU64::new(0),
             decoder: Mutex::new(None),
             decoder_memory: Mutex::new(None),
+            display_memory: Mutex::new(None),
             frame_memory: AtomicU64::new(frame_memory),
             processes: Mutex::new(HashMap::new()),
             notifier,
@@ -691,6 +788,51 @@ pub(crate) fn finish_decoder(job: &Job) {
 }
 
 impl Job {
+    pub(crate) fn cache_key(&self) -> String {
+        self.cache_key.lock().unwrap().clone()
+    }
+
+    /// Display caches of an OME-TIFF selection depend on every member file.
+    fn set_member_identity(&self, identity: u64) {
+        let mut key = self.cache_key.lock().unwrap();
+        let mut hasher = DefaultHasher::new();
+        (key.as_str(), identity).hash(&mut hasher);
+        *key = format!("{:016x}", hasher.finish());
+    }
+
+    /// OME-TIFF planes are read in place from member files, except projections,
+    /// which are written to the job's display TIFF like ND2/CZI frames.
+    pub(crate) fn lazy_planes(&self) -> bool {
+        self.format == Some(crate::frames::Format::OmeTiff)
+            && self.projection == crate::frames::Projection::None
+    }
+
+    pub(crate) fn member_alias(&self, member: u32) -> PathBuf {
+        self.work.join(format!("member-{member}.tif"))
+    }
+
+    /// The libvips source file of a display plane.
+    pub(crate) fn plane_path(&self, plane: &Plane) -> PathBuf {
+        if self.lazy_planes() {
+            self.member_alias(plane.member)
+        } else {
+            self.input.clone()
+        }
+    }
+
+    /// Re-checks OME-TIFF member files after evaluation and before publishing.
+    pub(crate) fn verify_sources(&self) -> Result<(), String> {
+        self.ome.get().map_or(Ok(()), |source| source.verify())
+    }
+
+    /// Checks the member file a lazily read plane comes from.
+    pub(crate) fn verify_plane(&self, plane: &Plane) -> Result<(), String> {
+        match self.ome.get() {
+            Some(source) if self.lazy_planes() => source.verify_member(plane.member),
+            _ => Ok(()),
+        }
+    }
+
     async fn tile_permit(
         &self,
         slots: Arc<tokio::sync::Semaphore>,
@@ -734,11 +876,32 @@ impl Job {
             decoder.stop();
         }
         self.decoder_memory.lock().unwrap().take();
+        self.display_memory.lock().unwrap().take();
         for (_, process) in self.processes.lock().unwrap().drain() {
             let mut child = process.lock().unwrap();
             let _ = child.kill();
             let _ = child.wait();
         }
+    }
+    /// Admit the foreground display's 16-bit allowance before publishing it.
+    fn reserve_display(&self, sample_bits: u8, channels: usize) -> Result<(), String> {
+        if self.background || sample_bits != 16 || self.display_memory.lock().unwrap().is_some() {
+            return Ok(());
+        }
+        // Never hold the slot while waiting, so cancellation stays immediate.
+        let reservation = self
+            .memory
+            .reserve(
+                wide_display_bytes(channels as u64),
+                false,
+                Some(&self.cancel),
+            )?
+            .ok_or(DISPLAY_MEMORY_ERROR)?;
+        let mut display = self.display_memory.lock().unwrap();
+        if !self.cancel.load(Ordering::Relaxed) {
+            *display = Some(reservation);
+        }
+        Ok(())
     }
     fn update(&self, action: impl FnOnce(&mut ImageState)) {
         let snapshot = {
@@ -786,7 +949,7 @@ impl Drop for Job {
 }
 
 #[cfg(test)]
-mod tests {
+pub(crate) mod tests {
     use super::*;
     use assets::{read_asset, Asset};
     use process::run;
@@ -898,8 +1061,7 @@ mod tests {
                 .unwrap()
                 .as_ref()
                 .unwrap()
-                .cache_key
-                .clone();
+                .cache_key();
             backend
                 .select_view(
                     &projected.id,
@@ -913,7 +1075,13 @@ mod tests {
                 .unwrap();
             let repeated = wait_ready(&backend);
             assert_eq!(
-                backend.current.lock().unwrap().as_ref().unwrap().cache_key,
+                backend
+                    .current
+                    .lock()
+                    .unwrap()
+                    .as_ref()
+                    .unwrap()
+                    .cache_key(),
                 key
             );
             assert_eq!(repeated.dimensions.as_ref().unwrap().z_index, 0);
@@ -927,6 +1095,89 @@ mod tests {
         wait_ready(&backend);
         assert_eq!(samples(&backend), initial);
         assert_eq!(fs::read(&source).unwrap(), bytes);
+        backend.shutdown();
+        drop(backend);
+        fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn nd2_16_bit_frames_display_original_samples_and_old_manifests_are_not_reused() {
+        if std::process::Command::new("vips")
+            .arg("--version")
+            .output()
+            .is_err()
+        {
+            return;
+        }
+        let root = std::env::temp_dir().join(format!(
+            "aperture-nd2-16-{}-{}",
+            std::process::id(),
+            NEXT_ID.fetch_add(1, Ordering::Relaxed)
+        ));
+        fs::create_dir_all(&root).unwrap();
+        let backend = Backend::new(root.join("cache")).unwrap();
+        let samples = |channel: u32| {
+            let job = backend.current.lock().unwrap().clone().unwrap();
+            let png = read_asset(&job, Asset::ChannelPreview { channel }).unwrap();
+            let body = assets::u16_body(&png, |_, _| true).unwrap();
+            body[8..]
+                .as_chunks::<2>()
+                .0
+                .iter()
+                .map(|sample| u16::from_le_bytes(*sample))
+                .collect::<Vec<_>>()
+        };
+        for (bits, rgb) in [(8, false), (16, false), (16, true)] {
+            let source = root.join(format!("frame-{bits}-{rgb}.nd2"));
+            fs::write(&source, crate::nd2::tests::synthetic(bits, rgb)).unwrap();
+            backend.open(&source).unwrap();
+            let state = wait_ready(&backend);
+            assert!(state.channel_mode);
+            assert_eq!(state.rgb, rgb);
+            assert_eq!(state.channels.len(), if rgb { 3 } else { 2 });
+            let sample_bits = if bits == 16 { 16 } else { 8 };
+            assert_eq!(state.sample_bits, sample_bits);
+            assert!(state
+                .channels
+                .iter()
+                .all(|channel| channel.domain == crate::channels::domain(sample_bits)));
+            if bits == 8 {
+                continue;
+            }
+            // Low 16-bit values stay exact instead of being stretched to 0–255.
+            if !rgb {
+                assert_eq!(state.display_ranges, [[1, 3], [2, 4]]);
+                assert_eq!((samples(0), samples(1)), (vec![1, 3], vec![2, 4]));
+            }
+            let id = state.id.clone();
+            backend
+                .select_plane(&id, crate::frames::Selection::default())
+                .unwrap();
+            let reused = wait_ready(&backend);
+            assert!(reused.detail.contains("Reused"), "{reused:?}");
+            assert_eq!((reused.sample_bits, reused.rgb), (16, rgb));
+            // A manifest written before 16-bit display samples is never reused.
+            let dir = backend
+                .current
+                .lock()
+                .unwrap()
+                .as_ref()
+                .unwrap()
+                .dir
+                .lock()
+                .unwrap()
+                .clone();
+            let mut manifest: serde_json::Value =
+                serde_json::from_slice(&fs::read(dir.join("manifest.json")).unwrap()).unwrap();
+            manifest.as_object_mut().unwrap().remove("sample_bits");
+            fs::write(dir.join("manifest.json"), manifest.to_string()).unwrap();
+            backend
+                .select_plane(&reused.id, crate::frames::Selection::default())
+                .unwrap();
+            let rebuilt = wait_ready(&backend);
+            assert!(!rebuilt.detail.contains("Reused"), "{rebuilt:?}");
+            assert_eq!(rebuilt.sample_bits, 16);
+        }
         backend.shutdown();
         drop(backend);
         fs::remove_dir_all(root).unwrap();
@@ -1036,10 +1287,10 @@ mod tests {
         wait_ready(&backend);
         let job = backend.current.lock().unwrap().clone().unwrap();
         job.state.lock().unwrap().phase = Phase::Loading;
-        fs::remove_file(job.dir.lock().unwrap().join("preview.jpg")).unwrap();
+        fs::remove_file(job.dir.lock().unwrap().join("channels/0/preview.png")).unwrap();
         let waiting = {
             let job = job.clone();
-            thread::spawn(move || read_asset(&job, Asset::Preview))
+            thread::spawn(move || read_asset(&job, Asset::ChannelPreview { channel: 0 }))
         };
         let sleeper = {
             let job = job.clone();
@@ -1101,7 +1352,7 @@ mod tests {
         fs::remove_dir_all(root).unwrap();
     }
 
-    pub(super) fn wait_ready(backend: &Backend) -> ImageState {
+    pub(crate) fn wait_ready(backend: &Backend) -> ImageState {
         let deadline = Instant::now() + Duration::from_secs(20);
         loop {
             let state = backend.snapshot().unwrap();

@@ -27,6 +27,9 @@ pub(super) struct CacheManifest {
     pub(super) orientation: u8,
     pub(super) channels: Vec<Channel>,
     pub(super) channel_mode: bool,
+    pub(super) sample_bits: u8,
+    pub(super) rgb: bool,
+    pub(super) display_fallback: bool,
     pub(super) planes: Vec<Plane>,
     pub(super) native: Vec<NativeLevel>,
     #[serde(default)]
@@ -146,13 +149,16 @@ pub(super) fn write_manifest(job: &Job, dir: &Path) -> Result<(), String> {
     let state = job.state.lock().unwrap().clone();
     let manifest = CacheManifest {
         version: 1,
-        source_key: job.cache_key.clone(),
+        source_key: job.cache_key(),
         tools: tool_identity(),
         width: state.width,
         height: state.height,
         orientation: state.orientation,
         channels: state.channels,
         channel_mode: state.channel_mode,
+        sample_bits: state.sample_bits,
+        rgb: state.rgb,
+        display_fallback: state.display_fallback,
         planes: job.planes.lock().unwrap().clone(),
         native: job.native.lock().unwrap().clone(),
         dimensions: state.dimensions,
@@ -174,8 +180,28 @@ pub(super) fn cached_manifest(job: &Job, dir: &Path) -> Option<CacheManifest> {
         return None;
     }
     let manifest: CacheManifest = serde_json::from_reader(file.take(65536)).ok()?;
+    // OME-TIFF planes must be exactly the selection's pages, with native levels
+    // relative to each page; other images read pages of their only file.
+    let lazy = job.lazy_planes();
+    let planes_valid = if lazy {
+        manifest.planes == *job.planes.lock().unwrap()
+            && manifest
+                .native
+                .iter()
+                .skip(1)
+                .all(|level| level.options.contains(",subifd="))
+    } else {
+        manifest
+            .planes
+            .iter()
+            .all(|plane| plane.member == 0 && plane.page < 256)
+            && !(manifest.channel_mode
+                && manifest.planes.iter().any(|plane| plane.page != 0)
+                && !manifest.native.is_empty())
+    };
     if manifest.version != 1
-        || manifest.source_key != job.cache_key
+        || !planes_valid
+        || manifest.source_key != job.cache_key()
         || manifest.tools != tool_identity()
         || manifest.projection != job.projection
         || !(1..=i32::MAX as u32).contains(&manifest.width)
@@ -183,11 +209,17 @@ pub(super) fn cached_manifest(job: &Job, dir: &Path) -> Option<CacheManifest> {
         || !(1..=8).contains(&manifest.orientation)
         || manifest.channels.is_empty()
         || manifest.channels.len() > channels::MAX_CHANNELS as usize
+        || !matches!(manifest.sample_bits, 8 | 16)
+        || (manifest.sample_bits == 16 && (!manifest.channel_mode || manifest.display_fallback))
+        || manifest
+            .channels
+            .iter()
+            .any(|channel| channel.domain != channels::domain(manifest.sample_bits))
         || manifest.planes.len() != manifest.channels.len()
         || manifest
             .planes
             .iter()
-            .any(|plane| plane.page >= 256 || plane.band >= channels::MAX_CHANNELS)
+            .any(|plane| plane.band >= channels::MAX_CHANNELS)
         || manifest.native.len() > 29
         || (job.selection.is_some() != manifest.dimensions.is_some())
         || manifest.dimensions.as_ref().is_some_and(|dimensions| {
@@ -203,9 +235,6 @@ pub(super) fn cached_manifest(job: &Job, dir: &Path) -> Option<CacheManifest> {
         })
         || (!manifest.native.is_empty()
             && !native::valid_cached_levels(&manifest.native, manifest.width, manifest.height))
-        || (manifest.channel_mode
-            && manifest.planes.iter().any(|plane| plane.page != 0)
-            && !manifest.native.is_empty())
     {
         return None;
     }
@@ -298,6 +327,8 @@ pub(super) fn housekeeping(job: &Job) -> Result<(), String> {
 /// Publish `names` from `dir` as the job's complete cache. With `required`, a
 /// missing name fails promotion instead of being skipped.
 pub(super) fn promote(job: &Job, dir: &Path, names: &[&str], required: bool) -> Result<(), String> {
+    // Never publish bytes generated from an OME-TIFF member that changed.
+    job.verify_sources()?;
     let _access = job.cache_access.lock().unwrap();
     if job.cancel.load(Ordering::Relaxed) {
         return Err("Loading cancelled.".into());
@@ -318,7 +349,7 @@ pub(super) fn promote(job: &Job, dir: &Path, names: &[&str], required: bool) -> 
             }
         }
     }
-    let complete = job.root.join(&job.cache_key);
+    let complete = job.root.join(job.cache_key());
     if complete.exists() {
         fs::remove_dir_all(&complete).map_err(|e| e.to_string())?;
     }
@@ -537,15 +568,13 @@ mod tests {
             .unwrap()
             .clone();
         let manifest = fs::read(dir.join("manifest.json")).unwrap();
-        let preview_metadata = fs::metadata(dir.join("preview.jpg")).unwrap();
+        let preview = dir.join("channels/0/preview.png");
+        let preview_metadata = fs::metadata(&preview).unwrap();
         fs::remove_file(dir.join("manifest.json")).unwrap();
         backend.open(&source).unwrap();
         assert!(wait_ready(&backend).detail.contains("Reused"));
         assert_eq!(
-            fs::metadata(dir.join("preview.jpg"))
-                .unwrap()
-                .modified()
-                .unwrap(),
+            fs::metadata(&preview).unwrap().modified().unwrap(),
             preview_metadata.modified().unwrap()
         );
         assert!(dir.join("manifest.json").is_file());
@@ -583,7 +612,7 @@ mod tests {
         // Reenter this same job's state mutex from its callback.
         *callback_job.lock().unwrap() = Some(Arc::downgrade(&job));
         job.update(|state| state.detail = "Reused cache notification check".into());
-        fs::write(dir.join("preview.jpg"), b"broken preview").unwrap();
+        fs::write(&preview, b"broken preview").unwrap();
         backend.open(&source).unwrap();
         assert!(!wait_ready(&backend).detail.contains("Reused"));
         // Same path with a changed source cannot reuse its previous descriptor.
@@ -611,6 +640,55 @@ mod tests {
             .any(|state| state.id == reopened.id && state.phase == Phase::Ready));
         assert_eq!(events.last().unwrap().phase, Phase::Cancelled);
         drop(events);
+        backend.shutdown();
+        fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn reused_16_bit_cache_publishes_nothing_without_display_memory() {
+        let root = std::env::temp_dir().join(format!(
+            "aperture-reuse-memory-{}-{}",
+            std::process::id(),
+            NEXT_ID.fetch_add(1, Ordering::Relaxed)
+        ));
+        fs::create_dir_all(&root).unwrap();
+        let source = root.join("source.tif");
+        channel_fixture(&source, 1, 1, "");
+        let mut backend = Backend::new(root.join("cache")).unwrap();
+        let events = Arc::new(Mutex::new(Vec::<ImageState>::new()));
+        let recorded = events.clone();
+        backend.set_notifier(move |state| recorded.lock().unwrap().push(state.clone()));
+        backend.open(&source).unwrap();
+        assert_eq!(wait_ready(&backend).sample_bits, 16);
+        // Release the first display, then leave no room for the next one.
+        backend.cancel();
+        let available = backend.memory.status().unwrap().available_bytes;
+        let full = backend
+            .memory
+            .try_reserve(available, false)
+            .unwrap()
+            .unwrap();
+        let reopened = backend.open(&source).unwrap();
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(20);
+        let failed = loop {
+            let state = backend.snapshot().unwrap();
+            if state.phase != Phase::Loading {
+                break state;
+            }
+            assert!(std::time::Instant::now() < deadline);
+            thread::sleep(std::time::Duration::from_millis(10));
+        };
+        assert_eq!(failed.phase, Phase::Error);
+        assert!(failed.error.unwrap().contains("does not fit"));
+        assert!(events
+            .lock()
+            .unwrap()
+            .iter()
+            .filter(|state| state.id == reopened.id)
+            .all(|state| !state.preview_ready && state.phase != Phase::Ready));
+        drop(full);
+        backend.open(&source).unwrap();
+        assert!(wait_ready(&backend).detail.contains("Reused"));
         backend.shutdown();
         fs::remove_dir_all(root).unwrap();
     }

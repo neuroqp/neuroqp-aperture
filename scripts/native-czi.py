@@ -8,13 +8,17 @@ as plain data for geometry. Fixtures and reports stay outside Git.
 """
 
 import argparse
+from array import array
 import base64
 import hashlib
 import json
 import os
 import shutil
+import struct
 from pathlib import Path
+import sys
 import time
+from http.client import RemoteDisconnected
 from urllib.request import Request, urlopen
 
 import compositor
@@ -79,12 +83,21 @@ def main():
     binary = compositor.application(args.binary)
     previous_processes = app_processes()
 
-    def request(method, path, body=None):
+    def request(method, path, body=None, retry=None):
         req = Request(args.driver_url + path, method=method,
                       data=None if body is None else json.dumps(body).encode(),
                       headers={'Content-Type': 'application/json'})
-        with urlopen(req, timeout=max(30, args.timeout)) as response:
-            value = json.load(response).get('value')
+        try:
+            with urlopen(req, timeout=max(30, args.timeout)) as response:
+                value = json.load(response).get('value')
+        except (ConnectionError, RemoteDisconnected) as error:
+            # WebKitWebDriver occasionally resets a connection. Retry GETs and
+            # read-only scripts once, visibly; never repeat input or commands.
+            if not (method == 'GET' if retry is None else retry):
+                raise
+            print(f'Driver connection reset, retrying {method} {path}: {error!r}', file=sys.stderr)
+            time.sleep(1)
+            return request(method, path, body, False)
         if isinstance(value, dict) and value.get('error') and 'message' in value:
             raise RuntimeError(value)
         return value
@@ -96,15 +109,16 @@ def main():
     report = {'passed': False, 'checks': {}, 'sourceHashes': hashes, 'screenshots': []}
     args.output.with_suffix('.session.json').write_text(json.dumps({'sessionId': sid}) + '\n')
 
-    def js(script, values=None, asynchronous=False):
+    def js(script, values=None, asynchronous=False, read_only=False):
+        # Only scripts that change nothing may be retried after a reset.
         return request('POST', route + '/execute/' + ('async' if asynchronous else 'sync'),
-                       {'script': script, 'args': values or []})
+                       {'script': script, 'args': values or []}, retry=read_only)
 
-    def invoke(command, values=None):
-        return js('const done=arguments[arguments.length-1];window.__TAURI_INTERNALS__.invoke(arguments[0],arguments[1]).then(done,e=>done({error:String(e)}));', [command, values or {}], True)
+    def invoke(command, values=None, read_only=False):
+        return js('const done=arguments[arguments.length-1];window.__TAURI_INTERNALS__.invoke(arguments[0],arguments[1]).then(done,e=>done({error:String(e)}));', [command, values or {}], True, read_only)
 
     def state():
-        return invoke('image_state')
+        return invoke('image_state', read_only=True)
 
     def ui():
         return js("""const s=document.getElementById('status'),p=document.getElementById('points-button'),scope=document.getElementById('dimension-scope');
@@ -112,7 +126,7 @@ def main():
             pointsDisabled:p.disabled,pointsTitle:p.title,saveDisabled:document.getElementById('save-button').disabled,
             panelHidden:document.getElementById('navigator-panel').hidden,count:document.getElementById('dimension-count').textContent,
             status:s.textContent,statusError:s.classList.contains('error'),statusVisible:s.getClientRects().length>0&&getComputedStyle(s).visibility!=='hidden',
-            scopeHidden:scope.hidden,scope:scope.textContent};""")
+            scopeHidden:scope.hidden,scope:scope.textContent};""", read_only=True)
 
     def wait(predicate, description):
         deadline = time.monotonic() + args.timeout
@@ -184,12 +198,67 @@ def main():
           const url=source.getTileUrl(source.maxLevel,0,0);
           if(!url.includes('/'+s.id+'/')){done({error:'Displayed source id differs from backend'});return;}
           const base=url.split('/'+s.id+'/')[0]+'/'+s.id;
-          Promise.all(s.channels.map((_,c)=>fetch(base+'/channels/'+c+'/preview.png').then(r=>{
+          // 16-bit planes use raw samples: u32 LE width, u32 LE height, u16 LE values.
+          const ext=s.sampleBits===16?'u16':'png';
+          Promise.all(s.channels.map((_,c)=>fetch(base+'/channels/'+c+'/preview.'+ext).then(r=>{
             if(!r.ok)throw new Error('Tile '+r.status);return r.arrayBuffer();
-          }).then(b=>Array.from(new Uint8Array(b))))).then(done,e=>done({error:String(e)}));
+          }).then(b=>{
+            const d=new DataView(b);
+            if(ext==='u16'&&(b.byteLength<8||b.byteLength!==8+2*d.getUint32(0,true)*d.getUint32(4,true)))throw new Error('Invalid .u16 length');
+            return Array.from(new Uint8Array(b));
+          }))).then(done,e=>done({error:String(e)}));
         """, [s], True)
         assert isinstance(data, list), data
         return [hashlib.sha256(bytes(channel)).hexdigest() for channel in data]
+
+    def full_planes(s):
+        """Exact full-resolution 16-bit samples per channel (LE bytes) from `.u16` tiles."""
+        w, h = s['width'], s['height']
+        level = (max(w, h) - 1).bit_length()
+        columns, rows = -(-w // 256), -(-h // 256)
+        paths = [f'/channels/{c}/tiles/{level}/{x}_{y}.u16' for c in range(len(s['channels']))
+                 for y in range(rows) for x in range(columns)]
+        data = js("""
+          const done=arguments[arguments.length-1],s=arguments[0],paths=arguments[1];
+          const source=window.__apertureViewer.world.getItemAt(0).source,url=source.getTileUrl(source.maxLevel,0,0);
+          if(!url.includes('/'+s.id+'/')){done({error:'Displayed source id differs from backend'});return;}
+          const base=url.split('/'+s.id+'/')[0]+'/'+s.id;
+          const encode=b=>{let t='';for(let i=0;i<b.length;i+=32768)t+=String.fromCharCode.apply(null,b.subarray(i,i+32768));return btoa(t);};
+          (async()=>{const out=[];for(const path of paths){const r=await fetch(base+path);
+            if(!r.ok)throw new Error(path+' '+r.status);out.push(encode(new Uint8Array(await r.arrayBuffer())));}return out;})()
+            .then(done,e=>done({error:String(e)}));
+        """, [s, paths], True)
+        assert isinstance(data, list), data
+        planes, tiles = [], iter(data)
+        for _ in s['channels']:
+            plane = bytearray(2 * w * h)
+            for y in range(rows):
+                for x in range(columns):
+                    body = base64.b64decode(next(tiles))
+                    tw, th = struct.unpack('<II', body[:8])
+                    assert (tw, th) == (min(256, w - x * 256), min(256, h - y * 256)) and len(body) == 8 + 2 * tw * th, (tw, th, len(body))
+                    for row in range(th):
+                        at = 2 * ((y * 256 + row) * w + x * 256)
+                        plane[at:at + 2 * tw] = body[8 + 2 * row * tw:8 + 2 * (row + 1) * tw]
+            planes.append(bytes(plane))
+        return planes
+
+    def exact_samples(name, s):
+        """Compare displayed 16-bit samples with czifile's plane SHA-256 (scene 0, first Z/T)."""
+        scene = expected[name]['scenes'][0]
+        planes = full_planes(s)
+        first = [p for p in scene['planes'] if all(v == 0 for k, v in p['index'].items() if k != 'C')]
+        if scene['samplesPerPixel'] == 3:
+            # czifile returns interleaved R,G,B; Aperture shows them as three channels.
+            assert len(planes) == 3 and len(first) == 1 and s['rgb'], (name, s)
+            pixels = array('H', bytes(2 * 3 * s['width'] * s['height']))
+            for c, plane in enumerate(planes):
+                pixels[c::3] = array('H', plane)
+            got, want = [hashlib.sha256(pixels.tobytes()).hexdigest()], [first[0]['sha256']]
+        else:
+            got = [hashlib.sha256(plane).hexdigest() for plane in planes]
+            want = [next(p['sha256'] for p in first if p['index'].get('C', 0) == c) for c in range(len(planes))]
+        return {'exact': got == want, 'sha256': got, 'expected': want}
 
     def framebuffer():
         result = js("""
@@ -251,6 +320,7 @@ def main():
         first = open_ready(primary)
         d = first['dimensions']
         assert first['readOnly'] and first['channelMode'] and len(first['channels']) == channel_count, first
+        assert first['sampleBits'] == 16 and all(c['domain'] == [0, 65535] for c in first['channels']), first
         assert (first['width'], first['height']) == (sizes['X'], sizes['Y']), (first, sizes)
         assert (len(d['positions']), d['z'], d['time']) == (positions, z_count, time_count), first
         assert 'czi' in invoke('image_extensions')
@@ -274,6 +344,9 @@ def main():
         refused.unlink()
         report['checks']['backendRefusesAnnotationAndSave'] = True
         initial_hash = plane_hash(first)
+        exact = exact_samples(PRIMARY, first)
+        assert exact['exact'], exact
+        report['checks']['exactOriginalSamples'] = exact
         initial_framebuffer = framebuffer()
         report['checks']['coldCompositeVisiblePixels'] = initial_framebuffer
         click('navigator-button')
@@ -416,6 +489,11 @@ def main():
                 raise AssertionError(terminal)
             s = ready(path)
             assert s['readOnly'], s
+            if expected[name]['scenes'][0]['dtype'] == 'uint16':
+                exact = exact_samples(name, s)
+                # JPEG XR is lossy; its decoded samples may differ from czifile's decoder.
+                assert exact['exact'] or 'JXR' in name, (name, exact)
+                report['checks']['exactOriginalSamples-' + name] = exact
             reference = expected[name]['scenes'][0]['sizes']
             assert (s['width'], s['height']) == (reference['X'], reference['Y']), (name, s, reference)
             framebuffer()

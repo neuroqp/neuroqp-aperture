@@ -25,6 +25,11 @@ CZI scans are not yet supported. Annotation editing, saving and scientific expor
 not implemented for these formats. See [ND2 support](docs/ND2.md) and
 [CZI support](docs/CZI.md) for limits and validation.
 
+OME-TIFF files (single files, multi-file sets and `.companion.ome` companions)
+open the same way. Planes are read from their TIFF pages on demand, so large
+planes browse without a frame-size limit; max projections need the projected
+frame to fit 256 MiB. See [OME-TIFF support](docs/OME-TIFF.md).
+
 ## Multiple windows and file opening
 
 Each Aperture window displays one image. Launch another copy or press **Ctrl+N**
@@ -259,8 +264,8 @@ No microscopy source files are modified.
   Saved ROIs use ImageJ's active selection and overlays.
 - Ordinary multipage images display their first page. Color supports up to 32
   unsigned 8/16-bit channels in interleaved multiband TIFFs and explicit ImageJ
-  channel stacks (first Z/time position). OME-TIFF mapping and contiguous
-  single-directory ImageJ hyperstacks are not supported. Ambiguous grayscale
+  channel stacks (first Z/time position). OME-TIFFs are browsed by their OME
+  plane mapping; contiguous single-directory ImageJ hyperstacks are not supported. Ambiguous grayscale
   alpha layouts are rejected rather than interpreted as scientific channels.
 - BMP decoding uses a 512 MiB decoded-allocation limit; the large-image streaming
   paths apply to TIFF, not BMP.
