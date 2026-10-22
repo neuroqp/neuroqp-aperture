@@ -204,8 +204,9 @@ on Open, folder navigation or Close. Cancellation or save failure must retain un
   opening another image resets them. Saving annotations never bakes display
   adjustments into pixels.
   Initially support unsigned 8/16-bit grayscale/RGB, interleaved multiband TIFF,
-  and explicit ImageJ channel pages at first Z/time, up to 32 channels. Reject
-  unsupported OME mapping and ambiguous alpha layouts with an explicit error.
+  and explicit ImageJ channel pages at first Z/time, up to 32 channels. OME-TIFFs
+  use their OME-XML plane mapping (see OME-TIFF browsing). Reject ambiguous alpha
+  layouts with an explicit error.
   Unsigned 16-bit images, including single-band grayscale, RGB16, 16-bit PNG
   and single-channel ImageJ stacks, display as channel images. Their display caches retain separate lossless 16-bit planes,
   served to the viewer as raw samples. 16-bit RGBA keeps the 8-bit path.
@@ -307,6 +308,37 @@ on Open, folder navigation or Close. Cancellation or save failure must retain un
 - Validate pixel values, dimension mapping, stitching and RGB order with synthetic
   fixtures; compare public acquisitions against independent czifile values and
   check the native UI separately. See [CZI support](docs/CZI.md).
+
+## OME-TIFF browsing
+
+- Detect OME-TIFF by content: OME-XML at the root of the first page's
+  ImageDescription, whatever the `.tif`/`.tiff` name, or a `*.companion.ome`
+  chosen directly. Open's file filter adds `.companion.ome`; folder navigation
+  lists member TIFFs only. Parse the bounded metadata without DTDs and resolve
+  `TiffData` per the OME-TIFF specification, including `BinaryOnly` metadata in a
+  companion or another OME-TIFF. Member files must stay inside the opened file's
+  folder. See [OME-TIFF support](docs/OME-TIFF.md).
+- Each OME `Image` is one Position. Series whose C/Z/T sizes, pixel type or
+  samples differ from the first are left out with a status-bar note. Support
+  unsigned 8/16-bit single-sample channels, up to 32, or one RGB channel; keep
+  channel names/colors, physical sizes and the nominal time increment.
+- A selection maps to TIFF pages that libvips reads in place through job-local
+  member aliases: no frame is materialized and plain browsing has no frame-size
+  limit. Each page is checked against its `Pixels`. Power-of-two SubIFD levels of
+  each selected page are reused when all selected pages share them; otherwise a
+  pyramid is generated, with the 8-bit fallback for oversized 16-bit pyramids.
+  A plane the dataset does not store fails only that selection with a visible
+  error; navigation continues.
+- Fingerprint every member file, an opened companion and a `BinaryOnly`
+  metadata file; cache keys include all of their identities. A changed or
+  missing file fails the selection before cache reuse, after evaluation and
+  before publishing, and on-demand native tiles check their member before reading
+  and before publishing; errors name the file, and reopening reads it again.
+- Z max, Time max and both work as for ND2 when the projected frame fits 256 MiB;
+  otherwise the Dimensions panel disables them and shows why. Pages are reduced
+  one at a time into an accumulator admitted before reading. Preloading builds
+  previews and pyramids of nearby stored planes only. OME-TIFF is browsing-only:
+  annotation editing and saving are disabled in the UI and rejected by the backend.
 
 ## Image memory and preloading
 

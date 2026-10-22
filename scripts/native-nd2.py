@@ -14,7 +14,9 @@ import os
 import shutil
 import struct
 from pathlib import Path
+import sys
 import time
+from http.client import RemoteDisconnected
 from urllib.request import Request, urlopen
 
 import compositor
@@ -54,12 +56,21 @@ def main():
     binary = compositor.application(args.binary)
     previous_processes = app_processes()
 
-    def request(method, path, body=None):
+    def request(method, path, body=None, retry=None):
         req = Request(args.driver_url + path, method=method,
                       data=None if body is None else json.dumps(body).encode(),
                       headers={'Content-Type': 'application/json'})
-        with urlopen(req, timeout=max(30, args.timeout)) as response:
-            value = json.load(response).get('value')
+        try:
+            with urlopen(req, timeout=max(30, args.timeout)) as response:
+                value = json.load(response).get('value')
+        except (ConnectionError, RemoteDisconnected) as error:
+            # WebKitWebDriver occasionally resets a connection. Retry GETs and
+            # read-only scripts once, visibly; never repeat input or commands.
+            if not (method == 'GET' if retry is None else retry):
+                raise
+            print(f'Driver connection reset, retrying {method} {path}: {error!r}', file=sys.stderr)
+            time.sleep(1)
+            return request(method, path, body, False)
         if isinstance(value, dict) and value.get('error') and 'message' in value:
             raise RuntimeError(value)
         return value
@@ -71,18 +82,19 @@ def main():
     report = {'passed': False, 'checks': {}, 'sourceHashes': hashes, 'screenshots': []}
     args.output.with_suffix('.session.json').write_text(json.dumps({'sessionId': sid}) + '\n')
 
-    def js(script, values=None, asynchronous=False):
+    def js(script, values=None, asynchronous=False, read_only=False):
+        # Only scripts that change nothing may be retried after a reset.
         return request('POST', route + '/execute/' + ('async' if asynchronous else 'sync'),
-                       {'script': script, 'args': values or []})
+                       {'script': script, 'args': values or []}, retry=read_only)
 
-    def invoke(command, values=None):
-        return js('const done=arguments[arguments.length-1];window.__TAURI_INTERNALS__.invoke(arguments[0],arguments[1]).then(done,e=>done({error:String(e)}));', [command, values or {}], True)
+    def invoke(command, values=None, read_only=False):
+        return js('const done=arguments[arguments.length-1];window.__TAURI_INTERNALS__.invoke(arguments[0],arguments[1]).then(done,e=>done({error:String(e)}));', [command, values or {}], True, read_only)
 
     def state():
-        return invoke('image_state')
+        return invoke('image_state', read_only=True)
 
     def ui():
-        return js("return {phase:document.getElementById('viewer').dataset.phase,name:document.getElementById('filename').textContent,pointsDisabled:document.getElementById('points-button').disabled,saveDisabled:document.getElementById('save-button').disabled,panelHidden:document.getElementById('navigator-panel').hidden,count:document.getElementById('dimension-count').textContent,status:document.getElementById('status').textContent};")
+        return js("return {phase:document.getElementById('viewer').dataset.phase,name:document.getElementById('filename').textContent,pointsDisabled:document.getElementById('points-button').disabled,saveDisabled:document.getElementById('save-button').disabled,panelHidden:document.getElementById('navigator-panel').hidden,count:document.getElementById('dimension-count').textContent,status:document.getElementById('status').textContent};", read_only=True)
 
     def wait(predicate, description):
         deadline = time.monotonic() + args.timeout

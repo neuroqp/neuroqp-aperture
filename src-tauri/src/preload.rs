@@ -39,7 +39,9 @@ pub struct Acquisition {
     source: PathBuf,
     identity: Option<Fingerprint>,
     memory: Arc<Budget>,
+    /// ND2/CZI raw frames. OME-TIFF uses `ome` and never opens this cache.
     cache: Mutex<Option<Cache>>,
+    ome: Mutex<Option<Arc<crate::backend::ome::Source>>>,
     generation: AtomicU64,
     active: Mutex<Option<Weak<Job>>>,
     hint: Mutex<Hint>,
@@ -66,6 +68,7 @@ impl Acquisition {
             identity,
             memory,
             cache: Mutex::new(None),
+            ome: Mutex::new(None),
             generation: AtomicU64::new(0),
             active: Mutex::new(None),
             hint: Mutex::new(Hint {
@@ -81,6 +84,28 @@ impl Acquisition {
             frames_ready: AtomicU64::new(0),
             running: AtomicU64::new(0),
         })
+    }
+
+    pub fn format(&self) -> Format {
+        self.format
+    }
+
+    /// The OME-TIFF dataset, opened once per acquisition on a loader thread.
+    pub(crate) fn ome(&self) -> Result<Arc<crate::backend::ome::Source>, String> {
+        if self.stopped.load(Ordering::SeqCst) {
+            return Err("Loading cancelled.".into());
+        }
+        let mut source = self
+            .ome
+            .lock()
+            .map_err(|_| "OME-TIFF metadata lock failed.")?;
+        if source.is_none() {
+            *source = Some(Arc::new(crate::backend::ome::Source::open(
+                &self.source,
+                &self.memory,
+            )?));
+        }
+        Ok(source.clone().unwrap())
     }
 
     pub fn matches(&self, format: Format, source: &Path, identity: &Option<Fingerprint>) -> bool {
@@ -411,6 +436,15 @@ pub(crate) fn run(context: &LoadContext, foreground: &Arc<Job>) {
     let hint = *acquisition.hint.lock().unwrap();
     acquisition.previews_ready.fetch_max(1, Ordering::Relaxed);
     acquisition.frames_ready.fetch_max(1, Ordering::Relaxed);
+    // OME-TIFF preloads previews and pyramids of stored planes, never raw frames.
+    let ome = if acquisition.format == Format::OmeTiff {
+        match acquisition.ome() {
+            Ok(source) => Some(source),
+            Err(_) => return,
+        }
+    } else {
+        None
+    };
     for preview_only in [true, false] {
         let mut ready = 1;
         for selection in Candidates::new(&dimensions, selected, hint) {
@@ -419,18 +453,26 @@ pub(crate) fn run(context: &LoadContext, foreground: &Arc<Job>) {
             {
                 return;
             }
-            let Ok(described) = acquisition.with_cache(|cache| {
-                if !acquisition.current(generation, foreground) {
-                    return None;
-                }
-                let metadata = cache.describe(selection).ok()?;
-                // Preload admission preserves existing raw frames when memory is full.
-                // Display generation can evict optional raw frames as needed.
-                if preview_only {
-                    cache.preload(selection);
-                }
-                Some(metadata)
-            }) else {
+            let described = match &ome {
+                Some(source) => Ok(source
+                    .planes(selection)
+                    .and_then(|_| source.describe(selection))
+                    .ok()
+                    .map(|frame| frame.metadata)),
+                None => acquisition.with_cache(|cache| {
+                    if !acquisition.current(generation, foreground) {
+                        return None;
+                    }
+                    let metadata = cache.describe(selection).ok()?;
+                    // Preload admission preserves existing raw frames when memory is full.
+                    // Display generation can evict optional raw frames as needed.
+                    if preview_only {
+                        cache.preload(selection);
+                    }
+                    Some(metadata)
+                }),
+            };
+            let Ok(described) = described else {
                 return;
             };
             if !acquisition.current(generation, foreground) {
@@ -449,6 +491,8 @@ pub(crate) fn run(context: &LoadContext, foreground: &Arc<Job>) {
                     sample_bits: metadata.sample_bits,
                     rgb: metadata.rgb,
                     projection: Projection::None,
+                    skipped_series: state.skipped_series,
+                    projection_unavailable: None,
                 },
                 acquisition.clone(),
                 preview_only,

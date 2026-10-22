@@ -20,6 +20,10 @@ export type ImageState = {
   rgb: boolean;
   readOnly?: boolean;
   projection?: ProjectionMode;
+  /** OME-TIFF series left out because their dimensions differ. */
+  skippedSeries?: number;
+  /** Why max projections are unavailable for the selected position. */
+  projectionUnavailable?: string | null;
   displayRanges?: [number, number][];
   calibration?: {
     pixelWidthUm: number | null;

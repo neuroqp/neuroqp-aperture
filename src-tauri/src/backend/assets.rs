@@ -1,6 +1,7 @@
 //! Display assets served through the aperture:// protocol: previews and tiles.
 use super::{
     cache::{tree_size, CACHE_LIMIT},
+    ome::plane_input,
     process::{input, run},
     pyramid::{extract_plane, field},
     Backend, ImageState, Job, Phase,
@@ -300,16 +301,17 @@ fn native_tile(
             .unwrap_or(&levels[0])
             .clone()
     };
-    let band = channel
+    let plane = channel
         .map(|channel| {
             job.planes
                 .lock()
                 .unwrap()
                 .get(channel as usize)
-                .map(|plane| plane.band)
+                .cloned()
                 .ok_or("Invalid image channel.")
         })
         .transpose()?;
+    let band = plane.as_ref().map(|plane| plane.band);
     let tiles = |dir: &Path| match channel {
         Some(channel) => dir
             .join("channels")
@@ -326,6 +328,10 @@ fn native_tile(
         if let Ok(bytes) = fs::read(tiles.join(&name)) {
             return Ok(bytes);
         }
+    }
+    // On-demand OME-TIFF detail must come from the member as it was opened.
+    if let Some(plane) = &plane {
+        job.verify_plane(plane)?;
     }
     let number = job.process_number.fetch_add(1, Ordering::Relaxed);
     let resized = job.work.join(format!("tile-{number}.v"));
@@ -345,7 +351,10 @@ fn native_tile(
             "vips",
             &[
                 "affine".into(),
-                input(job, &source.options),
+                match &plane {
+                    Some(plane) => plane_input(job, plane, &source.options),
+                    None => input(job, &source.options),
+                },
                 output,
                 format!(
                     "{} 0 0 {}",
@@ -389,6 +398,9 @@ fn native_tile(
         }
         if tree_size(&job.root) > CACHE_LIMIT {
             return Err("Display cache limit reached.".into());
+        }
+        if let Some(plane) = &plane {
+            job.verify_plane(plane)?;
         }
         let _access = job.cache_access.lock().unwrap();
         let tiles = tiles(&job.dir.lock().unwrap());

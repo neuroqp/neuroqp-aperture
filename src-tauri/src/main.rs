@@ -13,6 +13,7 @@ mod memory;
 mod native;
 mod nd2;
 mod nd2_metadata;
+mod ome_tiff;
 mod platform;
 mod preload;
 mod raw_tiff;
@@ -150,9 +151,12 @@ fn startup_path(
     Ok(Some(PathBuf::from(argument)))
 }
 
+/// Open dialog filter: folder-navigation formats plus OME-TIFF companions.
 #[tauri::command]
-fn image_extensions() -> &'static [&'static str] {
-    backend::IMAGE_EXTENSIONS
+fn image_extensions() -> Vec<&'static str> {
+    let mut extensions = backend::IMAGE_EXTENSIONS.to_vec();
+    extensions.push(backend::COMPANION_EXTENSION);
+    extensions
 }
 #[tauri::command]
 async fn folder_images(path: String) -> Result<Vec<String>, String> {

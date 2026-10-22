@@ -15,11 +15,14 @@ pub(crate) const MAX_ENCODED_FRAME_BYTES: u64 = MAX_FRAME_BYTES + 1024 * 1024;
 pub(crate) const CANCEL_CHUNK_SAMPLES: usize = 65536;
 const MAX_NAME_CHARS: usize = 256;
 
-/// Microscopy containers browsed one selected frame at a time.
+/// Microscopy containers browsed one selected frame at a time. ND2 and CZI
+/// decode whole frames in Rust; OME-TIFF planes are TIFF pages read by libvips.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
 pub enum Format {
     Nd2,
     Czi,
+    /// Detected by content, never by extension alone.
+    OmeTiff,
 }
 
 impl Format {
@@ -35,6 +38,7 @@ impl Format {
         match self {
             Self::Nd2 => "nd2-openreadout-0.3.0-v3-16bit",
             Self::Czi => "czi-openreadout-0.3.0-v2-16bit",
+            Self::OmeTiff => "ome-tiff-v1",
         }
     }
 }
@@ -44,6 +48,7 @@ impl std::fmt::Display for Format {
         formatter.write_str(match self {
             Self::Nd2 => "ND2",
             Self::Czi => "CZI",
+            Self::OmeTiff => "OME-TIFF",
         })
     }
 }

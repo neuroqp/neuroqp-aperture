@@ -75,6 +75,7 @@ dependencies = [
  "openreadout-nd2",
  "png 0.18.1",
  "rayon",
+ "roxmltree",
  "same-file",
  "serde",
  "serde_json",

@@ -579,6 +579,9 @@ function showImage(state: ImageState) {
     else loadAnnotations(state.id);
   }
   current.image = state;
+  // A failed plane selection must not leave the previous plane's pixels on show.
+  if (state.phase === "error" && sameDimensions && !state.previewReady)
+    viewer.world.removeAll();
   // OSD has no public setter. This is its eviction target; visible tiles stay resident.
   (
     viewer.tileCache as OpenSeadragon.TileCache & { _maxCacheItemCount: number }
