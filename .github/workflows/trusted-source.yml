@@ -1,20 +1,32 @@
 name: Trusted source
 
 # Runs only the calling workflow revision's code, before any job checks out,
-# executes or caches the dispatched source commit.
+# executes or caches the dispatched source commit or consumes a referenced run.
 on:
   workflow_call:
     inputs:
       source_sha:
         type: string
         required: true
+      run_workflow:
+        description: Workflow whose successful main run must be verified; empty when none is consumed
+        type: string
+        required: true
+      run_id:
+        description: Referenced run, required whenever run_workflow is set
+        type: string
+        required: true
     outputs:
       revision:
         description: Full source commit verified to be contained in main
         value: ${{ jobs.verify.outputs.revision }}
+      run_id:
+        description: Referenced run verified as a successful main run, or empty
+        value: ${{ jobs.verify.outputs.run_id }}
 
 permissions:
   contents: read
+  actions: read
 
 jobs:
   verify:
@@ -22,15 +34,18 @@ jobs:
     timeout-minutes: 5
     outputs:
       revision: ${{ steps.verify.outputs.revision }}
+      run_id: ${{ steps.verify.outputs.run_id }}
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           persist-credentials: false
       - id: verify
-        name: Require exact source commit contained in main
+        name: Require exact source commit and referenced run contained in main
         env:
           GH_TOKEN: ${{ github.token }}
           SOURCE_SHA: ${{ inputs.source_sha }}
+          RUN_WORKFLOW: ${{ inputs.run_workflow }}
+          RUN_ID: ${{ inputs.run_id }}
         run: |
-          revision="$(python3 scripts/release/release-state.py trusted-source "$SOURCE_SHA")"
-          echo "revision=$revision" >> "$GITHUB_OUTPUT"
+          outputs="$(python3 scripts/release/release-state.py trusted-source "$SOURCE_SHA" --run-workflow "$RUN_WORKFLOW" --run-id "$RUN_ID")"
+          echo "$outputs" >> "$GITHUB_OUTPUT"

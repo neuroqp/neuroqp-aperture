@@ -11,7 +11,7 @@ import subprocess
 import tarfile
 import tempfile
 import unittest
-from unittest.mock import patch
+from unittest.mock import Mock, patch
 
 spec = importlib.util.spec_from_file_location("state", Path(__file__).with_name("release-state.py"))
 state = importlib.util.module_from_spec(spec)
@@ -33,6 +33,48 @@ def comparison(status="ahead", base=SOURCE, merge_base=None, behind=0):
 def workflow_jobs(name):
     body = (WORKFLOWS / name).read_text(encoding="utf-8").split("\njobs:\n", 1)[1]
     return dict(re.findall(r"(?ms)^  ([\w-]+):\n(.*?)(?=^  [\w-]+:\n|\Z)", body))
+
+
+def job_condition(body):
+    """Return a job-level if expression, joining folded continuation lines."""
+    match = re.search(r"^    if: (?:>-\n((?:      .*\n)+)|(.*)$)", body, re.M)
+    return " ".join((match.group(1) or match.group(2)).split()) if match else ""
+
+
+def run_row(**changes):
+    return {"repository": {"full_name": state.REPO}, "head_branch": "main", "head_sha": WORKFLOW,
+            "event": "workflow_dispatch", "path": ".github/workflows/validate.yml",
+            "status": "completed", "conclusion": "success", **changes}
+
+
+def historical_trusted_run(gh, run_id, workflow, source_sha=None):
+    """trusted_run from main 8fafb1f with gh injected, as an old source_sha checkout would run it."""
+    if not re.fullmatch(r"[1-9][0-9]*", str(run_id)):
+        raise ValueError("Expected a workflow run ID")
+    row = json.loads(gh("api", f"repos/{state.REPO}/actions/runs/{run_id}"))
+    if (row.get("repository", {}).get("full_name") != state.REPO or row.get("head_branch") != "main"
+            or row.get("event") != "workflow_dispatch" or row.get("path") != ".github/workflows/" + workflow
+            or row.get("status") != "completed" or row.get("conclusion") != "success"):
+        raise ValueError("Successful trusted main workflow required")
+    if source_sha:
+        comparison = json.loads(gh("api", f"repos/{state.REPO}/compare/{source_sha}...main"))
+        if comparison.get("status") not in ("ahead", "identical"):
+            raise ValueError("Source commit must be contained in main")
+    return row
+
+
+def trusted_preflight(source_sha, run_workflow, run_id, responses):
+    """Run the trusted-source workflow's command and return its GITHUB_OUTPUT lines."""
+    argv = ["release-state.py", "trusted-source", source_sha, "--run-workflow", run_workflow, "--run-id", run_id]
+    output = io.StringIO()
+    with patch("sys.argv", argv), patch.object(state, "gh", side_effect=responses) as github, \
+            contextlib.redirect_stdout(output):
+        try:
+            state.main()
+        finally:
+            trusted_preflight.calls = [call.args for call in github.call_args_list]
+            trusted_preflight.output = output.getvalue()
+    return output.getvalue()
 
 
 class ReleaseStateTests(unittest.TestCase):
@@ -175,31 +217,61 @@ class ReleaseStateTests(unittest.TestCase):
                     with self.assertRaises((subprocess.SubprocessError, ValueError)):
                         state.main_commit(SOURCE)
 
-    def test_trusted_source_command_prints_only_verified_commits(self):
-        argv = ["release-state.py", "trusted-source", SOURCE]
-        for responses, expected in (([main_ref(), comparison()], SOURCE + "\n"),
-                                    ([main_ref(), comparison("diverged")], "")):
-            output = io.StringIO()
-            with patch("sys.argv", argv), patch.object(state, "gh", side_effect=responses), contextlib.redirect_stdout(output):
-                if expected:
-                    state.main()
-                else:
-                    with self.assertRaises(ValueError):
-                        state.main()
-            self.assertEqual(output.getvalue(), expected)
+    def test_trusted_source_command_prints_only_verified_outputs(self):
+        self.assertEqual(trusted_preflight(SOURCE, "", "", [main_ref(), comparison()]),
+                         f"revision={SOURCE}\nrun_id=\n")
+        with self.assertRaises(ValueError):
+            trusted_preflight(SOURCE, "", "", [main_ref(), comparison("diverged")])
+        self.assertEqual(trusted_preflight.output, "")
 
-    def test_trusted_run_requires_workflow_revision_in_main(self):
-        row = {"repository": {"full_name": state.REPO}, "head_branch": "main", "head_sha": WORKFLOW,
-               "event": "workflow_dispatch", "path": ".github/workflows/validate.yml",
-               "status": "completed", "conclusion": "success"}
-        accepted = [json.dumps(row), main_ref(), comparison(base=WORKFLOW), main_ref(), comparison()]
-        with patch.object(state, "gh", side_effect=accepted):
-            self.assertEqual(state.trusted_run("1", "validate.yml", SOURCE), row)
-        # For example a tag named main at an unreviewed commit with a modified workflow.
-        rejected = [json.dumps(row), main_ref(), comparison("diverged", base=WORKFLOW, merge_base="d" * 40)]
-        with patch.object(state, "gh", side_effect=rejected):
-            with self.assertRaises(ValueError):
-                state.trusted_run("1", "validate.yml", SOURCE)
+    def test_trusted_preflight_verifies_referenced_run_from_calling_revision(self):
+        accepted = [main_ref(), comparison(), json.dumps(run_row()), main_ref(), comparison(base=WORKFLOW)]
+        self.assertEqual(trusted_preflight(SOURCE, "validate.yml", "17", accepted), f"revision={SOURCE}\nrun_id=17\n")
+        self.assertEqual(trusted_preflight.calls[2], ("api", f"repos/{state.REPO}/actions/runs/17"))
+        self.assertEqual(trusted_preflight.calls[4], ("api", f"repos/{state.REPO}/compare/{WORKFLOW}...{MAIN}"))
+
+    def test_trusted_preflight_rejects_unmerged_run_that_historical_source_helper_accepts(self):
+        # A tag named main at an unmerged commit reports head_branch "main" for its successful run.
+        row = run_row()
+        historical = [json.dumps(row), comparison()]
+        # An old source_sha checkout's helper checks only the run fields and the source commit.
+        self.assertEqual(historical_trusted_run(Mock(side_effect=historical), "17", "validate.yml", SOURCE), row)
+        diverged = comparison("diverged", base=WORKFLOW, merge_base="d" * 40)
+        with self.assertRaisesRegex(ValueError, "contained in main"):
+            trusted_preflight(SOURCE, "validate.yml", "17", [main_ref(), comparison(), json.dumps(row), main_ref(), diverged])
+        self.assertEqual(trusted_preflight.output, "")
+
+    def test_trusted_preflight_rejects_untrusted_referenced_runs(self):
+        cases = {
+            "other workflow": run_row(path=".github/workflows/package.yml"),
+            "tag or branch other than main": run_row(head_branch="release"),
+            "not dispatched": run_row(event="push"),
+            "still running": run_row(status="in_progress"),
+            "failed": run_row(conclusion="failure"),
+            "fork repository": run_row(repository={"full_name": "fork/neuroqp-aperture"}),
+            "missing head revision": run_row(head_sha=None),
+        }
+        for name, row in cases.items():
+            with self.subTest(name), self.assertRaises(ValueError):
+                trusted_preflight(SOURCE, "validate.yml", "17", [main_ref(), comparison(), json.dumps(row)])
+            self.assertEqual(trusted_preflight.output, "")
+
+    def test_trusted_preflight_requires_expected_run_ids(self):
+        # A required run never becomes optional because its ID is empty or malformed.
+        for workflow in ("validate.yml", "package.yml"):
+            for run_id in ("", "0", "017", " 17", "17\n", "17 ", "-1", "abc", "1e3"):
+                with self.subTest(workflow=workflow, run_id=run_id), self.assertRaises(ValueError):
+                    trusted_preflight(SOURCE, workflow, run_id, [main_ref(), comparison()])
+                self.assertEqual(len(trusted_preflight.calls), 2)
+                self.assertEqual(trusted_preflight.output, "")
+        with self.assertRaisesRegex(ValueError, "without its expected workflow"):
+            trusted_preflight(SOURCE, "", "17", [main_ref(), comparison()])
+        for argv in (["--run-workflow", "check.yml", "--run-id", "17"], ["--run-id", "17"], ["--run-workflow", "validate.yml"]):
+            with self.subTest(argv=argv), patch("sys.argv", ["release-state.py", "trusted-source", SOURCE, *argv]), \
+                    patch.object(state, "gh") as github, contextlib.redirect_stderr(io.StringIO()):
+                with self.assertRaises(SystemExit):
+                    state.main()
+                github.assert_not_called()
 
     def test_dispatched_source_is_checked_out_only_after_main_containment(self):
         guard = "needs.trust.outputs.revision == inputs.source_sha"
@@ -207,11 +279,11 @@ class ReleaseStateTests(unittest.TestCase):
         # The gate runs only the calling workflow revision's code and writes no cache.
         self.assertNotRegex(trusted, r"\bref:")
         self.assertEqual([action.split("@")[0] for action in re.findall(r"uses: (\S+)", trusted)], ["actions/checkout"])
-        self.assertIn('revision="$(python3 scripts/release/release-state.py trusted-source "$SOURCE_SHA")"', trusted)
+        self.assertIn('trusted-source "$SOURCE_SHA" --run-workflow "$RUN_WORKFLOW" --run-id "$RUN_ID"', trusted)
         for name in ("validate.yml", "package.yml", "publish.yml"):
             jobs = workflow_jobs(name)
             self.assertIn("uses: ./.github/workflows/trusted-source.yml", jobs["trust"])
-            guarded = {job for job, body in jobs.items() if re.search(r"^    if: .*" + re.escape(guard) + r"$", body, re.M)}
+            guarded = {job for job, body in jobs.items() if guard in job_condition(body)}
             for job, body in jobs.items():
                 if job == "trust" or "actions/checkout@" not in body:
                     continue
@@ -223,6 +295,34 @@ class ReleaseStateTests(unittest.TestCase):
                     self.assertEqual(body.count("actions/checkout@"), body.count("ref: ${{ needs.trust.outputs.revision }}"))
                     self.assertNotRegex(body, r"ref: \$\{\{ *(github\.event\.)?inputs\.")
 
+    def test_referenced_runs_are_consumed_only_after_trusted_verification(self):
+        expected = {"validate.yml": ("build_run_id", "${{ inputs.mode == 'seal' && 'validate.yml' || '' }}",
+                                     "${{ inputs.mode == 'seal' && inputs.build_run_id || '' }}"),
+                    "package.yml": ("validation_run_id", "validate.yml", "${{ inputs.validation_run_id }}"),
+                    "publish.yml": ("package_run_id", "package.yml", "${{ inputs.package_run_id }}")}
+        for name, (input_name, run_workflow, run_id) in expected.items():
+            jobs = workflow_jobs(name)
+            guard = f"needs.trust.outputs.run_id != '' && needs.trust.outputs.run_id == inputs.{input_name}"
+            with self.subTest(workflow=name):
+                self.assertIn(f"run_workflow: {run_workflow}\n", jobs["trust"])
+                self.assertIn(f"run_id: {run_id}\n", jobs["trust"])
+            consumers = 0
+            for job, body in jobs.items():
+                if job == "trust":
+                    continue
+                with self.subTest(workflow=name, job=job):
+                    # Source-tree helpers no longer decide whether a referenced run is trusted.
+                    self.assertNotIn("trusted-run", body)
+                    self.assertNotIn("inputs." + input_name, body.replace(guard, ""))
+                    run_ids = re.findall(r"run-id: (.*)", body)
+                    self.assertEqual(run_ids, ["${{ needs.trust.outputs.run_id }}"] * len(run_ids))
+                    if run_ids:
+                        consumers += 1
+                        needs = re.search(r"^    needs: \[?([^\]\n]*)", body, re.M)
+                        needed = {item.strip() for item in needs.group(1).split(",")}
+                        self.assertTrue(guard in job_condition(body)
+                                        or any(guard in job_condition(jobs[other]) for other in needed))
+            self.assertGreater(consumers, 0)
 
 if __name__ == "__main__":
     unittest.main()

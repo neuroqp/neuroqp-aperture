@@ -64,8 +64,8 @@ def main_commit(commit):
     return commit
 
 
-def trusted_run(run_id, workflow, source_sha=None):
-    if not re.fullmatch(r"[1-9][0-9]*", str(run_id)):
+def trusted_run(run_id, workflow):
+    if not isinstance(run_id, str) or not re.fullmatch(r"[1-9][0-9]*", run_id):
         raise ValueError("Expected a workflow run ID")
     row = json.loads(gh("api", f"repos/{REPO}/actions/runs/{run_id}"))
     if (row.get("repository", {}).get("full_name") != REPO or row.get("head_branch") != "main"
@@ -74,9 +74,19 @@ def trusted_run(run_id, workflow, source_sha=None):
         raise ValueError("Successful trusted main workflow required")
     # Tags report their name as head_branch, so also require the workflow revision in main.
     main_commit(row.get("head_sha"))
-    if source_sha:
-        main_commit(source_sha)
     return row
+
+
+def trusted_inputs(source_sha, run_workflow, run_id):
+    """Verify dispatched inputs with the calling workflow revision before any source checkout."""
+    outputs = {"revision": main_commit(source_sha), "run_id": ""}
+    # The caller states whether a referenced run is required; an empty run ID never makes it optional.
+    if run_workflow:
+        trusted_run(run_id, run_workflow)
+        outputs["run_id"] = run_id
+    elif run_id:
+        raise ValueError("Workflow run ID supplied without its expected workflow")
+    return outputs
 
 
 def automated(platform, executable, info_path, output, source_sha):
@@ -308,10 +318,8 @@ def main():
     p.add_argument("--source-sha", required=True)
     p = commands.add_parser("trusted-source")
     p.add_argument("source_sha")
-    p = commands.add_parser("trusted-run")
-    p.add_argument("run_id")
-    p.add_argument("workflow", choices=("validate.yml", "package.yml"))
-    p.add_argument("--source-sha", required=True)
+    p.add_argument("--run-workflow", required=True, choices=("", "validate.yml", "package.yml"))
+    p.add_argument("--run-id", required=True)
     p = commands.add_parser("validate")
     p.add_argument("directory", type=Path)
     p.add_argument("--source-sha", required=True)
@@ -338,9 +346,8 @@ def main():
     if args.command == "build":
         automated(args.platform, args.executable, args.buildinfo, args.output, args.source_sha)
     elif args.command == "trusted-source":
-        print(main_commit(args.source_sha))
-    elif args.command == "trusted-run":
-        trusted_run(args.run_id, args.workflow, args.source_sha)
+        outputs = trusted_inputs(args.source_sha, args.run_workflow, args.run_id)
+        print("".join(f"{key}={value}\n" for key, value in outputs.items()), end="")
     elif args.command == "validate":
         validation(args.directory, args.source_sha, args.build_run_id, args.native_report, args.runtime, args.output)
     elif args.command == "extract":
