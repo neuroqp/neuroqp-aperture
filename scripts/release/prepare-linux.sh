@@ -3,7 +3,7 @@
 set -euo pipefail
 export DEBIAN_FRONTEND=noninteractive
 apt-get update
-apt-get install -y --no-install-recommends ca-certificates curl git build-essential pkg-config python3 meson ninja-build cmake patchelf file squashfs-tools xz-utils libfuse2 libgtk-3-dev libwebkit2gtk-4.1-dev libayatana-appindicator3-dev librsvg2-dev libtiff-dev libtiff-tools libjpeg-dev libpng-dev libwebp-dev libheif-dev libexif-dev liblcms2-dev libexpat1-dev liborc-0.4-dev libarchive-dev
+apt-get install -y --no-install-recommends ca-certificates curl git build-essential pkg-config python3 meson ninja-build cmake patchelf file squashfs-tools xz-utils libfuse2 libgtk-3-dev libwebkit2gtk-4.1-dev libayatana-appindicator3-dev librsvg2-dev libtiff-dev libtiff-tools libjpeg-dev libpng-dev libwebp-dev libheif-dev libexif-dev liblcms2-dev libexpat1=2.5.0-1+deb12u5 libexpat1-dev=2.5.0-1+deb12u5 liborc-0.4-dev libarchive-dev
 mkdir -p build/linux build/release
 # Restore the reviewed build-environment versions that bookworm-security has
 # since superseded. The native identity gate still requires the exact set.
