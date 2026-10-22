@@ -118,7 +118,8 @@ pub(crate) fn detect(path: &Path) -> Result<bool, String> {
         return Ok(false);
     };
     Ok(match tiff.root() {
-        Ok(Root::Ome(_)) => true,
+        // An XML prolog the probe cannot finish is never treated as ordinary.
+        Ok(Root::Ome(_) | Root::Unknown) => true,
         _ => tiff.mentions_ome()?,
     })
 }
@@ -1147,6 +1148,9 @@ impl Tiff {
                     Some(_) => Root::Other,
                     None => Root::Unknown,
                 });
+            } else if window.is_empty() && len > MAX_XML_BYTES {
+                // Whitespace up to the XML limit; the rest is never read.
+                return Ok(Root::Unknown);
             } else {
                 // Empty or not XML.
                 return Ok(Root::Other);
@@ -1980,6 +1984,16 @@ mod tests {
                 "<OME xmlns=\"{NS}\" {} UUID=\"u\">",
                 "a=\"b\" ".repeat(20_000)
             ),
+        ] {
+            write_tiff(&path, false, true, 1, Some(&text));
+            assert!(detect(&path).unwrap());
+            assert!(open(&path, &budget(&dir)).is_err());
+        }
+        // Prologs beyond the 32 MiB probe limit are refused, not opened as editable TIFFs.
+        let huge = (MAX_XML_BYTES + 1024) as usize;
+        for text in [
+            format!("<!-- {} --><OME xmlns=\"{NS}\"/>", "x".repeat(huge)),
+            format!("{}<OME xmlns=\"{NS}\"/>", " ".repeat(huge)),
         ] {
             write_tiff(&path, false, true, 1, Some(&text));
             assert!(detect(&path).unwrap());
