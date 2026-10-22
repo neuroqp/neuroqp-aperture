@@ -13,6 +13,9 @@ import zipfile
 from release import ASSETS, current_version, digest, lockfile_hashes, native_identity, notes, source_plan, verify_source_material, verify, verify_signatures
 
 REPO = "neuroqp/neuroqp-aperture"
+# Producer runs must have called this gate. Rename it when older gate generations must stop
+# qualifying: the earlier trusted-source.yml did not verify the runs its callers consumed.
+TRUST_GATE = ".github/workflows/trusted-inputs.yml"
 ENVIRONMENTS = {"windows11-setup", "windows11-portable", "debian12", "ubuntu24-wayland"}
 FUNCTIONAL_ENVIRONMENTS = {"windows11", "debian12", "ubuntu24-wayland"}
 
@@ -48,19 +51,61 @@ def gh(*args):
     return subprocess.check_output(["gh", *args], text=True, timeout=600)
 
 
-def trusted_run(run_id, workflow, source_sha=None):
-    if not re.fullmatch(r"[1-9][0-9]*", str(run_id)):
+def main_commit(commit):
+    """Return a full commit SHA only when the current main branch contains it."""
+    hex_value(commit, 40)
+    head = json.loads(gh("api", f"repos/{REPO}/git/ref/heads/main"))
+    if head.get("ref") != "refs/heads/main" or head.get("object", {}).get("type") != "commit":
+        raise ValueError("Unexpected main branch reference")
+    # Compare with the pinned head so tags or branches named like either side cannot redirect it.
+    main = hex_value(head["object"].get("sha"), 40)
+    comparison = json.loads(gh("api", f"repos/{REPO}/compare/{commit}...{main}"))
+    if (comparison.get("status") not in ("ahead", "identical") or comparison.get("behind_by") != 0
+            or comparison.get("base_commit", {}).get("sha") != commit
+            or comparison.get("merge_base_commit", {}).get("sha") != commit):
+        raise ValueError("Source commit must be contained in main")
+    return commit
+
+
+def trusted_run(run_id, workflow):
+    if not isinstance(run_id, str) or not re.fullmatch(r"[1-9][0-9]*", run_id):
         raise ValueError("Expected a workflow run ID")
     row = json.loads(gh("api", f"repos/{REPO}/actions/runs/{run_id}"))
     if (row.get("repository", {}).get("full_name") != REPO or row.get("head_branch") != "main"
             or row.get("event") != "workflow_dispatch" or row.get("path") != ".github/workflows/" + workflow
             or row.get("status") != "completed" or row.get("conclusion") != "success"):
         raise ValueError("Successful trusted main workflow required")
-    if source_sha:
-        comparison = json.loads(gh("api", f"repos/{REPO}/compare/{source_sha}...main"))
-        if comparison.get("status") not in ("ahead", "identical"):
-            raise ValueError("Source commit must be contained in main")
+    # GitHub records each reusable workflow a run called. Workflows predating the gate cannot
+    # add this record, unlike artifacts, logs or run names, so the producer verified its inputs.
+    head = row.get("head_sha")
+    gate = {"path": f"{REPO}/{TRUST_GATE}@{head}", "ref": "refs/heads/main", "sha": head}
+    calls = row.get("referenced_workflows")
+    if not isinstance(calls, list) or not any(
+            isinstance(call, dict) and all(call.get(key) == value for key, value in gate.items()) for call in calls):
+        raise ValueError("Workflow run did not call the trusted input gate at its own main revision")
+    # Tags report their name as head_branch, so also require the workflow revision in main.
+    main_commit(head)
     return row
+
+
+def trusted_inputs(source_sha, run_workflow, run_id):
+    """Verify dispatched inputs with the calling workflow revision before any source checkout.
+
+    Raises unless every input holds; returns nothing, so the gate publishes only gate_outputs.
+    """
+    main_commit(source_sha)
+    # The caller states whether a referenced run is required; an empty run ID never makes it optional.
+    if run_workflow:
+        trusted_run(run_id, run_workflow)
+    elif run_id:
+        raise ValueError("Workflow run ID supplied without its expected workflow")
+
+
+def gate_outputs(source_sha, run_id):
+    """Format the gate's only step outputs: the verified commit and the run ID or empty."""
+    if not re.fullmatch(r"(?:[1-9][0-9]*)?", run_id):
+        raise ValueError("Expected a workflow run ID or none")
+    return f"revision={hex_value(source_sha, 40)}\nrun_id={run_id}\n"
 
 
 def automated(platform, executable, info_path, output, source_sha):
@@ -290,10 +335,10 @@ def main():
     for name in ("executable", "buildinfo", "output"):
         p.add_argument(name, type=Path)
     p.add_argument("--source-sha", required=True)
-    p = commands.add_parser("trusted-run")
-    p.add_argument("run_id")
-    p.add_argument("workflow", choices=("validate.yml", "package.yml"))
-    p.add_argument("--source-sha", required=True)
+    p = commands.add_parser("trusted-source")
+    p.add_argument("source_sha")
+    p.add_argument("--run-workflow", required=True, choices=("", "validate.yml", "package.yml"))
+    p.add_argument("--run-id", required=True)
     p = commands.add_parser("validate")
     p.add_argument("directory", type=Path)
     p.add_argument("--source-sha", required=True)
@@ -319,8 +364,9 @@ def main():
     args = parser.parse_args()
     if args.command == "build":
         automated(args.platform, args.executable, args.buildinfo, args.output, args.source_sha)
-    elif args.command == "trusted-run":
-        trusted_run(args.run_id, args.workflow, args.source_sha)
+    elif args.command == "trusted-source":
+        trusted_inputs(args.source_sha, args.run_workflow, args.run_id)
+        print(gate_outputs(args.source_sha, args.run_id), end="")
     elif args.command == "validate":
         validation(args.directory, args.source_sha, args.build_run_id, args.native_report, args.runtime, args.output)
     elif args.command == "extract":
