@@ -73,6 +73,7 @@ dependencies = [
  "openreadout-czi",
  "openreadout-jpegxr",
  "openreadout-nd2",
+ "png 0.18.1",
  "rayon",
  "same-file",
  "serde",

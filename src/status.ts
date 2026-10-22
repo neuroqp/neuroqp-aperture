@@ -42,5 +42,7 @@ export function statusFor(status: StatusInput) {
     );
   if (status.savedPath && !status.dirty) return notice("Saved");
   if (image?.readOnly) return detail("Browsing only · annotations unavailable");
+  if (image?.displayFallback)
+    return detail("8-bit display · image too large for 16-bit cache");
   return detail("");
 }

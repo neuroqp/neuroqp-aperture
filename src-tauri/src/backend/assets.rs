@@ -3,8 +3,9 @@ use super::{
     cache::{tree_size, CACHE_LIMIT},
     process::{input, run},
     pyramid::{extract_plane, field},
-    Backend, Job, Phase,
+    Backend, ImageState, Job, Phase,
 };
+use crate::vips_worker::Samples;
 use std::{
     ffi::OsString,
     fs,
@@ -17,11 +18,20 @@ use tauri::Manager;
 
 const TILE_SIZE: u32 = 256;
 
-pub(super) fn max_level(width: u32, height: u32) -> u32 {
+pub(crate) fn max_level(width: u32, height: u32) -> u32 {
     32 - width.max(height).saturating_sub(1).leading_zeros()
 }
 
-#[derive(Debug, PartialEq)]
+/// Image size at a DeepZoom level; level `max_level` is full resolution.
+fn level_size(width: u32, height: u32, level: u32) -> (u32, u32) {
+    let factor = 1_u64 << (max_level(width, height) - level);
+    (
+        (width as u64).div_ceil(factor) as u32,
+        (height as u64).div_ceil(factor) as u32,
+    )
+}
+
+#[derive(Clone, Copy, Debug, PartialEq)]
 pub(crate) enum Asset {
     Preview,
     Tile {
@@ -54,16 +64,11 @@ fn asset(path: &str, id: &str, width: u32, height: u32) -> Option<Asset> {
     let level: u32 = parts[2].parse().ok()?;
     let (x, y) = parts[3].strip_suffix(".jpg")?.split_once('_')?;
     let (x, y): (u32, u32) = (x.parse().ok()?, y.parse().ok()?);
-    let max = max_level(width, height);
-    if width == 0 || height == 0 || level > max {
+    if width == 0 || height == 0 || level > max_level(width, height) {
         return None;
     }
-    let factor = 1_u64 << (max - level);
-    let level_width = (width as u64).div_ceil(factor);
-    let level_height = (height as u64).div_ceil(factor);
-    if x as u64 >= level_width.div_ceil(TILE_SIZE as u64)
-        || y as u64 >= level_height.div_ceil(TILE_SIZE as u64)
-    {
+    let (level_width, level_height) = level_size(width, height, level);
+    if x >= level_width.div_ceil(TILE_SIZE) || y >= level_height.div_ceil(TILE_SIZE) {
         return None;
     }
     Some(Asset::Tile { level, x, y })
@@ -105,6 +110,79 @@ pub(crate) fn channel_asset(
         }),
         _ => None,
     }
+}
+
+/// Route a request path. `.u16` channel assets are the raw-sample form of the
+/// cached 16-bit PNGs; the flag selects that response body.
+fn requested(path: &str, state: &ImageState) -> Option<(Asset, bool)> {
+    if let Some(asset) = asset(path, &state.id, state.width, state.height) {
+        return Some((asset, false));
+    }
+    if !state.channel_mode {
+        return None;
+    }
+    let (path, samples) = match path.strip_suffix(".u16") {
+        Some(stem) if state.sample_bits == 16 => (format!("{stem}.png"), true),
+        Some(_) => return None,
+        None => (path.to_owned(), false),
+    };
+    let asset = channel_asset(
+        &path,
+        &state.id,
+        state.width,
+        state.height,
+        state.channels.len(),
+    )?;
+    Some((asset, samples))
+}
+
+/// Exact tile bounds, including smaller edge tiles; previews fit 1024 pixels.
+fn expected_size(asset: Asset, width: u32, height: u32, actual: (u32, u32)) -> bool {
+    match asset {
+        Asset::ChannelTile { level, x, y, .. } | Asset::Tile { level, x, y } => {
+            let (level_width, level_height) = level_size(width, height, level);
+            actual
+                == (
+                    TILE_SIZE.min(level_width - x * TILE_SIZE),
+                    TILE_SIZE.min(level_height - y * TILE_SIZE),
+                )
+        }
+        Asset::ChannelPreview { .. } | Asset::Preview => {
+            (1..=width.min(1024)).contains(&actual.0) && (1..=height.min(1024)).contains(&actual.1)
+        }
+    }
+}
+
+/// Decode a cached 16-bit grayscale PNG into the `.u16` body: u32 LE width,
+/// u32 LE height, then row-major u16 LE samples. Any other PNG is rejected.
+pub(crate) fn u16_body(png: &[u8], valid: impl Fn(u32, u32) -> bool) -> Result<Vec<u8>, String> {
+    let mut reader = png::Decoder::new(std::io::Cursor::new(png))
+        .read_info()
+        .map_err(|e| format!("Invalid channel PNG: {e}"))?;
+    let info = reader.info();
+    let (width, height) = (info.width, info.height);
+    if info.color_type != png::ColorType::Grayscale || info.bit_depth != png::BitDepth::Sixteen {
+        return Err("Channel PNG is not 16-bit grayscale.".into());
+    }
+    if !valid(width, height) {
+        return Err("Channel PNG has unexpected dimensions.".into());
+    }
+    let length = reader
+        .output_buffer_size()
+        .filter(|length| *length as u64 == 2 * u64::from(width) * u64::from(height))
+        .ok_or("Channel PNG has an unexpected sample layout.")?;
+    // Decode in place after the prefix; PNG stores big-endian samples.
+    let mut body = Vec::with_capacity(8 + length);
+    body.extend(width.to_le_bytes());
+    body.extend(height.to_le_bytes());
+    body.resize(8 + length, 0);
+    reader
+        .next_frame(&mut body[8..])
+        .map_err(|e| format!("Invalid channel PNG: {e}"))?;
+    for sample in body[8..].as_chunks_mut::<2>().0 {
+        sample.swap(0, 1);
+    }
+    Ok(body)
 }
 
 /// Read a display asset, waiting while it is generated and following the cache
@@ -212,9 +290,7 @@ fn native_tile(
     y: u32,
 ) -> Result<Vec<u8>, String> {
     let state = job.state.lock().unwrap().clone();
-    let factor = 1_u64 << (max_level(state.width, state.height) - level);
-    let width = (state.width as u64).div_ceil(factor) as u32;
-    let height = (state.height as u64).div_ceil(factor) as u32;
+    let (width, height) = level_size(state.width, state.height, level);
     let source = {
         let levels = job.native.lock().unwrap();
         levels
@@ -295,12 +371,17 @@ fn native_tile(
                 "vipsheader",
                 &["-a".into(), resized.clone().into_os_string()],
             )?;
+            let samples = match (field(&header, "format"), state.sample_bits) {
+                (Some("ushort"), 16) => Samples::Ushort,
+                (Some("ushort"), _) => Samples::HighByte,
+                _ => Samples::Uchar,
+            };
             extract_plane(
                 job,
                 resized.clone().into_os_string(),
                 band,
                 &partial,
-                field(&header, "format") == Some("ushort"),
+                samples,
             )?;
         }
         if job.cancel.load(Ordering::Relaxed) {
@@ -329,37 +410,24 @@ pub(crate) fn respond(
 ) {
     let backend = app.state::<Backend>();
     if backend.closing.load(Ordering::Relaxed) {
-        responder.respond(response(503, b"Viewer shutting down.".to_vec()));
+        responder.respond(response(503, b"Viewer shutting down.".to_vec(), false));
         return;
     }
     let path = request.uri().path().to_string();
     let job = backend.current.lock().unwrap().clone();
     let Some(job) = job else {
-        responder.respond(response(404, b"No image loaded.".to_vec()));
+        responder.respond(response(404, b"No image loaded.".to_vec(), false));
         return;
     };
     let state = job.state.lock().unwrap().clone();
-    let asset = asset(&path, &state.id, state.width, state.height).or_else(|| {
-        state
-            .channel_mode
-            .then(|| {
-                channel_asset(
-                    &path,
-                    &state.id,
-                    state.width,
-                    state.height,
-                    state.channels.len(),
-                )
-            })
-            .flatten()
-    });
-    let Some(asset) = asset else {
-        responder.respond(response(404, b"Invalid image asset.".to_vec()));
+    let Some((asset, samples)) = requested(&path, &state) else {
+        responder.respond(response(404, b"Invalid image asset.".to_vec(), false));
         return;
     };
+    // At most 16 requests, so wide_display_bytes bounds `.u16` decode buffers.
     if backend.requests.fetch_add(1, Ordering::Relaxed) >= 16 {
         backend.requests.fetch_sub(1, Ordering::Relaxed);
-        responder.respond(response(503, b"Too many image requests.".to_vec()));
+        responder.respond(response(503, b"Too many image requests.".to_vec(), false));
         return;
     }
     let slots = backend.tile_slots.clone();
@@ -376,9 +444,18 @@ pub(crate) fn respond(
             }
             Ok(_) => {
                 let active = job.clone();
-                tauri::async_runtime::spawn_blocking(move || read_asset(&active, asset))
-                    .await
-                    .unwrap_or_else(|e| Err((500, e.to_string())))
+                tauri::async_runtime::spawn_blocking(move || {
+                    let bytes = read_asset(&active, asset)?;
+                    if !samples {
+                        return Ok(bytes);
+                    }
+                    u16_body(&bytes, |width, height| {
+                        expected_size(asset, state.width, state.height, (width, height))
+                    })
+                    .map_err(|error| (500, error))
+                })
+                .await
+                .unwrap_or_else(|e| Err((500, e.to_string())))
             }
             Err(error) => Err(error.clone()),
         };
@@ -392,18 +469,20 @@ pub(crate) fn respond(
             result
         };
         match result {
-            Ok(bytes) => responder.respond(response(200, bytes)),
-            Err((status, error)) => responder.respond(response(status, error.into_bytes())),
+            Ok(bytes) => responder.respond(response(200, bytes, samples)),
+            Err((status, error)) => responder.respond(response(status, error.into_bytes(), false)),
         }
     });
 }
 
-fn response(status: u16, bytes: Vec<u8>) -> tauri::http::Response<Vec<u8>> {
+fn response(status: u16, bytes: Vec<u8>, samples: bool) -> tauri::http::Response<Vec<u8>> {
     tauri::http::Response::builder()
         .status(status)
         .header(
             "Content-Type",
-            if status == 200 && bytes.starts_with(b"\x89PNG\r\n\x1a\n") {
+            if status == 200 && samples {
+                "application/octet-stream"
+            } else if status == 200 && bytes.starts_with(b"\x89PNG\r\n\x1a\n") {
                 "image/png"
             } else if status == 200 {
                 "image/jpeg"
@@ -522,6 +601,125 @@ mod tests {
         );
     }
 
+    fn encoded(width: u32, height: u32, color: png::ColorType, depth: png::BitDepth) -> Vec<u8> {
+        let mut bytes = Vec::new();
+        let mut encoder = png::Encoder::new(&mut bytes, width, height);
+        encoder.set_color(color);
+        encoder.set_depth(depth);
+        let samples = color.samples() * width as usize * height as usize;
+        let data: Vec<u8> = match depth {
+            png::BitDepth::Sixteen => (0..samples as u16)
+                .flat_map(|i| (i * 257 + 1).to_be_bytes())
+                .collect(),
+            _ => (0..samples as u8).collect(),
+        };
+        let mut writer = encoder.write_header().unwrap();
+        writer.write_image_data(&data).unwrap();
+        writer.finish().unwrap();
+        bytes
+    }
+
+    #[test]
+    fn u16_body_is_length_prefixed_little_endian_and_rejects_other_pngs() {
+        use png::{BitDepth, ColorType};
+        let gray16 = encoded(3, 2, ColorType::Grayscale, BitDepth::Sixteen);
+        let body = u16_body(&gray16, |width, height| (width, height) == (3, 2)).unwrap();
+        assert_eq!(body.len(), 8 + 2 * 3 * 2);
+        assert_eq!(body[..8], [3, 0, 0, 0, 2, 0, 0, 0]);
+        let samples: Vec<u16> = body[8..]
+            .as_chunks::<2>()
+            .0
+            .iter()
+            .map(|sample| u16::from_le_bytes(*sample))
+            .collect();
+        assert_eq!(samples, [1, 258, 515, 772, 1029, 1286]);
+        // Wrong size, 8-bit depth and RGB16 are errors, never reinterpreted.
+        assert!(u16_body(&gray16, |width, height| (width, height) == (2, 3))
+            .unwrap_err()
+            .contains("dimensions"));
+        for png in [
+            encoded(3, 2, ColorType::Grayscale, BitDepth::Eight),
+            encoded(3, 2, ColorType::Rgb, BitDepth::Sixteen),
+        ] {
+            assert!(u16_body(&png, |_, _| true)
+                .unwrap_err()
+                .contains("16-bit grayscale"));
+        }
+        assert!(u16_body(b"not a png", |_, _| true).is_err());
+        // Tiles match asset bounds exactly, including smaller edge tiles.
+        let tile = |level, x, y| Asset::ChannelTile {
+            channel: 0,
+            level,
+            x,
+            y,
+        };
+        assert!(expected_size(tile(9, 1, 1), 300, 260, (44, 4)));
+        assert!(!expected_size(tile(9, 1, 1), 300, 260, (256, 256)));
+        assert!(expected_size(tile(9, 0, 0), 300, 260, (256, 256)));
+        assert!(expected_size(tile(8, 0, 0), 300, 260, (150, 130)));
+        let preview = Asset::ChannelPreview { channel: 0 };
+        assert!(expected_size(preview, 3000, 20, (1024, 7)));
+        assert!(!expected_size(preview, 3000, 20, (1025, 7)));
+        assert!(!expected_size(preview, 3000, 20, (1024, 21)));
+    }
+
+    #[test]
+    fn u16_routes_exist_only_for_16_bit_channel_images() {
+        let (root, backend, job) = crate::backend::tests::workspace_fixture();
+        let mut state = job.state.lock().unwrap().clone();
+        state.id = "id".into();
+        (state.width, state.height) = (300, 260);
+        state.channels = vec![
+            crate::channels::Channel {
+                name: "Channel 1".into(),
+                color: "#ffffff".into(),
+                domain: [0, 65535],
+            };
+            2
+        ];
+        state.channel_mode = true;
+        state.sample_bits = 16;
+        assert_eq!(
+            requested("/id/channels/1/preview.u16", &state),
+            Some((Asset::ChannelPreview { channel: 1 }, true))
+        );
+        assert_eq!(
+            requested("/id/channels/0/tiles/9/1_1.u16", &state),
+            Some((
+                Asset::ChannelTile {
+                    channel: 0,
+                    level: 9,
+                    x: 1,
+                    y: 1
+                },
+                true
+            ))
+        );
+        assert_eq!(
+            requested("/id/channels/0/preview.png", &state),
+            Some((Asset::ChannelPreview { channel: 0 }, false))
+        );
+        for path in [
+            "/id/channels/2/preview.u16",
+            "/id/channels/0/tiles/9/2_0.u16",
+            "/id/channels/0/preview.png.u16",
+            "/id/channels/0/tiles/9/0_0.u16.png",
+            "/other/channels/0/preview.u16",
+            "/id/preview.u16",
+        ] {
+            assert!(requested(path, &state).is_none(), "{path}");
+        }
+        state.sample_bits = 8;
+        assert!(requested("/id/channels/0/preview.u16", &state).is_none());
+        assert!(requested("/id/channels/0/preview.png", &state).is_some());
+        state.channel_mode = false;
+        assert!(requested("/id/channels/0/preview.png", &state).is_none());
+        assert!(requested("/id/tiles/9/0_0.jpg", &state).is_some());
+        backend.shutdown();
+        drop((job, backend));
+        fs::remove_dir_all(root).unwrap();
+    }
+
     #[test]
     fn native_reduced_ifd_pyramid_uses_existing_levels_without_building_tiles() {
         if !cfg!(windows) && Command::new("vips").arg("--version").output().is_err() {
@@ -599,6 +797,75 @@ mod tests {
             assert!(!Arc::ptr_eq(&crashing, &replacement));
             assert!(!replacement.stopped());
             fs::remove_dir_all(work).unwrap();
+        }
+        backend.shutdown();
+        drop(job);
+        fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn native_16_bit_channel_tiles_keep_exact_samples() {
+        if Command::new("vips").arg("--version").output().is_err() {
+            return;
+        }
+        let root = std::env::temp_dir().join(format!(
+            "aperture-native-16-{}-{}",
+            std::process::id(),
+            NEXT_ID.fetch_add(1, Ordering::Relaxed)
+        ));
+        fs::create_dir(&root).unwrap();
+        // A tiled SubIFD pyramid whose samples are 100·x + 7.
+        let source = root.join("gray16 pyramid.tif");
+        let step = |args: &[&str]| {
+            assert!(Command::new("vips")
+                .args(args)
+                .current_dir(&root)
+                .status()
+                .unwrap()
+                .success());
+        };
+        step(&["xyz", "xyz.v", "600", "400"]);
+        step(&["extract_band", "xyz.v", "x.v", "0"]);
+        step(&["linear", "x.v", "scaled.v", "100", "7"]);
+        step(&["cast", "scaled.v", "samples.v", "ushort"]);
+        step(&[
+            "copy",
+            "samples.v",
+            "gray16 pyramid.tif[tile,pyramid,subifd,tile-width=64,tile-height=64]",
+        ]);
+        let backend = Backend::new(root.join("cache")).unwrap();
+        backend.open(&source).unwrap();
+        let state = wait_ready(&backend);
+        assert!(state.channel_mode);
+        assert_eq!(state.sample_bits, 16);
+        let job = backend.current.lock().unwrap().clone().unwrap();
+        assert!(job.native.lock().unwrap().len() > 1);
+        assert!(!job
+            .dir
+            .lock()
+            .unwrap()
+            .join("channels/0/tiles_files")
+            .exists());
+        for (level, x, y) in [(10, 2, 1), (9, 1, 0), (0, 0, 0)] {
+            let tile = Asset::ChannelTile {
+                channel: 0,
+                level,
+                x,
+                y,
+            };
+            let png = read_asset(&job, tile).unwrap();
+            let body = u16_body(&png, |width, height| {
+                expected_size(tile, 600, 400, (width, height))
+            })
+            .unwrap();
+            if level == 10 {
+                let width = u32::from_le_bytes(body[..4].try_into().unwrap());
+                assert_eq!(width, 88);
+                for (index, sample) in body[8..].as_chunks::<2>().0.iter().enumerate() {
+                    let column = 512 + index as u32 % width;
+                    assert_eq!(u32::from(u16::from_le_bytes(*sample)), 100 * column + 7);
+                }
+            }
         }
         backend.shutdown();
         drop(job);

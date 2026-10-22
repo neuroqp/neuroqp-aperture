@@ -2,6 +2,7 @@
 use super::{
     cache::{
         cached_manifest, housekeeping, promote, valid_cache_assets, valid_preview, write_manifest,
+        CACHE_LIMIT,
     },
     process::{decoded_workspace, input, run, run_with_progress, uses_worker, worker_call},
     Job, Phase,
@@ -9,6 +10,7 @@ use super::{
 use crate::{
     channels::{self, Plane},
     native,
+    vips_worker::Samples,
 };
 use std::{
     cell::RefCell,
@@ -125,12 +127,17 @@ pub(crate) fn load(job: &Arc<Job>) -> Result<(), String> {
     };
     if let Some(manifest) = manifest {
         let fully_ready = complete.join("complete").is_file();
+        // Admit display memory before publishing any reused preview.
+        job.reserve_display(manifest.sample_bits, manifest.channels.len())?;
         job.update(|state| {
             state.width = manifest.width;
             state.height = manifest.height;
             state.orientation = manifest.orientation;
             state.channels = manifest.channels;
             state.channel_mode = manifest.channel_mode;
+            state.sample_bits = manifest.sample_bits;
+            state.rgb = manifest.rgb;
+            state.display_fallback = manifest.display_fallback;
             state.dimensions = manifest.dimensions;
             state.calibration = manifest.calibration;
             state.display_ranges = manifest.display_ranges;
@@ -143,7 +150,10 @@ pub(crate) fn load(job: &Arc<Job>) -> Result<(), String> {
                 Phase::Loading
             };
             state.progress = Some(if fully_ready { 1.0 } else { 0.2 });
-            state.detail = "Reused display preview. Source pixels unchanged.".into();
+            state.detail = noted(
+                "Reused display preview. Source pixels unchanged.",
+                manifest.display_fallback,
+            );
         });
         fs::write(complete.join("access"), b"").map_err(|e| e.to_string())?;
         if fully_ready || job.preview_only {
@@ -169,11 +179,13 @@ pub(crate) fn load(job: &Arc<Job>) -> Result<(), String> {
             state.height = geometry.height;
             state.dimensions = Some(extracted.dimensions);
             state.channels = extracted.channels.clone();
+            state.sample_bits = extracted.sample_bits;
+            state.rgb = extracted.rgb;
             state.calibration = extracted.calibration;
             state.display_ranges = extracted.display_ranges;
             state.detail = "Selected frame decoded. Building display preview…".into();
         });
-        Some(extracted.channels)
+        Some((extracted.channels, extracted.rgb))
     } else {
         None
     };
@@ -210,13 +222,14 @@ pub(crate) fn load(job: &Arc<Job>) -> Result<(), String> {
     } else {
         None
     };
-    let layout = if let Some(channels) = frame_channels {
+    let mut layout = if let Some((channels, rgb)) = frame_channels {
         channels::Layout {
             planes: (0..channels.len() as u32)
                 .map(|band| Plane { page: 0, band })
                 .collect(),
             channels,
             channel_mode: true,
+            rgb,
         }
     } else {
         channels::discover(
@@ -225,22 +238,6 @@ pub(crate) fn load(job: &Arc<Job>) -> Result<(), String> {
             tiffinfo.as_deref(),
         )?
     };
-    *job.planes.lock().unwrap() = layout.planes;
-    let pages = field(&header, "n-pages").unwrap_or("1");
-    job.update(|state| {
-        state.channels = layout.channels;
-        state.channel_mode = layout.channel_mode;
-        state.width = width;
-        state.height = height;
-        state.orientation = field(&header, "orientation")
-            .and_then(|s| s.parse().ok())
-            .filter(|n| (1..=8).contains(n))
-            .unwrap_or(1);
-        state.detail = format!(
-            "{width} × {height} · {}-bit · first image page of {pages}. Building preview…",
-            if pixels.ushort { 16 } else { 8 }
-        );
-    });
     let headers = RefCell::new(HashMap::<String, Result<String, String>>::new());
     let inspect = |options: &str| {
         headers
@@ -258,18 +255,46 @@ pub(crate) fn load(job: &Arc<Job>) -> Result<(), String> {
         native::discover_preview(&header, &inspect, tiffinfo.as_deref())
     };
     // Channel-page hyperstacks cannot reuse page-zero resolutions for other pages.
-    *job.native.lock().unwrap() = if layout.channel_mode
-        && job
-            .planes
-            .lock()
-            .unwrap()
-            .iter()
-            .any(|plane| plane.page != 0)
-    {
-        Vec::new()
+    *job.native.lock().unwrap() =
+        if layout.channel_mode && layout.planes.iter().any(|plane| plane.page != 0) {
+            Vec::new()
+        } else {
+            levels
+        };
+    let fallback = eight_bit_fallback(
+        &mut layout,
+        &pixels,
+        job.native.lock().unwrap().is_empty(),
+        !uses_worker(job),
+    );
+    let sample_bits = if layout.channel_mode && pixels.ushort && !fallback {
+        16
     } else {
-        levels
+        8
     };
+    job.reserve_display(sample_bits, layout.channels.len())?;
+    *job.planes.lock().unwrap() = layout.planes;
+    let pages = field(&header, "n-pages").unwrap_or("1");
+    job.update(|state| {
+        state.channels = layout.channels;
+        state.channel_mode = layout.channel_mode;
+        state.sample_bits = sample_bits;
+        state.rgb = layout.rgb;
+        state.display_fallback = fallback;
+        state.width = width;
+        state.height = height;
+        state.orientation = field(&header, "orientation")
+            .and_then(|s| s.parse().ok())
+            .filter(|n| (1..=8).contains(n))
+            .unwrap_or(1);
+        state.detail = noted(
+            &format!(
+                "{width} × {height} · {}-bit · first image page of {pages}. Building preview…",
+                if pixels.ushort { 16 } else { 8 }
+            ),
+            fallback,
+        );
+    });
     if legacy {
         let reused = {
             let _access = job.cache_access.lock().unwrap();
@@ -299,7 +324,12 @@ pub(crate) fn load(job: &Arc<Job>) -> Result<(), String> {
         }
     }
     if layout.channel_mode {
-        return load_channels(job, width, height, pixels.ushort);
+        let samples = match (pixels.ushort, fallback) {
+            (false, _) => Samples::Uchar,
+            (true, false) => Samples::Ushort,
+            (true, true) => Samples::HighByte,
+        };
+        return load_channels(job, &pixels, samples);
     }
     if job.cancel.load(Ordering::Relaxed) {
         return Err("Loading cancelled.".into());
@@ -333,13 +363,7 @@ pub(crate) fn load(job: &Arc<Job>) -> Result<(), String> {
                     .ok_or("Image decoder path is not UTF-8")?
                     .into(),
                 max_edge: 1024,
-                threads: thread::available_parallelism().map_or(1, |n| n.get()).min(
-                    if u64::from(width) * u64::from(height) >= 256 * 1024 * 1024 {
-                        16
-                    } else {
-                        8
-                    },
-                ),
+                threads: raw_threads(width, height),
             },
             Some((0.0, 0.2)),
         )? == "used";
@@ -364,7 +388,7 @@ pub(crate) fn load(job: &Arc<Job>) -> Result<(), String> {
         s.preview_ready = true;
         s.tiles_ready = false;
         s.progress = Some(0.2);
-        s.detail = "Preview available. Sharper tiles are loading…".into();
+        s.detail = noted("Preview available. Sharper tiles are loading…", fallback);
     });
     *job.native.lock().unwrap() = native::discover(&header, &inspect, tiffinfo.as_deref());
     housekeeping(job)?;
@@ -415,14 +439,61 @@ pub(crate) fn load(job: &Arc<Job>) -> Result<(), String> {
     job.update(|s| {
         s.phase = Phase::Ready;
         s.progress = Some(1.0);
-        s.detail = if job.native.lock().unwrap().is_empty() {
-            "Display pyramid ready. Source pixels unchanged."
-        } else {
-            "Using existing TIFF pyramid; detail loads on demand."
-        }
-        .into();
+        s.detail = noted(
+            if job.native.lock().unwrap().is_empty() {
+                "Display pyramid ready. Source pixels unchanged."
+            } else {
+                "Using existing TIFF pyramid; detail loads on demand."
+            },
+            fallback,
+        );
     });
     Ok(())
+}
+
+const FALLBACK_NOTE: &str = "Shown with 8-bit display samples because a lossless 16-bit display cache would exceed the display-cache limit.";
+
+fn noted(detail: &str, fallback: bool) -> String {
+    if fallback {
+        format!("{detail} {FALLBACK_NOTE}")
+    } else {
+        detail.into()
+    }
+}
+
+/// Native levels serve 16-bit detail on demand. A generated lossless pyramid
+/// whose worst case (levels add a third, plus the CLI path's temporary plane)
+/// exceeds the work budget (half the display cache) keeps
+/// the previous 8-bit display: gray16/RGB16 as a composite, channel pages as
+/// high-byte planes. ND2/CZI frames are small enough never to fall back.
+fn eight_bit_fallback(
+    layout: &mut channels::Layout,
+    pixels: &Header,
+    generated: bool,
+    scratch: bool,
+) -> bool {
+    const _: () = assert!(crate::frames::MAX_FRAME_BYTES * 7 / 3 <= CACHE_LIMIT / 2);
+    let plane = u128::from(pixels.width) * u128::from(pixels.height) * 2;
+    let peak = plane * layout.planes.len() as u128 * 4 / 3 + if scratch { plane } else { 0 };
+    if !(pixels.ushort && layout.channel_mode && generated && peak > u128::from(CACHE_LIMIT / 2)) {
+        return false;
+    }
+    layout.channel_mode = !(layout.rgb || (pixels.bands == 1 && layout.planes.len() == 1));
+    for channel in &mut layout.channels {
+        channel.domain = channels::domain(8);
+    }
+    true
+}
+
+fn raw_threads(width: u32, height: u32) -> usize {
+    let limit = if u64::from(width) * u64::from(height) >= 256 * 1024 * 1024 {
+        16
+    } else {
+        8
+    };
+    thread::available_parallelism()
+        .map_or(1, |n| n.get())
+        .min(limit)
 }
 
 /// Read a 1024-pixel preview from the largest native level within that size, or
@@ -440,16 +511,16 @@ fn preview_source(job: &Job, width: u32, height: u32, fallback: String) -> (Stri
     }
 }
 
-// Lossless display planes use a fixed 16-to-8-bit shift across every level.
+/// Extract one display plane: 8-bit, 16-bit or high-byte grayscale samples.
 pub(super) fn extract_plane(
     job: &Job,
     source: OsString,
     band: u32,
     destination: &Path,
-    ushort: bool,
+    samples: Samples,
 ) -> Result<(), String> {
     let raw = destination.with_extension("raw.v");
-    let normalized = destination.with_extension("normalized.v");
+    let shifted = destination.with_extension("shifted.v");
     let result = (|| {
         run(
             job,
@@ -462,23 +533,23 @@ pub(super) fn extract_plane(
                 "--n=1".into(),
             ],
         )?;
-        let pixels = if ushort {
+        let pixels = if samples == Samples::HighByte {
             run(
                 job,
                 "vips",
                 &[
                     "cast".into(),
                     raw.clone().into_os_string(),
-                    normalized.clone().into_os_string(),
+                    shifted.clone().into_os_string(),
                     "uchar".into(),
                     "--shift".into(),
                 ],
             )?;
-            &normalized
+            &shifted
         } else {
             &raw
         };
-        // PNG's grey16 interpretation otherwise expands uchar values back to 16 bits.
+        // PNG writes 16-bit samples only for grey16; b-w keeps uchar at 8 bits.
         run(
             job,
             "vips",
@@ -486,17 +557,23 @@ pub(super) fn extract_plane(
                 "copy".into(),
                 pixels.as_os_str().into(),
                 destination.as_os_str().into(),
-                "--interpretation=b-w".into(),
+                if samples == Samples::Ushort {
+                    "--interpretation=grey16"
+                } else {
+                    "--interpretation=b-w"
+                }
+                .into(),
             ],
         )?;
         Ok(())
     })();
     let _ = fs::remove_file(raw);
-    let _ = fs::remove_file(normalized);
+    let _ = fs::remove_file(shifted);
     result
 }
 
-fn load_channels(job: &Arc<Job>, width: u32, height: u32, ushort: bool) -> Result<(), String> {
+fn load_channels(job: &Arc<Job>, pixels: &Header, samples: Samples) -> Result<(), String> {
+    let (width, height) = (pixels.width, pixels.height);
     let (preview_start, preview_end) = if job.projection == crate::frames::Projection::None {
         (0.0, 0.2)
     } else {
@@ -505,7 +582,13 @@ fn load_channels(job: &Arc<Job>, width: u32, height: u32, ushort: bool) -> Resul
     let planes = job.planes.lock().unwrap().clone();
     let native = !job.native.lock().unwrap().is_empty();
     let dir = job.dir.lock().unwrap().clone();
-    let page = |plane: &Plane| format!("[page={},n=1,access=sequential]", plane.page);
+    let page = |plane: &Plane| {
+        if pixels.tiff {
+            format!("[page={},n=1,access=sequential]", plane.page)
+        } else {
+            "[access=sequential]".into()
+        }
+    };
     let previews_ready = (0..planes.len()).all(|index| {
         valid_preview(
             &dir.join("channels")
@@ -514,7 +597,42 @@ fn load_channels(job: &Arc<Job>, width: u32, height: u32, ushort: bool) -> Resul
             true,
         )
     });
-    if !previews_ready {
+    let raw_preview = || -> Result<bool, String> {
+        // Large single-band 16-bit strips keep the full-coverage area reducer.
+        let options = page(&planes[0]);
+        if !(uses_worker(job)
+            && pixels.tiff
+            && pixels.bands == 1
+            && planes.len() == 1
+            && samples == Samples::Ushort
+            && u64::from(width) * u64::from(height) >= 16 * 1024 * 1024
+            && preview_source(job, width, height, options.clone()).0 == options)
+        {
+            return Ok(false);
+        }
+        let channel = dir.join("channels").join("0");
+        fs::create_dir_all(&channel).map_err(|e| e.to_string())?;
+        let partial = channel.join("preview.partial.png");
+        let used = worker_call(
+            job,
+            &crate::vips_worker::Request::RawPreview {
+                input: job
+                    .input
+                    .to_str()
+                    .ok_or("Image decoder path is not UTF-8")?
+                    .into(),
+                output: partial.to_str().ok_or("Invalid preview path.")?.into(),
+                max_edge: 1024,
+                threads: raw_threads(width, height),
+            },
+            Some((preview_start, preview_end)),
+        )? == "used";
+        if used {
+            fs::rename(partial, channel.join("preview.png")).map_err(|e| e.to_string())?;
+        }
+        Ok(used)
+    };
+    if !previews_ready && !raw_preview()? {
         if uses_worker(job) {
             let (options, scale): (Vec<_>, Vec<_>) = planes
                 .iter()
@@ -531,7 +649,7 @@ fn load_channels(job: &Arc<Job>, width: u32, height: u32, ushort: bool) -> Resul
                     options,
                     scale,
                     planes: planes.clone(),
-                    ushort,
+                    samples,
                     directory: dir
                         .to_str()
                         .ok_or("Image decoder path is not UTF-8")?
@@ -561,7 +679,7 @@ fn load_channels(job: &Arc<Job>, width: u32, height: u32, ushort: bool) -> Resul
                     resized.clone().into_os_string(),
                     plane.band,
                     &partial,
-                    ushort,
+                    samples,
                 )?;
                 let _ = fs::remove_file(resized);
                 fs::rename(partial, channel.join("preview.png")).map_err(|e| e.to_string())?;
@@ -596,27 +714,27 @@ fn load_channels(job: &Arc<Job>, width: u32, height: u32, ushort: bool) -> Resul
                         input: source.to_str().ok_or("Invalid image path.")?.into(),
                         output: destination.to_str().ok_or("Invalid pyramid path.")?.into(),
                         band: plane.band,
-                        ushort,
+                        samples,
                     },
                     Some((start, end)),
                 )?;
             } else {
-                let normalized = job.work.join(format!("channel-{index}.v"));
-                extract_plane(job, source, plane.band, &normalized, ushort)?;
+                let extracted = job.work.join(format!("channel-{index}.v"));
+                extract_plane(job, source, plane.band, &extracted, samples)?;
                 let result = run(
                     job,
                     "vips",
                     &[
                         "dzsave".into(),
-                        normalized.clone().into_os_string(),
+                        extracted.clone().into_os_string(),
                         destination.into_os_string(),
                         "--tile-size=256".into(),
                         "--overlap=0".into(),
-                        "--suffix=.png[strip]".into(),
+                        format!("--{}", samples.suffix()).into(),
                         "--depth=onepixel".into(),
                     ],
                 );
-                let _ = fs::remove_file(normalized);
+                let _ = fs::remove_file(extracted);
                 result?;
             }
             job.report_progress(end);
@@ -628,7 +746,7 @@ fn load_channels(job: &Arc<Job>, width: u32, height: u32, ushort: bool) -> Resul
     } else {
         "complete"
     };
-    fs::write(dir.join(marker), b"channels-v1").map_err(|e| e.to_string())?;
+    fs::write(dir.join(marker), b"channels-v2").map_err(|e| e.to_string())?;
     fs::write(dir.join("access"), b"").map_err(|e| e.to_string())?;
     promote(
         job,
@@ -640,14 +758,17 @@ fn load_channels(job: &Arc<Job>, width: u32, height: u32, ushort: bool) -> Resul
         state.phase = Phase::Ready;
         state.tiles_ready = !job.preview_only;
         state.progress = Some(1.0);
-        state.detail = format!(
-            "{} channels ready. {} Source pixels unchanged.",
-            planes.len(),
-            if state.read_only {
-                "Selected frame; browsing only."
-            } else {
-                "First Z/T plane."
-            }
+        state.detail = noted(
+            &format!(
+                "{} channels ready. {} Source pixels unchanged.",
+                planes.len(),
+                if state.read_only {
+                    "Selected frame; browsing only."
+                } else {
+                    "First Z/T plane."
+                }
+            ),
+            samples == Samples::HighByte,
         );
     });
     Ok(())
@@ -657,7 +778,7 @@ fn load_channels(job: &Arc<Job>, width: u32, height: u32, ushort: bool) -> Resul
 mod tests {
     use super::*;
     use crate::backend::{
-        assets::{channel_asset, max_level, read_asset, Asset},
+        assets::{channel_asset, max_level, read_asset, u16_body, Asset},
         tests::{channel_fixture, wait_ready},
         Backend, ImageState, NEXT_ID,
     };
@@ -806,7 +927,8 @@ mod tests {
                         ],
                     )
                     .unwrap();
-                    assert_eq!(output.trim().parse::<u32>().unwrap(), (channel + 1) * 5);
+                    // 16-bit samples stay exact; the old high-byte shift gave 5·(c+1).
+                    assert_eq!(output.trim().parse::<u32>().unwrap(), (channel + 1) * 1285);
                 }
             }
             let id = backend.snapshot().unwrap().id;
@@ -848,6 +970,117 @@ mod tests {
         backend.shutdown();
         fs::remove_dir_all(root).unwrap();
     }
+    #[test]
+    fn sixteen_bit_png_gray_and_rgb_open_as_lossless_channels() {
+        if Command::new("vips").arg("--version").output().is_err() {
+            return;
+        }
+        let root = std::env::temp_dir().join(format!(
+            "aperture-png16-{}-{}",
+            std::process::id(),
+            NEXT_ID.fetch_add(1, Ordering::Relaxed)
+        ));
+        fs::create_dir(&root).unwrap();
+        let backend = Backend::new(root.join("cache")).unwrap();
+        for (color, bands) in [(png::ColorType::Grayscale, 1), (png::ColorType::Rgb, 3)] {
+            let samples: Vec<u16> = (0..3 * 2 * bands).map(|i| i * 3001 + 1).collect();
+            let source = root.join(format!("source-{bands}.png"));
+            let mut encoder = png::Encoder::new(fs::File::create(&source).unwrap(), 3, 2);
+            encoder.set_color(color);
+            encoder.set_depth(png::BitDepth::Sixteen);
+            let mut writer = encoder.write_header().unwrap();
+            writer
+                .write_image_data(
+                    &samples
+                        .iter()
+                        .flat_map(|v| v.to_be_bytes())
+                        .collect::<Vec<_>>(),
+                )
+                .unwrap();
+            writer.finish().unwrap();
+            backend.open(&source).unwrap();
+            let state = wait_ready(&backend);
+            assert!(state.channel_mode);
+            assert_eq!((state.sample_bits, state.rgb), (16, bands == 3));
+            assert_eq!(state.channels.len(), bands as usize);
+            let job = backend.current.lock().unwrap().clone().unwrap();
+            for channel in 0..bands {
+                let expected: Vec<u16> = samples
+                    .iter()
+                    .skip(channel as usize)
+                    .step_by(bands as usize)
+                    .copied()
+                    .collect();
+                for asset in [
+                    Asset::ChannelPreview {
+                        channel: channel.into(),
+                    },
+                    Asset::ChannelTile {
+                        channel: channel.into(),
+                        level: max_level(3, 2),
+                        x: 0,
+                        y: 0,
+                    },
+                ] {
+                    let png = read_asset(&job, asset).unwrap();
+                    let body = u16_body(&png, |width, height| (width, height) == (3, 2)).unwrap();
+                    let actual: Vec<u16> = body[8..]
+                        .as_chunks::<2>()
+                        .0
+                        .iter()
+                        .map(|sample| u16::from_le_bytes(*sample))
+                        .collect();
+                    assert_eq!(actual, expected);
+                }
+            }
+        }
+        backend.shutdown();
+        fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn oversized_generated_16_bit_pyramids_fall_back_to_8_bit_display() {
+        let gray = "width: 43054\nheight: 29398\nbands: 1\nformat: ushort\ninterpretation: grey16\nvips-loader: tiffload\nn-pages: 1\n";
+        let decide = |header: &str, generated: bool| {
+            let mut layout = channels::discover(header, &|_| unreachable!(), None).unwrap();
+            let pixels = validate_header(header).unwrap();
+            let fallback = eight_bit_fallback(&mut layout, &pixels, generated, false);
+            (fallback, layout)
+        };
+        // Gray16 and RGB16 return to the composite path with 8-bit domains.
+        for header in [
+            gray.to_owned(),
+            gray.replace("bands: 1", "bands: 3")
+                .replace("grey16", "rgb16"),
+        ] {
+            let (fallback, layout) = decide(&header, true);
+            assert!(fallback && !layout.channel_mode);
+            assert!(layout.channels.iter().all(|c| c.domain == [0, 255]));
+        }
+        // Multiband channels keep channel mode with high-byte planes.
+        let (fallback, layout) = decide(&gray.replace("bands: 1", "bands: 5"), true);
+        assert!(fallback && layout.channel_mode);
+        assert!(layout.channels.iter().all(|c| c.domain == [0, 255]));
+        // Native pyramids, 8-bit pixels and caches within the cap stay unchanged.
+        let (fallback, layout) = decide(gray, false);
+        assert!(!fallback && layout.channel_mode);
+        assert_eq!(layout.channels[0].domain, [0, 65535]);
+        let eight = gray.replace("ushort", "uchar").replace("grey16", "b-w");
+        assert!(!decide(&eight, true).0);
+        // 16384² gray16 is 512 MiB, 683 MiB with all levels: within the 1 GiB cap.
+        let within = gray.replace("43054", "16384").replace("29398", "16384");
+        assert!(!decide(&within, true).0);
+        assert!(decide(&within.replace("bands: 1", "bands: 4"), true).0);
+        // The CLI path's temporary 512 MiB plane tips the same image over.
+        let mut layout = channels::discover(&within, &|_| unreachable!(), None).unwrap();
+        assert!(eight_bit_fallback(
+            &mut layout,
+            &validate_header(&within).unwrap(),
+            true,
+            true
+        ));
+    }
+
     #[test]
     fn reject_signed_float_and_excessive_channels() {
         let header="width: 12\nheight: 13\nbands: 1\nformat: ushort\nvips-loader: tiffload\ninterpretation: grey16\n";
@@ -902,34 +1135,29 @@ mod tests {
         let state = wait();
         assert_eq!(state.phase, Phase::Ready, "{:?}", state);
         assert_eq!((state.width, state.height), (65, 49));
+        // Single-band 16-bit gray is one lossless 16-bit channel.
+        assert!(state.channel_mode && !state.rgb);
+        assert_eq!(state.sample_bits, 16);
+        assert_eq!(state.channels[0].domain, [0, 65535]);
         let job = backend.current.lock().unwrap().clone().unwrap();
-        let bytes = read_asset(
-            &job,
-            Asset::Tile {
-                level: 7,
-                x: 0,
-                y: 0,
-            },
-        )
-        .unwrap();
-        assert!(bytes.starts_with(&[255, 216]));
+        let tile = Asset::ChannelTile {
+            channel: 0,
+            level: 7,
+            x: 0,
+            y: 0,
+        };
+        let bytes = read_asset(&job, tile).unwrap();
+        let body = u16_body(&bytes, |width, height| (width, height) == (65, 49)).unwrap();
+        assert_eq!(body.len(), 8 + 2 * 65 * 49);
         // A native-only cache cannot satisfy generated tiles when native
         // metadata support disappears after changing the installed tools.
-        fs::remove_dir_all(job.dir.lock().unwrap().join("tiles_files")).unwrap();
+        fs::remove_dir_all(job.dir.lock().unwrap().join("channels/0/tiles_files")).unwrap();
         backend.open(&fixture).unwrap();
         let rebuilt = wait();
         assert_eq!(rebuilt.phase, Phase::Ready);
         assert!(!rebuilt.detail.contains("Reused"));
         let rebuilt_job = backend.current.lock().unwrap().clone().unwrap();
-        assert!(read_asset(
-            &rebuilt_job,
-            Asset::Tile {
-                level: 7,
-                x: 0,
-                y: 0
-            }
-        )
-        .is_ok());
+        assert!(read_asset(&rebuilt_job, tile).is_ok());
         let second = backend.open(&fixture).unwrap();
         assert_ne!(first.id, second.id);
         let state = wait();

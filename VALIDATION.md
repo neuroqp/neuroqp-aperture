@@ -40,7 +40,7 @@ so `tauri-driver` can never reach a driver on the user's desktop. The wrapper th
 exports `APERTURE_DRIVER_URL`; native scripts use only that driver and refuse to
 run without it or with a different `--driver-url`. Documented ports are spaced so
 pairs never overlap: 4444 (smoke, Settings, update checks, color benchmark), 4446
-(navigation, ND2, CZI, memory, projection) and 4448 (loading benchmark).
+(navigation, ND2, CZI, memory, projection, 16-bit) and 4448 (loading benchmark).
 `XDG_CONFIG_HOME`, `XDG_CACHE_HOME`, `XDG_DATA_HOME`, `XDG_STATE_HOME` and `TMPDIR`
 point into a temporary root, or into `--keep DIR` to keep caches and logs. Aperture's instance, image-presence and save
 locks live under `XDG_CACHE_HOME`, so a test instance never coordinates with an

@@ -219,7 +219,13 @@ colorRenderer = bindColorRenderer(
   (imageId, data) => {
     if (current.id === imageId)
       colorPanel.setHistograms(
-        channelHistograms(data.planes, data.width, data.height),
+        channelHistograms(
+          data.planes,
+          data.width,
+          data.height,
+          undefined,
+          data.bits,
+        ),
       );
   },
 );
@@ -576,7 +582,10 @@ function showImage(state: ImageState) {
   // OSD has no public setter. This is its eviction target; visible tiles stay resident.
   (
     viewer.tileCache as OpenSeadragon.TileCache & { _maxCacheItemCount: number }
-  )._maxCacheItemCount = imageTileCacheCount(state.channels?.length || 3);
+  )._maxCacheItemCount = imageTileCacheCount(
+    state.channels?.length || 3,
+    state.channelMode && state.sampleBits === 16 ? 2 : 1,
+  );
   dimensionNavigation.setImage(state, preserve);
   $("points-button").setAttribute(
     "title",
@@ -589,6 +598,7 @@ function showImage(state: ImageState) {
       ...channel,
     })),
     preserve,
+    { sampleBits: state.sampleBits, rgb: state.rgb },
   );
   if (state.width > 0) annotationViewer.setImage(state);
   $("filename").textContent = state.name;

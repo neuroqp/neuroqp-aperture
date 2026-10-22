@@ -26,6 +26,8 @@ const state = (
   tilesReady: true,
   progress: null,
   error: null,
+  sampleBits: 8,
+  rgb: false,
 });
 const deferred = <T>() => {
   let resolve!: (value: T) => void;
@@ -479,7 +481,7 @@ test("cancellation during plane selection keeps the previous frame navigable", a
 
 test("dimension axes use zero-based backend positions and include local composite channels", async () => {
   const { dimensionAxis } = await import("./image.ts");
-  const image = {
+  const image: ImageState = {
     ...state("nd2"),
     dimensions: {
       positions: ["Well A", "Well B"],
@@ -490,8 +492,8 @@ test("dimension axes use zero-based backend positions and include local composit
       timeIndex: 5,
     },
     channels: [
-      { name: "DAPI", color: "blue" },
-      { name: "FITC", color: "green" },
+      { name: "DAPI", color: "blue", domain: [0, 255] },
+      { name: "FITC", color: "green", domain: [0, 255] },
     ],
   };
   assert.deepEqual(dimensionAxis(image, "position", -1), {
@@ -762,7 +764,7 @@ test("projected axes show maximum extents while position, channel and the other 
       zIndex: 0,
       timeIndex: 2,
     },
-    channels: [{ name: "DAPI", color: "blue" }],
+    channels: [{ name: "DAPI", color: "blue", domain: [0, 255] }],
   };
   assert.deepEqual(dimensionAxis(image, "z", -1), {
     index: 0,

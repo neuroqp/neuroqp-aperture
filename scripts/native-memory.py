@@ -185,9 +185,15 @@ def main():
           const url=source.getTileUrl(source.maxLevel,0,0);
           if(!url.includes('/'+s.id+'/')){done({error:'Displayed source id mismatch'});return;}
           const base=url.split('/'+s.id+'/')[0]+'/'+s.id;
-          Promise.all(s.channels.map((_,c)=>fetch(base+'/channels/'+c+'/preview.png').then(r=>{
+          // 16-bit planes use raw samples: u32 LE width, u32 LE height, u16 LE values.
+          const ext=s.sampleBits===16?'u16':'png';
+          Promise.all(s.channels.map((_,c)=>fetch(base+'/channels/'+c+'/preview.'+ext).then(r=>{
             if(!r.ok)throw new Error('Tile '+r.status);return r.arrayBuffer();
-          }).then(b=>Array.from(new Uint8Array(b))))).then(done,e=>done({error:String(e)}));
+          }).then(b=>{
+            const d=new DataView(b);
+            if(ext==='u16'&&(b.byteLength<8||b.byteLength!==8+2*d.getUint32(0,true)*d.getUint32(4,true)))throw new Error('Invalid .u16 length');
+            return Array.from(new Uint8Array(b));
+          }))).then(done,e=>done({error:String(e)}));
         """, [value], True)
         assert isinstance(data, list), data
         return [hashlib.sha256(bytes(channel)).hexdigest() for channel in data]
@@ -224,6 +230,7 @@ def main():
         assert original_limit == round(args.expected_default_gib * GIB), memory()
         report['checks']['defaultBudget'] = original_limit
         first = open_ready(primary)
+        assert first['sampleBits'] == 16 and first['channelMode'], first
         first_hash, pixels = plane_hash(first), framebuffer()
         click('settings-button')
         wait(lambda: js("return document.getElementById('settings-dialog').open && Number(document.getElementById('memory-limit').value)===arguments[0];", [args.expected_default_gib]), 'memory settings value')
@@ -271,7 +278,7 @@ def main():
           window.__memoryTest.failedPreviewRequests=[];
           window.fetch=function(input,options){
             const url=String(typeof input==='string'?input:input.url ?? input);
-            if(/\/channels\/\d+\/preview\.png(?:[?#]|$)/.test(url) && !url.includes('/'+oldId+'/')){
+            if(/\/channels\/\d+\/preview\.(?:png|u16)(?:[?#]|$)/.test(url) && !url.includes('/'+oldId+'/')){
               window.__memoryTest.failedPreviewRequests.push(url);
               return Promise.reject(new Error('Injected native memory test preview failure'));
             }

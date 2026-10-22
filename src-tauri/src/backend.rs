@@ -26,6 +26,22 @@ use std::{
     time::{Duration, Instant, SystemTime, UNIX_EPOCH},
 };
 
+/// Two 32-channel 8-bit overview sets during replacement and a 32 MiB
+/// tile-cache allowance. Browser/runtime overhead and GPU differ.
+const BROWSER_BYTES: u64 = 96 * 1024 * 1024;
+const DISPLAY_MEMORY_ERROR: &str = "Image display does not fit the shared memory budget. Close another image window or increase the limit in Settings.";
+
+/// Extra display memory for 16-bit channel planes: the second byte of each
+/// 1024-pixel overview sample in both overview sets, the encoded PNG and
+/// decoded body of each concurrent `.u16` preview response (at most 16), and
+/// the viewer's 65536-bin histogram per channel plus one temporary. The tile
+/// cache keeps its byte budget.
+fn wide_display_bytes(channels: u64) -> u64 {
+    const PREVIEW: u64 = 1024 * 1024 * 2;
+    const HISTOGRAM: u64 = 65536 * 4;
+    channels * (PREVIEW + HISTOGRAM) + channels.min(16) * 2 * PREVIEW + 2 * HISTOGRAM
+}
+
 pub const IMAGE_EXTENSIONS: &[&str] = &[
     "jpg", "jpeg", "png", "bmp", "tif", "tiff", "webp", "nd2", "czi",
 ];
@@ -79,6 +95,12 @@ pub struct ImageState {
     pub detail: String,
     pub channels: Vec<Channel>,
     pub channel_mode: bool,
+    /// Display sample width: 16 only for lossless 16-bit channel planes.
+    pub sample_bits: u8,
+    /// The three channels are R, G and B samples of one acquisition.
+    pub rgb: bool,
+    /// A 16-bit source shown with 8-bit display samples to fit the cache limit.
+    pub display_fallback: bool,
     pub read_only: bool,
     pub dimensions: Option<crate::frames::Dimensions>,
     pub calibration: Option<crate::frames::Calibration>,
@@ -101,6 +123,8 @@ pub(crate) struct FrameSelection {
     pub selection: crate::frames::Selection,
     pub dimensions: crate::frames::Dimensions,
     pub channels: Vec<Channel>,
+    pub sample_bits: u8,
+    pub rgb: bool,
     pub projection: crate::frames::Projection,
 }
 
@@ -129,6 +153,7 @@ pub struct Job {
     process_number: AtomicU64,
     decoder: Mutex<Option<Arc<crate::decoder::Decoder>>>,
     decoder_memory: Mutex<Option<DecoderMemory>>,
+    display_memory: Mutex<Option<crate::memory::Reservation>>,
     frame_memory: AtomicU64,
     processes: Mutex<HashMap<u64, Arc<Mutex<Child>>>>,
     notifier: Option<Notifier>,
@@ -285,6 +310,8 @@ impl Backend {
                 selection,
                 dimensions,
                 channels: state.channels,
+                sample_bits: state.sample_bits,
+                rgb: state.rgb,
                 projection,
             }),
         )
@@ -302,9 +329,7 @@ impl Backend {
         {
             let mut browser = self.browser_memory.lock().unwrap();
             if browser.is_none() {
-                // Two 32-channel overview sets during replacement and a 32 MiB
-                // tile-cache allowance. Browser/runtime overhead and GPU differ.
-                *browser = Some(self.memory.require(96 * 1024 * 1024, "Image display does not fit the shared memory budget. Close another image window or increase the limit in Settings.")?);
+                *browser = Some(self.memory.require(BROWSER_BYTES, DISPLAY_MEMORY_ERROR)?);
             }
         }
         let acquisition = if let Some(format) = crate::frames::Format::from_path(path) {
@@ -569,7 +594,9 @@ impl LoadContext {
             NEXT_ID.fetch_add(1, Ordering::Relaxed)
         );
         let mut hasher = DefaultHasher::new();
-        "aperture-display-v5-area-preview".hash(&mut hasher);
+        // Bump when display samples change: v6 keeps 16-bit channel planes
+        // unless a generated pyramid would exceed half the cache limit.
+        "aperture-display-v6-16bit-fallback-half-cache".hash(&mut hasher);
         source.hash(&mut hasher);
         metadata.len().hash(&mut hasher);
         #[cfg(unix)]
@@ -614,9 +641,16 @@ impl LoadContext {
         } else {
             alias
         };
-        let (dimensions, initial_channels) = frame
-            .map(|frame| (Some(frame.dimensions), frame.channels))
-            .unwrap_or_default();
+        let (dimensions, initial_channels, sample_bits, rgb) = frame
+            .map(|frame| {
+                (
+                    Some(frame.dimensions),
+                    frame.channels,
+                    frame.sample_bits,
+                    frame.rgb,
+                )
+            })
+            .unwrap_or((None, Vec::new(), 8, false));
         let initial = ImageState {
             id,
             revision: 0,
@@ -641,6 +675,9 @@ impl LoadContext {
             detail: "Reading image metadata…".into(),
             channels: initial_channels,
             channel_mode: selection.is_some(),
+            sample_bits,
+            rgb,
+            display_fallback: false,
             read_only: selection.is_some(),
             dimensions,
             calibration: None,
@@ -669,6 +706,7 @@ impl LoadContext {
             process_number: AtomicU64::new(0),
             decoder: Mutex::new(None),
             decoder_memory: Mutex::new(None),
+            display_memory: Mutex::new(None),
             frame_memory: AtomicU64::new(frame_memory),
             processes: Mutex::new(HashMap::new()),
             notifier,
@@ -734,11 +772,32 @@ impl Job {
             decoder.stop();
         }
         self.decoder_memory.lock().unwrap().take();
+        self.display_memory.lock().unwrap().take();
         for (_, process) in self.processes.lock().unwrap().drain() {
             let mut child = process.lock().unwrap();
             let _ = child.kill();
             let _ = child.wait();
         }
+    }
+    /// Admit the foreground display's 16-bit allowance before publishing it.
+    fn reserve_display(&self, sample_bits: u8, channels: usize) -> Result<(), String> {
+        if self.background || sample_bits != 16 || self.display_memory.lock().unwrap().is_some() {
+            return Ok(());
+        }
+        // Never hold the slot while waiting, so cancellation stays immediate.
+        let reservation = self
+            .memory
+            .reserve(
+                wide_display_bytes(channels as u64),
+                false,
+                Some(&self.cancel),
+            )?
+            .ok_or(DISPLAY_MEMORY_ERROR)?;
+        let mut display = self.display_memory.lock().unwrap();
+        if !self.cancel.load(Ordering::Relaxed) {
+            *display = Some(reservation);
+        }
+        Ok(())
     }
     fn update(&self, action: impl FnOnce(&mut ImageState)) {
         let snapshot = {
@@ -932,6 +991,89 @@ mod tests {
         fs::remove_dir_all(root).unwrap();
     }
 
+    #[test]
+    fn nd2_16_bit_frames_display_original_samples_and_old_manifests_are_not_reused() {
+        if std::process::Command::new("vips")
+            .arg("--version")
+            .output()
+            .is_err()
+        {
+            return;
+        }
+        let root = std::env::temp_dir().join(format!(
+            "aperture-nd2-16-{}-{}",
+            std::process::id(),
+            NEXT_ID.fetch_add(1, Ordering::Relaxed)
+        ));
+        fs::create_dir_all(&root).unwrap();
+        let backend = Backend::new(root.join("cache")).unwrap();
+        let samples = |channel: u32| {
+            let job = backend.current.lock().unwrap().clone().unwrap();
+            let png = read_asset(&job, Asset::ChannelPreview { channel }).unwrap();
+            let body = assets::u16_body(&png, |_, _| true).unwrap();
+            body[8..]
+                .as_chunks::<2>()
+                .0
+                .iter()
+                .map(|sample| u16::from_le_bytes(*sample))
+                .collect::<Vec<_>>()
+        };
+        for (bits, rgb) in [(8, false), (16, false), (16, true)] {
+            let source = root.join(format!("frame-{bits}-{rgb}.nd2"));
+            fs::write(&source, crate::nd2::tests::synthetic(bits, rgb)).unwrap();
+            backend.open(&source).unwrap();
+            let state = wait_ready(&backend);
+            assert!(state.channel_mode);
+            assert_eq!(state.rgb, rgb);
+            assert_eq!(state.channels.len(), if rgb { 3 } else { 2 });
+            let sample_bits = if bits == 16 { 16 } else { 8 };
+            assert_eq!(state.sample_bits, sample_bits);
+            assert!(state
+                .channels
+                .iter()
+                .all(|channel| channel.domain == crate::channels::domain(sample_bits)));
+            if bits == 8 {
+                continue;
+            }
+            // Low 16-bit values stay exact instead of being stretched to 0–255.
+            if !rgb {
+                assert_eq!(state.display_ranges, [[1, 3], [2, 4]]);
+                assert_eq!((samples(0), samples(1)), (vec![1, 3], vec![2, 4]));
+            }
+            let id = state.id.clone();
+            backend
+                .select_plane(&id, crate::frames::Selection::default())
+                .unwrap();
+            let reused = wait_ready(&backend);
+            assert!(reused.detail.contains("Reused"), "{reused:?}");
+            assert_eq!((reused.sample_bits, reused.rgb), (16, rgb));
+            // A manifest written before 16-bit display samples is never reused.
+            let dir = backend
+                .current
+                .lock()
+                .unwrap()
+                .as_ref()
+                .unwrap()
+                .dir
+                .lock()
+                .unwrap()
+                .clone();
+            let mut manifest: serde_json::Value =
+                serde_json::from_slice(&fs::read(dir.join("manifest.json")).unwrap()).unwrap();
+            manifest.as_object_mut().unwrap().remove("sample_bits");
+            fs::write(dir.join("manifest.json"), manifest.to_string()).unwrap();
+            backend
+                .select_plane(&reused.id, crate::frames::Selection::default())
+                .unwrap();
+            let rebuilt = wait_ready(&backend);
+            assert!(!rebuilt.detail.contains("Reused"), "{rebuilt:?}");
+            assert_eq!(rebuilt.sample_bits, 16);
+        }
+        backend.shutdown();
+        drop(backend);
+        fs::remove_dir_all(root).unwrap();
+    }
+
     #[cfg(unix)]
     #[test]
     fn resolved_source_stays_pinned_when_selected_symlink_is_retargeted() {
@@ -1036,10 +1178,10 @@ mod tests {
         wait_ready(&backend);
         let job = backend.current.lock().unwrap().clone().unwrap();
         job.state.lock().unwrap().phase = Phase::Loading;
-        fs::remove_file(job.dir.lock().unwrap().join("preview.jpg")).unwrap();
+        fs::remove_file(job.dir.lock().unwrap().join("channels/0/preview.png")).unwrap();
         let waiting = {
             let job = job.clone();
-            thread::spawn(move || read_asset(&job, Asset::Preview))
+            thread::spawn(move || read_asset(&job, Asset::ChannelPreview { channel: 0 }))
         };
         let sleeper = {
             let job = job.clone();

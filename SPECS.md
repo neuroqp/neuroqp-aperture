@@ -50,8 +50,9 @@ preview as soon as possible, and stays responsive while loading large images.
   strips are each limited to 16 MiB, with other layouts left to libvips. Full
   detail stays in libvips, using up to eight threads for pyramid sinks. RGB8
   pyramids use direct JPEG tile encoding; grayscale retains its existing
-  conversion order. Channel pyramids fuse extraction and normalization into the
-  pyramid graph to avoid full-resolution intermediate files. Windows packages bundle the native image readers and fixed WebView2 runtime;
+  conversion order; 16-bit grayscale overviews stay lossless 16-bit. Channel
+  pyramids fuse band extraction into the pyramid graph to avoid full-resolution
+  intermediate files. Windows packages bundle the native image readers and fixed WebView2 runtime;
   AppImages bundle their native image readers against the Debian 12 baseline.
 
 ## Development principles
@@ -161,21 +162,25 @@ on Open, folder navigation or Close. Cancellation or save failure must retain un
   the entire clamped intensity ramp before tinting and mixing. Zero contributes
   no light; 50% halves the contribution, including the white-point plateau.
   Plot this scaled ramp with vertical input cutoff lines over an approximate
-  histogram of the original source channel's 8-bit display samples.
+  histogram of the source channel's display samples in source units.
   Drag the black-point or white-point line horizontally to adjust its input
   cutoff; drag the right-hand plateau vertically to adjust brightness. Each
   target highlights its background on hover and while dragging, with horizontal
-  or vertical resize cursors. Keep brightness reachable at a white point of 255
-  and at 0%/100% brightness. Capture the pointer during dragging, clamp values
+  or vertical resize cursors. Keep brightness reachable at a white point at the
+  top of the channel's domain and at 0%/100% brightness. Capture the pointer during dragging, clamp values
   to the same bounds as the sliders, and stop on release, cancellation, panel
   closure or image/connection replacement. Sliders remain keyboard accessible.
   Provide percentile presets 0–100, 0.1–99.9, 0.5–99.5, and 1–99 beside Reset.
   The 0–100 preset uses the sampled occupied minimum and maximum. Presets change
   only the selected connection's input range and retain its brightness.
-  Reset restores that connection's full 0–255 range and 100% brightness.
+  Reset restores that connection's full channel domain and 100% brightness.
   The histogram defaults to linear counts; its Linear/Log toggle sits below
   the graph, clear of its drag targets, and changes only histogram heights.
-  Input ranges use the 8-bit display domain, not original high-bit-depth values.
+  Input ranges use source units within each channel's domain: 0–255 for 8-bit
+  and 0–65535 for 16-bit samples. 8-bit channels start at 0–255. 16-bit channels
+  start once per opened image at the sampled occupied minimum and maximum; RGB
+  samples share one range to keep color balance. Constant planes use a
+  one-unit range. Ranges persist while browsing frames.
   Selection and keyboard focus follow the curved wire with a glow in its current
   line color, without a
   rectangular outline. Keep the panel compact and center the arrow between
@@ -201,10 +206,15 @@ on Open, folder navigation or Close. Cancellation or save failure must retain un
   Initially support unsigned 8/16-bit grayscale/RGB, interleaved multiband TIFF,
   and explicit ImageJ channel pages at first Z/time, up to 32 channels. Reject
   unsupported OME mapping and ambiguous alpha layouts with an explicit error.
-  Channel TIFF display caches retain separate lossless 8-bit planes (16-bit
-  inputs use their high byte); these are display samples, not scientific exports.
-  Use WebGL2 to retain immutable channel textures and apply a small color lookup
-  in the shader. Coalesce settings changes within an event-loop turn and redraw
+  Unsigned 16-bit images, including single-band grayscale, RGB16, 16-bit PNG
+  and single-channel ImageJ stacks, display as channel images. Their display caches retain separate lossless 16-bit planes,
+  served to the viewer as raw samples. 16-bit RGBA keeps the 8-bit path.
+  Without a reusable TIFF pyramid, an image whose generated 16-bit pyramid could
+  exceed half the display cache keeps the previous 8-bit high-byte display, and
+  the status bar says so.
+  Display caches are display samples, not scientific exports.
+  Use WebGL2 to retain immutable integer channel textures and evaluate each
+  connection's range, brightness and color in the shader. Coalesce settings changes within an event-loop turn and redraw
   the last displayed tile geometry immediately; OpenSeadragon still owns tile
   selection, pan, zoom, and cache eviction. Fall back to CPU compositing if WebGL2
   is unavailable or the context is lost. GPU optimization must not change the
@@ -220,9 +230,9 @@ on Open, folder navigation or Close. Cancellation or save failure must retain un
 - Decode ND2 in Rust with pinned `openreadout-nd2` and `openreadout-core` libraries.
   Do not require Python, Java, a vendor SDK, or a TypeScript format reader.
 - Decode the selected position, Z and time frame on a Rust loader thread, then write a temporary display TIFF for the existing channel preview and
-  pyramid pipeline. Normalize 16-bit scalar channels per selected frame into 8-bit
-  display samples. RGB uses one shared range. Keep the original ranges in metadata;
-  displayed brightness across frames is not quantitative. Cache keys include the source identity and selected coordinates.
+  pyramid pipeline. Display TIFFs keep original unsigned 8/16-bit samples, so
+  Color ranges in source units apply consistently across frames. Keep the
+  sampled original ranges in metadata. Cache keys include the source identity and selected coordinates.
   This implementation decodes a whole selected frame, not arbitrary regions. Native
   preview/pyramid operations remain in cancellable child processes. Rust decoding
   yields between frames; a new selection cancels queued optional work.
@@ -253,11 +263,11 @@ on Open, folder navigation or Close. Cancellation or save failure must retain un
   reduces all Z/time frames at the current position. Unprojected axes and local
   channel selection remain navigable. Projected axes show their full extent and
   disable slice scrolling. Turning projection off starts at the first slice.
-- Calculate component-wise maxima from original unsigned 8/16-bit intensities,
-  then normalize the completed projection for display. Preserve channel/RGB order
-  and keep positions separate. Never project independently normalized previews.
+- Calculate component-wise maxima from original unsigned 8/16-bit intensities
+  and display the projection in source units. Preserve channel/RGB order and keep
+  positions separate.
 - Reserve one original-depth accumulator plus the current input decode and
-  display conversion under the shared budget. Borrow cached inputs; stream and
+  display-TIFF writing under the shared budget. Borrow cached inputs; stream and
   release uncached inputs instead of retaining an entire stack. Check source
   identity and cancellation between frames and during reduction/conversion.
 - Projection cache keys include mode and source identity and canonicalize the

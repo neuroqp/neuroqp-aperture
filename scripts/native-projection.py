@@ -8,6 +8,7 @@ caches and displayed pixels.
 """
 
 import argparse
+from array import array
 import base64
 import hashlib
 import json
@@ -149,17 +150,30 @@ def main():
         return value
 
     def plane_hash(value):
+        return [hashlib.sha256(channel).hexdigest() for channel in preview_planes(value)]
+
+    def samples(value):
+        # 32x32 previews are full resolution; skip the 8-byte `.u16` size prefix.
+        return [array('H', channel[8:]) for channel in preview_planes(value)]
+
+    def preview_planes(value):
         data = js("""
           const done=arguments[arguments.length-1],s=arguments[0],source=window.__apertureViewer.world.getItemAt(0).source;
           const url=source.getTileUrl(source.maxLevel,0,0);
           if(!url.includes('/'+s.id+'/')){done({error:'Displayed source id mismatch'});return;}
           const base=url.split('/'+s.id+'/')[0]+'/'+s.id;
-          Promise.all(s.channels.map((_,c)=>fetch(base+'/channels/'+c+'/preview.png').then(r=>{
+          // 16-bit planes use raw samples: u32 LE width, u32 LE height, u16 LE values.
+          const ext=s.sampleBits===16?'u16':'png';
+          Promise.all(s.channels.map((_,c)=>fetch(base+'/channels/'+c+'/preview.'+ext).then(r=>{
             if(!r.ok)throw new Error('Tile '+r.status);return r.arrayBuffer();
-          }).then(b=>Array.from(new Uint8Array(b))))).then(done,e=>done({error:String(e)}));
+          }).then(b=>{
+            const d=new DataView(b);
+            if(ext==='u16'&&(b.byteLength<8||b.byteLength!==8+2*d.getUint32(0,true)*d.getUint32(4,true)))throw new Error('Invalid .u16 length');
+            return Array.from(new Uint8Array(b));
+          }))).then(done,e=>done({error:String(e)}));
         """, [value], True)
         assert isinstance(data, list), data
-        return [hashlib.sha256(bytes(channel)).hexdigest() for channel in data]
+        return [bytes(channel) for channel in data]
 
     def framebuffer():
         value = js("""
@@ -221,7 +235,27 @@ def main():
         reduced = invoke('set_memory_budget', {'limitBytes': GIB // 4})
         assert reduced.get('limitBytes') == GIB // 4, reduced
         source = open_ready(primary)
+        assert source['sampleBits'] == 16 and source['channelMode'], source
+        # Original samples of every Z/time plane at position 0, through the real UI.
+        originals = {}
+        for t_index in range(source['dimensions']['time']):
+            for z_index in range(source['dimensions']['z']):
+                axis('time')
+                range_value(t_index + 1)
+                axis('z')
+                range_value(z_index + 1)
+                originals[z_index, t_index] = samples(ready(primary, z=z_index, time_index=t_index))
+        axis('time')
+        range_value(1)
+        axis('z')
+        range_value(1)
+        source = ready(primary)
         source_hash = plane_hash(source)
+
+        def expected_maximum(mode):
+            chosen = [planes for (z_index, t_index), planes in originals.items()
+                      if (mode in ('z', 'zTime') or z_index == 0) and (mode in ('time', 'zTime') or t_index == 0)]
+            return [array('H', map(max, *(planes[c] for planes in chosen))) for c in range(len(chosen[0]))]
         unadjusted = framebuffer()
         click('color-button')
         wait(lambda: js("return !!document.getElementById('color-range-brightness') && !document.getElementById('color-range-brightness').disabled;"), 'color brightness control')
@@ -237,13 +271,15 @@ def main():
             value = project(mode)
             projected_hash = plane_hash(value)
             assert projected_hash != source_hash, (mode, projected_hash, source_hash)
+            # Maxima are displayed as original samples, without normalization.
+            assert samples(value) == expected_maximum(mode), mode
             retained(expected_display)
             pixels = framebuffer()
             for projected_axis in ({'z': ['z'], 'time': ['time'], 'zTime': ['z', 'time']}[mode]):
                 axis(projected_axis)
                 assert js("return document.getElementById('dimension-range').disabled && document.getElementById('dimension-count').textContent.startsWith('Max of ');"), projected_axis
             projection_hashes[mode] = projected_hash
-            report['checks'][mode] = {'hashes': projected_hash, 'pixels': pixels, 'preload': no_projection_preload()}
+            report['checks'][mode] = {'hashes': projected_hash, 'exactOriginalMaxima': True, 'pixels': pixels, 'preload': no_projection_preload()}
             cleared = project('none')
             assert plane_hash(cleared) == source_hash
             retained(expected_display)

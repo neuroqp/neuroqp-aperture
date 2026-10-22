@@ -50,7 +50,7 @@ metadata, not a substitute for per-frame timestamps.
 ## Max projections
 
 Z max, Time max, or both reduce the current position exactly as for ND2: maxima
-are taken from original unsigned samples before display normalization, inputs
+are taken from original unsigned samples and displayed unchanged, inputs
 stream through one accumulator, cached frames are borrowed, and projections have
 separate canonical cache keys. RGB keeps its sample order and shared range.
 Projections are display-only and not preloaded.
@@ -59,9 +59,9 @@ Projections are display-only and not preloaded.
 
 The loader decodes one whole position/Z/time frame, including its channels, and
 writes a temporary display TIFF for the existing preview/pyramid pipeline.
-Sixteen-bit channels are normalized per selected frame for display, with one
-shared range for RGB, and original ranges stay in image state and the cache
-manifest. Original samples are retained under the shared memory budget and
+Display TIFFs keep original samples: 16-bit channels, including Bgr48 RGB, are
+lossless 16-bit display planes with Color ranges in source units. Sampled
+ranges stay in image state and the cache manifest; RGB shares one range. Original samples are retained under the shared memory budget and
 preloading follows the same order as ND2. Cache keys include the source identity,
 selected coordinates and a CZI-specific decoder version.
 
@@ -110,7 +110,7 @@ metadata inspection, CZI writing and scientific export remain separate work.
 ## Validation and reproducibility
 
 Mandatory Rust tests write small CZI containers in memory. They check exact
-scene/Z/time/channel addressing, 16-bit display normalization, BGR24, BGR48 and
+scene/Z/time/channel addressing, lossless 16-bit display samples, BGR24, BGR48 and
 BGRA32 sample order, two-tile stitching, Z projection, scenes of different width
 through the backend, unchanged source bytes, per-plane decode batches, payload
 offsets from embedded subblock entries, JPEG XR header and tile-column checks,
@@ -140,6 +140,6 @@ and community samples on Zenodo and the aicsimageio test resources; see
 ## Next decisions
 
 Prioritize region or pyramid-level streaming for whole-slide scenes, retaining a
-reader between frames to avoid repeated directory walks, and persistent
-source-intensity display ranges. Multi-file documents, float pixel types and
-dimension-aware annotations should follow actual sample requirements.
+reader between frames to avoid repeated directory walks. Multi-file documents,
+float pixel types and dimension-aware annotations should follow actual sample
+requirements.

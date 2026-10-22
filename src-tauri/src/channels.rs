@@ -8,6 +8,17 @@ pub const MAX_CHANNELS: u32 = 32;
 pub struct Channel {
     pub name: String,
     pub color: String,
+    /// Display sample range in source units.
+    #[serde(default = "eight_bit")]
+    pub domain: [u16; 2],
+}
+
+fn eight_bit() -> [u16; 2] {
+    domain(8)
+}
+
+pub fn domain(sample_bits: u8) -> [u16; 2] {
+    [0, if sample_bits == 16 { u16::MAX } else { 255 }]
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
@@ -20,6 +31,7 @@ pub struct Layout {
     pub channels: Vec<Channel>,
     pub planes: Vec<Plane>,
     pub channel_mode: bool,
+    pub rgb: bool,
 }
 
 fn number(header: &str, key: &str) -> Result<u32, String> {
@@ -48,6 +60,8 @@ pub fn discover(
         field(header, "interpretation"),
         Some("b-w" | "grey16" | "multiband")
     );
+    // 16-bit gray and RGB keep lossless samples as channels; 16-bit RGBA stays RGBA.
+    let wide = field(header, "format") == Some("ushort") && matches!(bands, 1 | 3);
     if tiff
         && bands > 1
         && ((alpha && (gray || bands != 4)) || (gray && bands == 2 && tiffinfo.is_none()))
@@ -124,13 +138,20 @@ pub fn discover(
                 planes.push(Plane { page, band: 0 });
             }
         }
-        count > 1
+        count > 1 || wide
     } else {
-        tiff && ((gray && bands > 1)
-            || !matches!(bands, 1 | 3 | 4)
-            || (bands == 4 && !alpha && tiffinfo.is_some()))
+        wide || (tiff
+            && ((gray && bands > 1)
+                || !matches!(bands, 1 | 3 | 4)
+                || (bands == 4 && !alpha && tiffinfo.is_some())))
     };
-    if channel_mode && bands > 1 && info.contains("Planar Configuration: separate image planes") {
+    let rgb = bands == 3 && !gray;
+    // libvips already assembles planar RGB for the ordinary RGB path.
+    if channel_mode
+        && bands > 1
+        && !rgb
+        && info.contains("Planar Configuration: separate image planes")
+    {
         return Err(
             "Planar-separate multiband TIFFs are not supported. Export interleaved bands.".into(),
         );
@@ -144,7 +165,11 @@ pub fn discover(
         }
         planes = (0..count).map(|band| Plane { page: 0, band }).collect();
     }
-    let rgb = !channel_mode && planes.len() == 3;
+    let sample_bits = if channel_mode && field(header, "format") == Some("ushort") {
+        16
+    } else {
+        8
+    };
     let colors = [
         "#ff0000", "#00ff00", "#0000ff", "#ff00ff", "#00ffff", "#ffff00", "#ffffff",
     ];
@@ -164,12 +189,14 @@ pub fn discover(
                 colors[index % colors.len()]
             }
             .into(),
+            domain: domain(sample_bits),
         })
         .collect();
     Ok(Layout {
         channels,
         planes,
         channel_mode,
+        rgb,
     })
 }
 
@@ -182,17 +209,22 @@ mod tests {
     #[test]
     fn channel_pages_require_explicit_consistent_imagej_dimensions() {
         let ordinary = header(1);
-        assert!(
-            !discover(&ordinary, &|_| unreachable!(), None)
-                .unwrap()
-                .channel_mode
-        );
-        let simple_stack = format!("{}image-description: ImageJ=1.54\nimages=12\n\n", ordinary);
-        assert!(
-            !discover(&simple_stack, &|_| unreachable!(), None)
-                .unwrap()
-                .channel_mode
-        );
+        let gray8 = ordinary.replace("ushort", "uchar").replace("grey16", "b-w");
+        let simple_stack = "image-description: ImageJ=1.54\nimages=12\n\n";
+        for header in [gray8.clone(), format!("{gray8}{simple_stack}")] {
+            let layout = discover(&header, &|_| unreachable!(), None).unwrap();
+            assert!(!layout.channel_mode);
+            assert_eq!(layout.channels[0].domain, [0, 255]);
+        }
+        // Ordinary 16-bit gray pages and stacks show their first page losslessly.
+        for header in [ordinary.clone(), format!("{ordinary}{simple_stack}")] {
+            let layout = discover(&header, &|_| unreachable!(), None).unwrap();
+            assert!(layout.channel_mode && !layout.rgb);
+            assert_eq!(layout.planes.len(), 1);
+            assert_eq!(layout.channels[0].name, "Channel 1");
+            assert_eq!(layout.channels[0].color, "#ffffff");
+            assert_eq!(layout.channels[0].domain, [0, 65535]);
+        }
         let imagej = format!(
             "{}image-description: ImageJ=1.54\nimages=12\nchannels=3\nslices=2\nframes=2\n\n",
             ordinary
@@ -278,15 +310,18 @@ mod tests {
                 .unwrap()
                 .channel_mode
         );
-        let rgb = discover(
-            &header(3).replace("grey16", "rgb16"),
-            &|_| unreachable!(),
-            None,
-        )
-        .unwrap();
-        assert!(!rgb.channel_mode);
-        assert_eq!(rgb.channels[0].name, "Red");
-        assert_eq!(rgb.channels[2].color, "#0000ff");
+        let rgb16 = header(3).replace("grey16", "rgb16");
+        let rgb8 = rgb16.replace("ushort", "uchar").replace("rgb16", "srgb");
+        let planar = Some("Planar Configuration: separate image planes");
+        for (header, channel_mode, maximum) in [(&rgb8, false, 255), (&rgb16, true, 65535)] {
+            let rgb = discover(header, &|_| unreachable!(), planar).unwrap();
+            assert_eq!(rgb.channel_mode, channel_mode);
+            assert!(rgb.rgb);
+            assert_eq!(rgb.channels[0].name, "Red");
+            assert_eq!(rgb.channels[2].color, "#0000ff");
+            assert_eq!(rgb.channels[1].domain, [0, maximum]);
+        }
+        assert!(discover(&header(3), &|_| unreachable!(), planar).is_err());
         assert!(discover(&header(33), &|_| unreachable!(), None).is_err());
         assert!(discover(
             &format!("{}image-description: <OME SizeC=\"5\">", header(1)),

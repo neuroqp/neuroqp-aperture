@@ -190,3 +190,42 @@ test("connection brightness scales the clipped ramp before tinting and independe
     [191, 0, 0, 255],
   );
 });
+
+test(".u16 bodies parse into exact little-endian planes and reject wrong lengths", async () => {
+  const { parseU16Plane } = await import("./color-renderer.ts");
+  const body = (width: number, height: number, samples: number[]) => {
+    const buffer = new ArrayBuffer(8 + samples.length * 2);
+    const view = new DataView(buffer);
+    view.setUint32(0, width, true);
+    view.setUint32(4, height, true);
+    samples.forEach((sample, index) =>
+      view.setUint16(8 + index * 2, sample, true),
+    );
+    return buffer;
+  };
+  const parsed = parseU16Plane(body(3, 1, [0, 1001, 65535]));
+  assert.equal(parsed.width, 3);
+  assert.equal(parsed.height, 1);
+  assert.ok(parsed.plane instanceof Uint16Array);
+  assert.deepEqual([...parsed.plane], [0, 1001, 65535]);
+  for (const bad of [
+    body(3, 1, [0, 1]),
+    body(3, 1, [0, 1, 2, 3]),
+    body(0, 0, []),
+    new ArrayBuffer(7),
+  ])
+    assert.throws(() => parseU16Plane(bad), /unexpected size/);
+});
+
+test("16-bit planes composite in source units without an 8-bit lookup", () => {
+  const plane = Uint16Array.of(0, 2000, 3000, 4000, 65535);
+  assert.deepEqual(
+    [
+      ...composeColorPixels(
+        [plane],
+        settings(route("0", "Gray", { minimum: 2000, maximum: 4000 })),
+      ),
+    ].filter((_, at) => at % 4 === 0),
+    [0, 0, 128, 255, 255],
+  );
+});

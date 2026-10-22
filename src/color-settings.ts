@@ -1,14 +1,17 @@
 import {
   adjustDisplay,
-  defaultDisplaySettings,
+  defaultDomain,
   displayValue,
+  percentileRange,
   type DisplaySettings,
+  type Domain,
 } from "./display.ts";
 
 export interface ColorChannel {
   id: string;
   name: string;
   color?: string;
+  domain?: Domain;
 }
 
 export function sameColorChannels(
@@ -21,7 +24,9 @@ export function sameColorChannels(
       (channel, index) =>
         channel.id === next[index].id &&
         channel.name === next[index].name &&
-        channel.color === next[index].color,
+        channel.color === next[index].color &&
+        String(channel.domain ?? defaultDomain) ===
+          String(next[index].domain ?? defaultDomain),
     )
   );
 }
@@ -35,10 +40,11 @@ export interface ColorConnection extends DisplaySettings {
 
 export type ColorAdjustment = DisplaySettings & { brightness: number };
 
-const defaultColorAdjustment: ColorAdjustment = {
-  ...defaultDisplaySettings,
+const defaultColorAdjustment = ([minimum, maximum]: Domain) => ({
+  minimum,
+  maximum,
   brightness: 100,
-};
+});
 
 export function colorConnectionValue(value: number, settings: ColorAdjustment) {
   return displayValue(value, settings) * (settings.brightness / 100);
@@ -47,7 +53,12 @@ export function colorConnectionValue(value: number, settings: ColorAdjustment) {
 export interface ColorSettings {
   colors: Record<string, string>;
   connections: ColorConnection[];
+  /** Source sample bounds by channel id; absent channels use 0–255. */
+  domains?: Record<string, Domain>;
 }
+
+const domainOf = (settings: ColorSettings, source: string) =>
+  settings.domains?.[source] ?? defaultDomain;
 
 export const colorPresets: Readonly<Record<string, string>> = {
   Red: "#ff0000",
@@ -134,13 +145,17 @@ export function defaultColorSettings(
       id: index + 1,
       source: channel.id,
       color,
-      ...defaultColorAdjustment,
+      ...defaultColorAdjustment(channel.domain ?? defaultDomain),
     };
   });
-  return { colors, connections };
+  const domains = Object.fromEntries(
+    channels.map((channel) => [channel.id, channel.domain ?? defaultDomain]),
+  );
+  return { colors, connections, domains };
 }
 
 export const copyColorSettings = (settings: ColorSettings): ColorSettings => ({
+  ...settings,
   colors: { ...settings.colors },
   connections: settings.connections.map((connection) => ({ ...connection })),
 });
@@ -177,7 +192,7 @@ export function connectColor(
             id: Math.max(0, ...settings.connections.map((item) => item.id)) + 1,
             source,
             color,
-            ...defaultColorAdjustment,
+            ...defaultColorAdjustment(domainOf(settings, source)),
           },
         ],
   };
@@ -208,7 +223,12 @@ export function adjustColorConnection(
             ...edge,
             ...(field === "brightness"
               ? { brightness: Math.max(0, Math.min(100, Math.round(value))) }
-              : adjustDisplay(edge, field, value)),
+              : adjustDisplay(
+                  edge,
+                  field,
+                  value,
+                  domainOf(settings, edge.source),
+                )),
           }
         : edge,
     ),
@@ -222,16 +242,56 @@ export function setColorConnectionRange(
 ): ColorSettings {
   if (!Number.isFinite(range.minimum) || !Number.isFinite(range.maximum))
     return settings;
-  const bounded = adjustDisplay(
-    adjustDisplay(defaultDisplaySettings, "minimum", range.minimum),
-    "maximum",
-    range.maximum,
-  );
+  const bounded = (domain: Domain) =>
+    adjustDisplay(
+      adjustDisplay(
+        { minimum: domain[0], maximum: domain[1] },
+        "minimum",
+        range.minimum,
+        domain,
+      ),
+      "maximum",
+      range.maximum,
+      domain,
+    );
   return {
     ...settings,
     connections: settings.connections.map((edge) =>
-      edge.id === id ? { ...edge, ...bounded } : edge,
+      edge.id === id
+        ? { ...edge, ...bounded(domainOf(settings, edge.source)) }
+        : edge,
     ),
+  };
+}
+
+/** Start each connection at its channel's sampled occupied range (0–100 %). */
+export function initialColorRanges(
+  settings: ColorSettings,
+  channels: readonly ColorChannel[],
+  histograms: readonly (ArrayLike<number> | null)[],
+  rgb: boolean,
+): ColorSettings {
+  const ranges = new Map<string, DisplaySettings>();
+  if (rgb) {
+    // One shared range across R, G and B preserves the color balance.
+    const sum = new Float64Array(histograms.find(Boolean)?.length ?? 0);
+    for (const bins of histograms.slice(0, 3))
+      for (let value = 0; value < sum.length; value++)
+        sum[value] += bins?.[value] ?? 0;
+    const range = percentileRange(sum, 0, channels[0]?.domain);
+    for (const channel of channels.slice(0, 3)) ranges.set(channel.id, range);
+  } else
+    channels.forEach((channel, index) => {
+      const bins = histograms[index];
+      if (bins)
+        ranges.set(channel.id, percentileRange(bins, 0, channel.domain));
+    });
+  return {
+    ...settings,
+    connections: settings.connections.map((edge) => ({
+      ...edge,
+      ...ranges.get(edge.source),
+    })),
   };
 }
 
@@ -242,7 +302,12 @@ export function resetColorConnection(
   return {
     ...settings,
     connections: settings.connections.map((edge) =>
-      edge.id === id ? { ...edge, ...defaultColorAdjustment } : edge,
+      edge.id === id
+        ? {
+            ...edge,
+            ...defaultColorAdjustment(domainOf(settings, edge.source)),
+          }
+        : edge,
     ),
   };
 }
