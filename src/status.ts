@@ -41,7 +41,14 @@ export function statusFor(status: StatusInput) {
           : "Reading image…",
     );
   if (status.savedPath && !status.dirty) return notice("Saved");
-  if (image?.readOnly) return detail("Browsing only · annotations unavailable");
+  if (image?.readOnly) {
+    const skipped = image.skippedSeries ?? 0;
+    return detail(
+      skipped
+        ? `Browsing only · annotations unavailable · ${skipped} series with different dimensions not shown`
+        : "Browsing only · annotations unavailable",
+    );
+  }
   if (image?.displayFallback)
     return detail("8-bit display · image too large for 16-bit cache");
   return detail("");

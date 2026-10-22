@@ -1,5 +1,6 @@
 pub(crate) mod assets;
 pub(crate) mod cache;
+pub(crate) mod ome;
 mod process;
 pub(crate) mod pyramid;
 
@@ -19,7 +20,7 @@ use std::{
     process::Child,
     sync::{
         atomic::{AtomicBool, AtomicU64, Ordering},
-        Arc, Mutex,
+        Arc, Mutex, OnceLock,
     },
     task::Poll,
     thread,
@@ -46,6 +47,33 @@ pub const IMAGE_EXTENSIONS: &[&str] = &[
     "jpg", "jpeg", "png", "bmp", "tif", "tiff", "webp", "nd2", "czi",
 ];
 static NEXT_ID: AtomicU64 = AtomicU64::new(1);
+
+/// Open also accepts an OME-TIFF companion, which folder navigation omits so a
+/// multi-file dataset is not listed twice.
+pub const COMPANION_EXTENSION: &str = "companion.ome";
+
+fn openable(path: &Path) -> bool {
+    supported_image(path) || crate::ome_tiff::is_companion(path)
+}
+
+/// ND2 and CZI by extension; OME-TIFF by its first page's OME-XML or a companion.
+fn detect_format(path: &Path, source: &Path) -> Result<Option<crate::frames::Format>, String> {
+    if let Some(format) = crate::frames::Format::from_path(path) {
+        return Ok(Some(format));
+    }
+    let tiff = path
+        .extension()
+        .and_then(|extension| extension.to_str())
+        .is_some_and(|extension| {
+            ["tif", "tiff"]
+                .iter()
+                .any(|t| extension.eq_ignore_ascii_case(t))
+        });
+    Ok(
+        ((tiff || crate::ome_tiff::is_companion(path)) && crate::ome_tiff::detect(source)?)
+            .then_some(crate::frames::Format::OmeTiff),
+    )
+}
 
 fn supported_image(path: &Path) -> bool {
     path.extension()
@@ -106,6 +134,10 @@ pub struct ImageState {
     pub calibration: Option<crate::frames::Calibration>,
     pub display_ranges: Vec<[u16; 2]>,
     pub projection: crate::frames::Projection,
+    /// OME-TIFF series left out because their dimensions differ from series 0.
+    pub skipped_series: u32,
+    /// Why max projections cannot be offered for the selected position.
+    pub projection_unavailable: Option<String>,
 }
 
 /// Serialized as the frontend's lowercase `ImageState.phase` strings.
@@ -126,6 +158,8 @@ pub(crate) struct FrameSelection {
     pub sample_bits: u8,
     pub rgb: bool,
     pub projection: crate::frames::Projection,
+    pub skipped_series: u32,
+    pub projection_unavailable: Option<String>,
 }
 
 type Notifier = Arc<dyn Fn(&ImageState) + Send + Sync>;
@@ -137,6 +171,7 @@ pub struct Job {
     pub dir: Mutex<PathBuf>,
     pub input: PathBuf,
     pub source: PathBuf,
+    pub(crate) format: Option<crate::frames::Format>,
     selection: Option<crate::frames::Selection>,
     pub(crate) projection: crate::frames::Projection,
     pub(crate) acquisition: Option<Arc<crate::preload::Acquisition>>,
@@ -149,7 +184,9 @@ pub struct Job {
     native: Mutex<Vec<NativeLevel>>,
     planes: Mutex<Vec<Plane>>,
     root: PathBuf,
-    cache_key: String,
+    /// OME-TIFF jobs add their members' identity once the dataset is open.
+    cache_key: Mutex<String>,
+    ome: OnceLock<Arc<ome::Source>>,
     process_number: AtomicU64,
     decoder: Mutex<Option<Arc<crate::decoder::Decoder>>>,
     decoder_memory: Mutex<Option<DecoderMemory>>,
@@ -313,6 +350,8 @@ impl Backend {
                 sample_bits: state.sample_bits,
                 rgb: state.rgb,
                 projection,
+                skipped_series: state.skipped_series,
+                projection_unavailable: state.projection_unavailable,
             }),
         )
     }
@@ -332,13 +371,16 @@ impl Backend {
                 *browser = Some(self.memory.require(BROWSER_BYTES, DISPLAY_MEMORY_ERROR)?);
             }
         }
-        let acquisition = if let Some(format) = crate::frames::Format::from_path(path) {
+        let acquisition = if let Some(format) = detect_format(path, &source)? {
             let identity =
                 crate::instances::fingerprint(&source).map_err(|error| error.to_string())?;
             let mut current = self.acquisition.lock().unwrap();
-            if current
-                .as_ref()
-                .is_none_or(|item| !item.matches(format, &source, &identity))
+            // Reopening an OME-TIFF re-reads its metadata and member identities.
+            let reopen = format == crate::frames::Format::OmeTiff && frame.is_none();
+            if reopen
+                || current
+                    .as_ref()
+                    .is_none_or(|item| !item.matches(format, &source, &identity))
             {
                 if let Some(old) = current.take() {
                     old.stop();
@@ -552,9 +594,9 @@ impl LoadContext {
             .and_then(|s| s.to_str())
             .unwrap_or("")
             .to_ascii_lowercase();
-        if !supported_image(path) {
+        if !openable(path) {
             return Err(
-                "Supported formats: JPEG, PNG, BMP, WebP, TIFF, BigTIFF, Nikon ND2 and Zeiss CZI."
+                "Supported formats: JPEG, PNG, BMP, WebP, TIFF, BigTIFF, OME-TIFF, Nikon ND2 and Zeiss CZI."
                     .into(),
             );
         }
@@ -562,7 +604,7 @@ impl LoadContext {
             .as_ref()
             .map(|frame| frame.projection)
             .unwrap_or_default();
-        let format = crate::frames::Format::from_path(path);
+        let format = acquisition.as_ref().map(|acquisition| acquisition.format());
         let selection = format.map(|_| {
             frame
                 .as_ref()
@@ -641,16 +683,25 @@ impl LoadContext {
         } else {
             alias
         };
-        let (dimensions, initial_channels, sample_bits, rgb) = frame
+        let (
+            dimensions,
+            initial_channels,
+            sample_bits,
+            rgb,
+            skipped_series,
+            projection_unavailable,
+        ) = frame
             .map(|frame| {
                 (
                     Some(frame.dimensions),
                     frame.channels,
                     frame.sample_bits,
                     frame.rgb,
+                    frame.skipped_series,
+                    frame.projection_unavailable,
                 )
             })
-            .unwrap_or((None, Vec::new(), 8, false));
+            .unwrap_or((None, Vec::new(), 8, false, 0, None));
         let initial = ImageState {
             id,
             revision: 0,
@@ -683,6 +734,8 @@ impl LoadContext {
             calibration: None,
             display_ranges: Vec::new(),
             projection,
+            skipped_series,
+            projection_unavailable,
         };
         let job = Arc::new(Job {
             state: Mutex::new(initial.clone()),
@@ -691,6 +744,7 @@ impl LoadContext {
             dir: Mutex::new(dir.clone()),
             input,
             source,
+            format,
             selection,
             projection,
             acquisition,
@@ -702,7 +756,8 @@ impl LoadContext {
             native: Mutex::new(Vec::new()),
             planes: Mutex::new(Vec::new()),
             root: self.root.clone(),
-            cache_key,
+            cache_key: Mutex::new(cache_key),
+            ome: OnceLock::new(),
             process_number: AtomicU64::new(0),
             decoder: Mutex::new(None),
             decoder_memory: Mutex::new(None),
@@ -729,6 +784,43 @@ pub(crate) fn finish_decoder(job: &Job) {
 }
 
 impl Job {
+    pub(crate) fn cache_key(&self) -> String {
+        self.cache_key.lock().unwrap().clone()
+    }
+
+    /// Display caches of an OME-TIFF selection depend on every member file.
+    fn set_member_identity(&self, identity: u64) {
+        let mut key = self.cache_key.lock().unwrap();
+        let mut hasher = DefaultHasher::new();
+        (key.as_str(), identity).hash(&mut hasher);
+        *key = format!("{:016x}", hasher.finish());
+    }
+
+    /// OME-TIFF planes are read in place from member files, except projections,
+    /// which are written to the job's display TIFF like ND2/CZI frames.
+    pub(crate) fn lazy_planes(&self) -> bool {
+        self.format == Some(crate::frames::Format::OmeTiff)
+            && self.projection == crate::frames::Projection::None
+    }
+
+    pub(crate) fn member_alias(&self, member: u32) -> PathBuf {
+        self.work.join(format!("member-{member}.tif"))
+    }
+
+    /// The libvips source file of a display plane.
+    pub(crate) fn plane_path(&self, plane: &Plane) -> PathBuf {
+        if self.lazy_planes() {
+            self.member_alias(plane.member)
+        } else {
+            self.input.clone()
+        }
+    }
+
+    /// Re-checks OME-TIFF member files after evaluation and before publishing.
+    pub(crate) fn verify_sources(&self) -> Result<(), String> {
+        self.ome.get().map_or(Ok(()), |source| source.verify())
+    }
+
     async fn tile_permit(
         &self,
         slots: Arc<tokio::sync::Semaphore>,
@@ -845,7 +937,7 @@ impl Drop for Job {
 }
 
 #[cfg(test)]
-mod tests {
+pub(crate) mod tests {
     use super::*;
     use assets::{read_asset, Asset};
     use process::run;
@@ -957,8 +1049,7 @@ mod tests {
                 .unwrap()
                 .as_ref()
                 .unwrap()
-                .cache_key
-                .clone();
+                .cache_key();
             backend
                 .select_view(
                     &projected.id,
@@ -972,7 +1063,13 @@ mod tests {
                 .unwrap();
             let repeated = wait_ready(&backend);
             assert_eq!(
-                backend.current.lock().unwrap().as_ref().unwrap().cache_key,
+                backend
+                    .current
+                    .lock()
+                    .unwrap()
+                    .as_ref()
+                    .unwrap()
+                    .cache_key(),
                 key
             );
             assert_eq!(repeated.dimensions.as_ref().unwrap().z_index, 0);
@@ -1243,7 +1340,7 @@ mod tests {
         fs::remove_dir_all(root).unwrap();
     }
 
-    pub(super) fn wait_ready(backend: &Backend) -> ImageState {
+    pub(crate) fn wait_ready(backend: &Backend) -> ImageState {
         let deadline = Instant::now() + Duration::from_secs(20);
         loop {
             let state = backend.snapshot().unwrap();

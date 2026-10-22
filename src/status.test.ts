@@ -57,6 +57,25 @@ test("loading progress and browsing-only images describe the image state", () =>
     "Browsing only · annotations unavailable",
   );
   assert.equal(
+    status({ image: image({ readOnly: true, skippedSeries: 2 }) }).text,
+    "Browsing only · annotations unavailable · 2 series with different dimensions not shown",
+  );
+  // An unstored OME-TIFF plane is the selection's own recoverable error.
+  assert.deepEqual(
+    status({
+      image: image({
+        phase: "error",
+        readOnly: true,
+        error: "OME-TIFF plane C 1, Z 2, T 1 is not stored in this dataset.",
+      }),
+    }),
+    {
+      text: "OME-TIFF plane C 1, Z 2, T 1 is not stored in this dataset.",
+      title: "OME-TIFF plane C 1, Z 2, T 1 is not stored in this dataset.",
+      error: true,
+    },
+  );
+  assert.equal(
     status({ image: image({ displayFallback: true }) }).text,
     "8-bit display · image too large for 16-bit cache",
   );

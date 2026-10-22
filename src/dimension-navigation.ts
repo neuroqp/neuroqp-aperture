@@ -92,14 +92,25 @@ export function bindDimensionNavigation(
     get("dimension-projections").hidden = !spatial;
     maxZ.checked = projectsAxis(planeNavigation.projection, "z");
     maxTime.checked = projectsAxis(planeNavigation.projection, "time");
+    // A position whose frame is too large to project offers no projections.
+    const unavailable =
+      planeNavigation.projection === "none"
+        ? image?.projectionUnavailable
+        : null;
     maxZ.disabled =
-      !spatial || (!maxZ.checked && (image?.dimensions?.z ?? 1) <= 1);
+      !spatial ||
+      Boolean(unavailable) ||
+      (!maxZ.checked && (image?.dimensions?.z ?? 1) <= 1);
     maxTime.disabled =
-      !spatial || (!maxTime.checked && (image?.dimensions?.time ?? 1) <= 1);
+      !spatial ||
+      Boolean(unavailable) ||
+      (!maxTime.checked && (image?.dimensions?.time ?? 1) <= 1);
     const projectionStatus = get("dimension-projection-status");
-    projectionStatus.hidden = planeNavigation.projection === "none";
-    projectionStatus.textContent =
-      maxZ.checked && maxTime.checked
+    projectionStatus.hidden =
+      planeNavigation.projection === "none" && !unavailable;
+    projectionStatus.textContent = unavailable
+      ? unavailable
+      : maxZ.checked && maxTime.checked
         ? "Maximum intensity across Z and Time"
         : maxZ.checked
           ? "Maximum intensity across Z"

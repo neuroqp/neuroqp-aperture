@@ -41,6 +41,7 @@ impl Plan {
             Format::Czi => {
                 czi::Plan::new(source, budget).map(|(plan, lease)| (Self::Czi(plan), lease))
             }
+            Format::OmeTiff => Err("OME-TIFF planes are not decoded into raw frames.".into()),
         }
     }
 

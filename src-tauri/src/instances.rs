@@ -305,7 +305,7 @@ fn path_hash(path: &Path) -> String {
     format!("{hash:016x}")
 }
 
-#[derive(Clone, Debug, Eq, PartialEq)]
+#[derive(Clone, Debug, Eq, Hash, PartialEq)]
 pub struct Fingerprint {
     length: u64,
     modified: SystemTime,

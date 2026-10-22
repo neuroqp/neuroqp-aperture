@@ -213,7 +213,7 @@ fn decoder_workspace(job: &Job) -> Result<u64, String> {
     let state = job.state.lock().unwrap();
     // Four bytes per preview sample also cover one materialized 16-bit preview.
     let preview = state.channels.len().max(1) as u64 * 1024 * 1024 * 4;
-    let (overhead, frame) = if job.selection.is_some() {
+    let (overhead, frame) = if job.selection.is_some() && !job.lazy_planes() {
         // Frame display TIFFs have one whole-image strip; preserve its full decode.
         (
             128 * 1024 * 1024,
@@ -244,7 +244,12 @@ fn reserve_workspace(job: &Job, bytes: u64) -> Result<crate::memory::Reservation
     if job.cancel.load(Ordering::Relaxed) {
         return Err("Loading cancelled.".into());
     }
-    let reservation = if let Some(acquisition) = &job.acquisition {
+    // Only ND2/CZI acquisitions retain raw frames that admission may evict.
+    let reservation = if let Some(acquisition) = job
+        .acquisition
+        .as_ref()
+        .filter(|acquisition| acquisition.format() != crate::frames::Format::OmeTiff)
+    {
         acquisition.reserve_workspace(bytes, job.background)?
     } else {
         job.memory

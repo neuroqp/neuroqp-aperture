@@ -4,6 +4,7 @@ use super::{
         cached_manifest, housekeeping, promote, valid_cache_assets, valid_preview, write_manifest,
         CACHE_LIMIT,
     },
+    ome::plane_input,
     process::{decoded_workspace, input, run, run_with_progress, uses_worker, worker_call},
     Job, Phase,
 };
@@ -43,16 +44,25 @@ pub(super) fn dimensions(header: &str) -> Result<(u32, u32), String> {
 
 /// The validated vipsheader fields that choose how a display is built.
 #[derive(Debug, PartialEq)]
-struct Header {
-    width: u32,
-    height: u32,
-    bands: u32,
-    ushort: bool,
-    tiff: bool,
+pub(super) struct Header {
+    pub(super) width: u32,
+    pub(super) height: u32,
+    pub(super) bands: u32,
+    pub(super) ushort: bool,
+    pub(super) tiff: bool,
     srgb: bool,
 }
 
-fn validate_header(header: &str) -> Result<Header, String> {
+/// Loader options for a plane: `[page=0,…]` names the plane's own page, so
+/// native levels stored for one page also apply to other pages.
+pub(super) fn at_page(options: &str, page: u32) -> String {
+    match options.strip_prefix("[page=0,") {
+        Some(rest) if page != 0 => format!("[page={page},{rest}"),
+        _ => options.into(),
+    }
+}
+
+pub(super) fn validate_header(header: &str) -> Result<Header, String> {
     let (width, height) = dimensions(header)?;
     let loader = field(header, "vips-loader");
     let tiff = loader == Some("tiffload");
@@ -96,7 +106,13 @@ fn validate_header(header: &str) -> Result<Header, String> {
 }
 
 pub(crate) fn load(job: &Arc<Job>) -> Result<(), String> {
-    let complete = job.root.join(&job.cache_key);
+    // OME-TIFF members are verified and keyed before any cache reuse.
+    let ome = if job.format == Some(crate::frames::Format::OmeTiff) {
+        Some(super::ome::prepare(job)?)
+    } else {
+        None
+    };
+    let complete = job.root.join(job.cache_key());
     let manifest = {
         let _access = job.cache_access.lock().unwrap();
         if job.cancel.load(Ordering::Relaxed) {
@@ -160,9 +176,11 @@ pub(crate) fn load(job: &Arc<Job>) -> Result<(), String> {
             return housekeeping(job);
         }
     }
-    let frame_channels = if let Some(selection) = job.selection {
+    let frame_channels = if let (Some(selection), false) = (job.selection, job.lazy_planes()) {
         let acquisition = job.acquisition.as_ref().ok_or("Missing acquisition")?;
-        let extracted = if job.projection == crate::frames::Projection::None {
+        let extracted = if let Some(source) = &ome {
+            super::ome::project(job, source, |fraction| job.report_progress(fraction))?
+        } else if job.projection == crate::frames::Projection::None {
             acquisition.extract_display(&job.input, selection, job.background, &job.cancel)?
         } else {
             acquisition.extract_projection(
@@ -173,10 +191,16 @@ pub(crate) fn load(job: &Arc<Job>) -> Result<(), String> {
                 |fraction| job.report_progress(fraction),
             )?
         };
-        let geometry = acquisition.geometry(selection)?;
+        let (width, height) = if ome.is_some() {
+            let state = job.state.lock().unwrap();
+            (state.width, state.height)
+        } else {
+            let geometry = acquisition.geometry(selection)?;
+            (geometry.width, geometry.height)
+        };
         job.update(|state| {
-            state.width = geometry.width;
-            state.height = geometry.height;
+            state.width = width;
+            state.height = height;
             state.dimensions = Some(extracted.dimensions);
             state.channels = extracted.channels.clone();
             state.sample_bits = extracted.sample_bits;
@@ -189,55 +213,6 @@ pub(crate) fn load(job: &Arc<Job>) -> Result<(), String> {
     } else {
         None
     };
-    let header = run(job, "vipsheader", &["-a".into(), input(job, "")])?;
-    let pixels = validate_header(&header)?;
-    let (width, height) = (pixels.width, pixels.height);
-    if !pixels.tiff {
-        job.frame_memory.fetch_max(
-            decoded_workspace(
-                width,
-                height,
-                pixels.bands.into(),
-                if pixels.ushort { 2 } else { 1 },
-            )?,
-            Ordering::Relaxed,
-        );
-    }
-    let tiffinfo = if pixels.tiff {
-        #[cfg(unix)]
-        let info = run(job, "tiffinfo", &[job.input.clone().into_os_string()]).ok();
-        #[cfg(windows)]
-        let info = Some(worker_call(
-            job,
-            &crate::vips_worker::Request::TiffChannelInfo {
-                input: job
-                    .input
-                    .to_str()
-                    .ok_or("Image decoder path is not UTF-8")?
-                    .into(),
-            },
-            None,
-        )?);
-        info
-    } else {
-        None
-    };
-    let mut layout = if let Some((channels, rgb)) = frame_channels {
-        channels::Layout {
-            planes: (0..channels.len() as u32)
-                .map(|band| Plane { page: 0, band })
-                .collect(),
-            channels,
-            channel_mode: true,
-            rgb,
-        }
-    } else {
-        channels::discover(
-            &header,
-            &|options| run(job, "vipsheader", &["-a".into(), input(job, options)]),
-            tiffinfo.as_deref(),
-        )?
-    };
     let headers = RefCell::new(HashMap::<String, Result<String, String>>::new());
     let inspect = |options: &str| {
         headers
@@ -246,27 +221,95 @@ pub(crate) fn load(job: &Arc<Job>) -> Result<(), String> {
             .or_insert_with(|| run(job, "vipsheader", &["-a".into(), input(job, options)]))
             .clone()
     };
-    // Existing display bytes remain compatible. A legacy cache needs metadata
-    // discovery once, then gains the manifest without rereading its source pixels.
-    let legacy = complete.join("complete").is_file() && !complete.join("manifest.json").exists();
-    let levels = if layout.channel_mode || legacy {
-        native::discover(&header, &inspect, tiffinfo.as_deref())
-    } else {
-        native::discover_preview(&header, &inspect, tiffinfo.as_deref())
-    };
-    // Channel-page hyperstacks cannot reuse page-zero resolutions for other pages.
-    *job.native.lock().unwrap() =
-        if layout.channel_mode && layout.planes.iter().any(|plane| plane.page != 0) {
-            Vec::new()
+    let (header, pixels, tiffinfo, mut layout, levels, legacy) =
+        if let Some(source) = ome.as_ref().filter(|_| job.lazy_planes()) {
+            let (header, layout, levels) = super::ome::layout(job, source)?;
+            let pixels = validate_header(&header)?;
+            (header, pixels, None, layout, levels, false)
         } else {
-            levels
+            let header = run(job, "vipsheader", &["-a".into(), input(job, "")])?;
+            let pixels = validate_header(&header)?;
+            let (width, height) = (pixels.width, pixels.height);
+            if !pixels.tiff {
+                job.frame_memory.fetch_max(
+                    decoded_workspace(
+                        width,
+                        height,
+                        pixels.bands.into(),
+                        if pixels.ushort { 2 } else { 1 },
+                    )?,
+                    Ordering::Relaxed,
+                );
+            }
+            let tiffinfo = if pixels.tiff {
+                #[cfg(unix)]
+                let info = run(job, "tiffinfo", &[job.input.clone().into_os_string()]).ok();
+                #[cfg(windows)]
+                let info = Some(worker_call(
+                    job,
+                    &crate::vips_worker::Request::TiffChannelInfo {
+                        input: job
+                            .input
+                            .to_str()
+                            .ok_or("Image decoder path is not UTF-8")?
+                            .into(),
+                    },
+                    None,
+                )?);
+                info
+            } else {
+                None
+            };
+            let layout = if let Some((channels, rgb)) = frame_channels {
+                channels::Layout {
+                    planes: (0..channels.len() as u32)
+                        .map(|band| Plane {
+                            member: 0,
+                            page: 0,
+                            band,
+                        })
+                        .collect(),
+                    channels,
+                    channel_mode: true,
+                    rgb,
+                }
+            } else {
+                channels::discover(
+                    &header,
+                    &|options| run(job, "vipsheader", &["-a".into(), input(job, options)]),
+                    tiffinfo.as_deref(),
+                )?
+            };
+            // Existing display bytes remain compatible. A legacy cache needs metadata
+            // discovery once, then gains the manifest without rereading its source pixels.
+            let legacy =
+                complete.join("complete").is_file() && !complete.join("manifest.json").exists();
+            let levels = if layout.channel_mode || legacy {
+                native::discover(&header, &inspect, tiffinfo.as_deref())
+            } else {
+                native::discover_preview(&header, &inspect, tiffinfo.as_deref())
+            };
+            (header, pixels, tiffinfo, layout, levels, legacy)
         };
+    let (width, height) = (pixels.width, pixels.height);
+    // Channel-page hyperstacks cannot reuse page-zero resolutions for other
+    // pages; OME-TIFF levels were discovered for each selected page.
+    *job.native.lock().unwrap() = if layout.channel_mode
+        && !job.lazy_planes()
+        && layout.planes.iter().any(|plane| plane.page != 0)
+    {
+        Vec::new()
+    } else {
+        levels
+    };
     let fallback = eight_bit_fallback(
         &mut layout,
         &pixels,
         job.native.lock().unwrap().is_empty(),
         !uses_worker(job),
     );
+    // OME-TIFF planes stay channels; their high-byte planes still apply.
+    layout.channel_mode |= job.lazy_planes();
     let sample_bits = if layout.channel_mode && pixels.ushort && !fallback {
         16
     } else {
@@ -288,10 +331,17 @@ pub(crate) fn load(job: &Arc<Job>) -> Result<(), String> {
             .filter(|n| (1..=8).contains(n))
             .unwrap_or(1);
         state.detail = noted(
-            &format!(
-                "{width} × {height} · {}-bit · first image page of {pages}. Building preview…",
-                if pixels.ushort { 16 } else { 8 }
-            ),
+            &if job.lazy_planes() {
+                format!(
+                    "{width} × {height} · {}-bit · selected OME-TIFF plane. Building preview…",
+                    if pixels.ushort { 16 } else { 8 }
+                )
+            } else {
+                format!(
+                    "{width} × {height} · {}-bit · first image page of {pages}. Building preview…",
+                    if pixels.ushort { 16 } else { 8 }
+                )
+            },
             fallback,
         );
     });
@@ -582,12 +632,11 @@ fn load_channels(job: &Arc<Job>, pixels: &Header, samples: Samples) -> Result<()
     let planes = job.planes.lock().unwrap().clone();
     let native = !job.native.lock().unwrap().is_empty();
     let dir = job.dir.lock().unwrap().clone();
-    let page = |plane: &Plane| {
-        if pixels.tiff {
-            format!("[page={},n=1,access=sequential]", plane.page)
-        } else {
-            "[access=sequential]".into()
-        }
+    // Relative to each plane's page; `plane_input` names its file and page.
+    let page = if pixels.tiff {
+        "[page=0,n=1,access=sequential]"
+    } else {
+        "[access=sequential]"
     };
     let previews_ready = (0..planes.len()).all(|index| {
         valid_preview(
@@ -598,15 +647,16 @@ fn load_channels(job: &Arc<Job>, pixels: &Header, samples: Samples) -> Result<()
         )
     });
     let raw_preview = || -> Result<bool, String> {
-        // Large single-band 16-bit strips keep the full-coverage area reducer.
-        let options = page(&planes[0]);
+        // Large single-band 16-bit strips keep the full-coverage area reducer,
+        // which reads the first page of a file.
         if !(uses_worker(job)
             && pixels.tiff
             && pixels.bands == 1
             && planes.len() == 1
+            && planes[0].page == 0
             && samples == Samples::Ushort
             && u64::from(width) * u64::from(height) >= 16 * 1024 * 1024
-            && preview_source(job, width, height, options.clone()).0 == options)
+            && preview_source(job, width, height, page.into()).0 == page)
         {
             return Ok(false);
         }
@@ -617,7 +667,7 @@ fn load_channels(job: &Arc<Job>, pixels: &Header, samples: Samples) -> Result<()
             job,
             &crate::vips_worker::Request::RawPreview {
                 input: job
-                    .input
+                    .plane_path(&planes[0])
                     .to_str()
                     .ok_or("Image decoder path is not UTF-8")?
                     .into(),
@@ -636,16 +686,21 @@ fn load_channels(job: &Arc<Job>, pixels: &Header, samples: Samples) -> Result<()
         if uses_worker(job) {
             let (options, scale): (Vec<_>, Vec<_>) = planes
                 .iter()
-                .map(|plane| preview_source(job, width, height, page(plane)))
+                .map(|plane| {
+                    let (options, scale) = preview_source(job, width, height, page.into());
+                    plane_input(job, plane, &options)
+                        .into_string()
+                        .map(|input| (input, scale))
+                        .map_err(|_| "Image decoder path is not UTF-8")
+                })
+                .collect::<Result<Vec<_>, _>>()?
+                .into_iter()
                 .unzip();
+            // Each option names its plane's file, so planes can span members.
             worker_call(
                 job,
                 &crate::vips_worker::Request::ChannelPreviews {
-                    input: job
-                        .input
-                        .to_str()
-                        .ok_or("Image decoder path is not UTF-8")?
-                        .into(),
+                    input: String::new(),
                     options,
                     scale,
                     planes: planes.clone(),
@@ -661,14 +716,14 @@ fn load_channels(job: &Arc<Job>, pixels: &Header, samples: Samples) -> Result<()
             for (index, plane) in planes.iter().enumerate() {
                 let channel = dir.join("channels").join(index.to_string());
                 fs::create_dir_all(&channel).map_err(|e| e.to_string())?;
-                let (options, scale) = preview_source(job, width, height, page(plane));
+                let (options, scale) = preview_source(job, width, height, page.into());
                 let resized = job.work.join(format!("preview-{index}.v"));
                 run(
                     job,
                     "vips",
                     &[
                         "resize".into(),
-                        input(job, &options),
+                        plane_input(job, plane, &options),
                         resized.clone().into_os_string(),
                         scale.to_string().into(),
                     ],
@@ -686,6 +741,7 @@ fn load_channels(job: &Arc<Job>, pixels: &Header, samples: Samples) -> Result<()
             }
         }
     }
+    job.verify_sources()?;
     job.update(|state| {
         state.preview_ready = true;
         state.tiles_ready = false;
@@ -705,7 +761,7 @@ fn load_channels(job: &Arc<Job>, pixels: &Header, samples: Samples) -> Result<()
         for (index, plane) in planes.iter().enumerate() {
             let start = preview_end + (0.99 - preview_end) * index as f64 / planes.len() as f64;
             let end = preview_end + (0.99 - preview_end) * (index + 1) as f64 / planes.len() as f64;
-            let source = input(job, &page(plane));
+            let source = plane_input(job, plane, page);
             let destination = dir.join("channels").join(index.to_string()).join("tiles");
             if uses_worker(job) {
                 worker_call(

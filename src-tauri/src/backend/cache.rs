@@ -149,7 +149,7 @@ pub(super) fn write_manifest(job: &Job, dir: &Path) -> Result<(), String> {
     let state = job.state.lock().unwrap().clone();
     let manifest = CacheManifest {
         version: 1,
-        source_key: job.cache_key.clone(),
+        source_key: job.cache_key(),
         tools: tool_identity(),
         width: state.width,
         height: state.height,
@@ -180,8 +180,28 @@ pub(super) fn cached_manifest(job: &Job, dir: &Path) -> Option<CacheManifest> {
         return None;
     }
     let manifest: CacheManifest = serde_json::from_reader(file.take(65536)).ok()?;
+    // OME-TIFF planes must be exactly the selection's pages, with native levels
+    // relative to each page; other images read pages of their only file.
+    let lazy = job.lazy_planes();
+    let planes_valid = if lazy {
+        manifest.planes == *job.planes.lock().unwrap()
+            && manifest
+                .native
+                .iter()
+                .skip(1)
+                .all(|level| level.options.contains(",subifd="))
+    } else {
+        manifest
+            .planes
+            .iter()
+            .all(|plane| plane.member == 0 && plane.page < 256)
+            && !(manifest.channel_mode
+                && manifest.planes.iter().any(|plane| plane.page != 0)
+                && !manifest.native.is_empty())
+    };
     if manifest.version != 1
-        || manifest.source_key != job.cache_key
+        || !planes_valid
+        || manifest.source_key != job.cache_key()
         || manifest.tools != tool_identity()
         || manifest.projection != job.projection
         || !(1..=i32::MAX as u32).contains(&manifest.width)
@@ -199,7 +219,7 @@ pub(super) fn cached_manifest(job: &Job, dir: &Path) -> Option<CacheManifest> {
         || manifest
             .planes
             .iter()
-            .any(|plane| plane.page >= 256 || plane.band >= channels::MAX_CHANNELS)
+            .any(|plane| plane.band >= channels::MAX_CHANNELS)
         || manifest.native.len() > 29
         || (job.selection.is_some() != manifest.dimensions.is_some())
         || manifest.dimensions.as_ref().is_some_and(|dimensions| {
@@ -215,9 +235,6 @@ pub(super) fn cached_manifest(job: &Job, dir: &Path) -> Option<CacheManifest> {
         })
         || (!manifest.native.is_empty()
             && !native::valid_cached_levels(&manifest.native, manifest.width, manifest.height))
-        || (manifest.channel_mode
-            && manifest.planes.iter().any(|plane| plane.page != 0)
-            && !manifest.native.is_empty())
     {
         return None;
     }
@@ -310,6 +327,8 @@ pub(super) fn housekeeping(job: &Job) -> Result<(), String> {
 /// Publish `names` from `dir` as the job's complete cache. With `required`, a
 /// missing name fails promotion instead of being skipped.
 pub(super) fn promote(job: &Job, dir: &Path, names: &[&str], required: bool) -> Result<(), String> {
+    // Never publish bytes generated from an OME-TIFF member that changed.
+    job.verify_sources()?;
     let _access = job.cache_access.lock().unwrap();
     if job.cancel.load(Ordering::Relaxed) {
         return Err("Loading cancelled.".into());
@@ -330,7 +349,7 @@ pub(super) fn promote(job: &Job, dir: &Path, names: &[&str], required: bool) -> 
             }
         }
     }
-    let complete = job.root.join(&job.cache_key);
+    let complete = job.root.join(job.cache_key());
     if complete.exists() {
         fs::remove_dir_all(&complete).map_err(|e| e.to_string())?;
     }

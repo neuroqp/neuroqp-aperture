@@ -40,7 +40,8 @@ so `tauri-driver` can never reach a driver on the user's desktop. The wrapper th
 exports `APERTURE_DRIVER_URL`; native scripts use only that driver and refuse to
 run without it or with a different `--driver-url`. Documented ports are spaced so
 pairs never overlap: 4444 (smoke, Settings, update checks, color benchmark), 4446
-(navigation, ND2, CZI, memory, projection, 16-bit) and 4448 (loading benchmark).
+(navigation, ND2, CZI, OME-TIFF, memory, projection, 16-bit) and 4448 (loading
+benchmark).
 `XDG_CONFIG_HOME`, `XDG_CACHE_HOME`, `XDG_DATA_HOME`, `XDG_STATE_HOME` and `TMPDIR`
 point into a temporary root, or into `--keep DIR` to keep caches and logs. Aperture's instance, image-presence and save
 locks live under `XDG_CACHE_HOME`, so a test instance never coordinates with an
@@ -1292,3 +1293,30 @@ frame cap and scientific export remain unsupported. See [CZI support](docs/CZI.m
 
 Ignored evidence is under `artifacts/czi/`; public fixtures, provenance and the
 reference script remain in ignored `test-data/czi/`.
+
+# OME-TIFF browsing (Phase 2b, October 2026)
+
+OME-TIFF planes are read in place from member files; see
+[OME-TIFF support](docs/OME-TIFF.md). Rust tests with generated OME-TIFFs cover
+8/16-bit C/Z/T planes, plain `.tif` names, multi-file and `BinaryOnly` sets
+with companions or an OME-TIFF metadata file, RGB16 over Z/T with a skipped
+series, unstored planes, power-of-two SubIFD reuse per page and factor-3
+fallback, a changed secondary member after caching, read-only rejection, exact
+projection maxima, projection admission and cancellation.
+
+`scripts/native-ome.py` passed headless on port 4446 with the GPU and the CPU
+renderer: real GTK chooser opens of an OME-TIFF and a `.companion.ome`, exact
+`.u16`/PNG previews and tiles across Position/Z/Time navigation, channel names,
+multi-file sets, the unstored-plane message with recovery, exact Z/Time/both
+maxima, the disabled-projection reason for a 268 MB frame, the skipped-series
+note, read-only UI and backend, unchanged sources and normal Close. Public
+samples from `downloads.openmicroscopy.org/images/OME-TIFF/2016-06/`
+(`tubhiswt-3D`, `companion`, `binaryonly`) matched independent libvips page
+reads; `multi-channel-4D-series` (int8) is refused with an explicit message.
+The smoke, ND2, CZI, 16-bit and projection native checks also passed.
+WebKitWebDriver intermittently reset connections in this environment, also
+with the previous binary; the ND2, CZI and projection scripts now retry reads
+and scripts once, visibly, and one CZI run was repeated after a reset during a
+key action. A single plane above 256 MiB and multi-GB SubIFD files were not
+measured. Evidence is under `artifacts/ome/`; fixtures and public samples stay
+in ignored `test-data/ome/`.

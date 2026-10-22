@@ -14,7 +14,9 @@ import hashlib
 import json
 import os
 from pathlib import Path
+import sys
 import time
+from http.client import RemoteDisconnected
 from urllib.request import Request, urlopen
 
 import compositor
@@ -56,12 +58,21 @@ def main():
     route = None
     original_limit = None
 
-    def request(method, path, body=None):
+    def request(method, path, body=None, retry=True):
         req = Request(args.driver_url + path, method=method,
                       data=None if body is None else json.dumps(body).encode(),
                       headers={'Content-Type': 'application/json'})
-        with urlopen(req, timeout=max(30, args.timeout)) as response:
-            value = json.load(response).get('value')
+        try:
+            with urlopen(req, timeout=max(30, args.timeout)) as response:
+                value = json.load(response).get('value')
+        except (ConnectionError, RemoteDisconnected) as error:
+            # WebKitWebDriver occasionally resets a connection. Retry reads and
+            # scripts once, visibly; never repeat input actions.
+            if not retry or not (method == 'GET' or '/execute/' in path):
+                raise
+            print(f'Driver connection reset, retrying {method} {path}: {error!r}', file=sys.stderr)
+            time.sleep(1)
+            return request(method, path, body, False)
         if isinstance(value, dict) and value.get('error') and 'message' in value:
             raise RuntimeError(value)
         return value

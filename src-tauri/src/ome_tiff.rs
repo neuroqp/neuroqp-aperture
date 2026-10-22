@@ -63,7 +63,6 @@ pub(crate) struct Series {
     pub channels: Vec<Channel>,
     pub rgb: bool,
     pub sample_bits: u8,
-    pub significant_bits: Option<u8>,
     pub calibration: Calibration,
     /// Indexed `c + C·(z + Z·t)` over logical channels (one for RGB).
     pub planes: Vec<Option<PlaneRef>>,
@@ -135,14 +134,24 @@ pub(crate) fn open(path: &Path, budget: &Arc<Budget>) -> Result<(Dataset, Reserv
     drop(read);
     origin.xml_in_opened = false;
     origin.expected_uuid = uuid;
-    let (_read, text) = read_file(&confined(&origin.directory, &name)?, budget)?;
+    // The full metadata is a companion XML file or another OME-TIFF's description.
+    let metadata = confined(&origin.directory, &name)?;
+    let (_read, text) = match Tiff::open(&metadata)? {
+        Some(tiff) => {
+            let (offset, len) = tiff
+                .description()?
+                .ok_or_else(|| error(format!("{name} has no OME-XML description.")))?;
+            read_text(len, budget, |bytes| tiff.read(offset, bytes))?
+        }
+        None => read_file(&metadata, budget)?,
+    };
     match from_xml(&text, budget, &mut origin)? {
         Metadata::Dataset(dataset, reservation) => Ok((dataset, reservation)),
         Metadata::BinaryOnly(..) => unreachable!("BinaryOnly requires XML in the opened TIFF"),
     }
 }
 
-fn is_companion(path: &Path) -> bool {
+pub(crate) fn is_companion(path: &Path) -> bool {
     path.file_name()
         .and_then(|name| name.to_str())
         .is_some_and(|name| name.to_ascii_lowercase().ends_with(".companion.ome"))
@@ -525,10 +534,6 @@ fn describe<'a, 'd>(
         channels,
         rgb,
         sample_bits,
-        significant_bits: pixels
-            .attribute("SignificantBits")
-            .and_then(|bits| bits.trim().parse::<u8>().ok())
-            .filter(|bits| (1..=sample_bits).contains(bits)),
         calibration: Calibration {
             pixel_width_um: physical(pixels, "PhysicalSizeX", "µm", micrometers),
             pixel_height_um: physical(pixels, "PhysicalSizeY", "µm", micrometers),
@@ -1523,6 +1528,44 @@ mod tests {
             open(&companion, &budget(&dir)).map(|(d, _)| d),
             "BinaryOnly must be inside",
         );
+        // Bio-Formats also points BinaryOnly members at the OME-TIFF holding
+        // the full metadata in its description.
+        let full = dir.join("full.ome.tif");
+        let reference = |file: &str, uuid: &str| {
+            format!(r#"<TiffData PlaneCount="1"><UUID FileName="{file}">{uuid}</UUID></TiffData>"#)
+        };
+        let both = ome(
+            "urn:uuid:full",
+            &image(
+                "A",
+                "XYZCT",
+                "uint8",
+                [1, 2, 1],
+                "",
+                &[
+                    reference("full.ome.tif", "urn:uuid:full"),
+                    reference("data.ome.tif", "urn:uuid:data")
+                        .replace("<TiffData ", r#"<TiffData FirstZ="1" "#),
+                ]
+                .concat(),
+            ),
+        );
+        write_tiff(&full, false, true, 1, Some(&both));
+        write_tiff(
+            &data,
+            true,
+            true,
+            1,
+            Some(&binary("full.ome.tif", "urn:uuid:full")),
+        );
+        let (dataset, _) = open(&data, &budget(&dir)).unwrap();
+        assert_eq!(page(&dataset.series[0], 0, 1, 0), Some((1, 0)));
+        assert_eq!(dataset.members[0], full.canonicalize().unwrap());
+        write_tiff(&full, false, true, 1, None);
+        expect_error(
+            open(&data, &budget(&dir)).map(|(d, _)| d),
+            "has no OME-XML description",
+        );
     }
 
     #[test]
@@ -1853,7 +1896,6 @@ mod tests {
         assert_eq!(series.channels[0].color, "#ff0000");
         assert_eq!(series.channels[0].domain, [0, 255]);
         assert_eq!(series.sample_bits, 8);
-        assert_eq!(series.significant_bits, None);
         close(series.calibration.pixel_width_um, 0.5);
         close(series.calibration.pixel_height_um, 2.0);
         close(series.calibration.z_step_um, 3.0);
@@ -1919,13 +1961,11 @@ mod tests {
             );
             opened(&dir, 1, &xml).unwrap().series.remove(0)
         };
+        // Display domains follow the sample width, as for other 16-bit images.
         let series = wide("12");
-        assert_eq!(
-            (series.sample_bits, series.significant_bits),
-            (16, Some(12))
-        );
+        assert_eq!(series.sample_bits, 16);
+        assert_eq!(series.channels[0].domain, [0, 65535]);
         assert_eq!(series.channels[0].color, "#ffffff");
-        assert_eq!(wide("20").significant_bits, None);
         for kind in ["int16", "float", "double", "bit"] {
             let xml = ome(
                 "urn:uuid:a",

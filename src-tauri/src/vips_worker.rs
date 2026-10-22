@@ -960,7 +960,11 @@ mod tests {
                 input: source.to_str().unwrap().into(),
                 options: vec!["[page=0,n=1,access=sequential]".into()],
                 scale: vec![1.0],
-                planes: vec![Plane { page: 0, band: 0 }],
+                planes: vec![Plane {
+                    member: 0,
+                    page: 0,
+                    band: 0,
+                }],
                 samples: Samples::Ushort,
                 directory: channel_directory.to_str().unwrap().into(),
             })

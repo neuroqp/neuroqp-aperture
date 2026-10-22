@@ -21,8 +21,12 @@ pub fn domain(sample_bits: u8) -> [u16; 2] {
     [0, if sample_bits == 16 { u16::MAX } else { 255 }]
 }
 
-#[derive(Clone, Debug, Serialize, Deserialize)]
+/// One display channel: a band of a TIFF page in a source file. Member 0 is
+/// the opened image; OME-TIFF members are numbered as in their dataset.
+#[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
 pub struct Plane {
+    #[serde(default)]
+    pub member: u32,
     pub page: u32,
     pub band: u32,
 }
@@ -69,7 +73,8 @@ pub fn discover(
         return Err("TIFF grayscale/multiband alpha layouts are not supported. Alpha cannot be treated as an image channel.".into());
     }
     let description = field(header, "image-description").unwrap_or("");
-    // OME needs scene and TiffData/UUID mapping, not a guess from page order.
+    // OME-TIFFs are detected before this and use their TiffData mapping. Other
+    // OME-XML, such as one behind a DOCTYPE, must not be guessed from page order.
     if tiff && header.contains("<OME") {
         return Err("OME-TIFF channel/dimension mapping is not supported. Export an ImageJ hyperstack or an interleaved multiband TIFF.".into());
     }
@@ -135,7 +140,11 @@ pub fn discover(
                         );
                     }
                 }
-                planes.push(Plane { page, band: 0 });
+                planes.push(Plane {
+                    member: 0,
+                    page,
+                    band: 0,
+                });
             }
         }
         count > 1 || wide
@@ -163,7 +172,13 @@ pub fn discover(
                 "At most {MAX_CHANNELS} image channels are supported."
             ));
         }
-        planes = (0..count).map(|band| Plane { page: 0, band }).collect();
+        planes = (0..count)
+            .map(|band| Plane {
+                member: 0,
+                page: 0,
+                band,
+            })
+            .collect();
     }
     let sample_bits = if channel_mode && field(header, "format") == Some("ushort") {
         16
