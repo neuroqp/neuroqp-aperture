@@ -212,7 +212,7 @@ def copy_check(args):
     args.report.write_text(json.dumps(result, indent=2) + "\n")
 
 
-def collect(source_sha, checksums, output, reports):
+def collect(source_sha, checksums, output, reports, accept_unverified=False):
     if output.exists():
         raise ValueError("Evidence output must be fresh")
     rows = [json.loads(path.read_text()) for path in reports]
@@ -223,11 +223,15 @@ def collect(source_sha, checksums, output, reports):
     for row in rows:
         if row.get("source_sha") != source_sha or row.get("checksums_sha256") != digest:
             raise ValueError("Report source/checksums differ from candidate")
+        if accept_unverified and row.get("status") == "unverified" and "steps" not in row and row.get("forced_kill") is False:
+            continue  # Publication checks its reason, evidence and exact package asset.
         if row.get("status") != "pass" or row.get("forced_kill") is not False:
             raise ValueError("Every native smoke report must pass without forced termination")
         steps = {step["name"]: step for step in row["steps"]}
         if any(steps.get(name, {}).get("status") != "pass" for name in ("launch", "render", "clean-exit")):
             raise ValueError("Passing native launch/render/clean-exit required")
+    if not any(row.get("status") == "pass" for row in rows):
+        raise ValueError("At least one native smoke report must pass")
     output.write_text(json.dumps(dict(schema=1, operation="smoke", source_sha=source_sha,
                                      checksums_sha256=digest, reports=rows), indent=2) + "\n")
 
@@ -261,9 +265,10 @@ def main():
     child.add_argument("checksums", type=Path)
     child.add_argument("output", type=Path)
     child.add_argument("reports", type=Path, nargs="+")
+    child.add_argument("--accept-unverified", action="store_true", help="Allow unrun targets reported unverified")
     args = parser.parse_args()
     if args.command == "collect":
-        collect(args.source_sha, args.checksums, args.output, args.reports)
+        collect(args.source_sha, args.checksums, args.output, args.reports, args.accept_unverified)
         return 0
     if args.command == "idle-guard":
         return idle_guard(args)

@@ -18,6 +18,10 @@ REPO = "neuroqp/neuroqp-aperture"
 TRUST_GATE = ".github/workflows/trusted-inputs.yml"
 ENVIRONMENTS = {"windows11-setup", "windows11-portable", "debian12", "ubuntu24-wayland"}
 FUNCTIONAL_ENVIRONMENTS = {"windows11", "debian12", "ubuntu24-wayland"}
+LABELS = {"windows11-setup": "Windows 11 Setup", "windows11-portable": "Windows 11 portable",
+          "debian12": "Debian 12", "ubuntu24-wayland": "Ubuntu 24 native Wayland"}
+# Only an unrun smoke may be unverified. Application failures always block publication.
+UNVERIFIED_REASONS = {"os-unavailable", "automation-failure"}
 
 
 def read(path):
@@ -40,11 +44,12 @@ def hex_value(value, length=64):
 
 
 def source_identity(source_sha):
+    """Identify the working-directory checkout, which may differ from the checkout holding these helpers."""
     hex_value(source_sha, 40)
     actual = subprocess.check_output(["git", "-c", f"safe.directory={Path.cwd()}", "rev-parse", "HEAD"], text=True).strip()
     if actual != source_sha:
         raise ValueError("Checkout differs from requested source")
-    return {"schema": 1, "source_sha": source_sha, "version": current_version(), "lockfiles": lockfile_hashes(Path.cwd())}
+    return {"schema": 1, "source_sha": source_sha, "version": current_version(Path.cwd()), "lockfiles": lockfile_hashes(Path.cwd())}
 
 
 def gh(*args):
@@ -117,7 +122,18 @@ def automated(platform, executable, info_path, output, source_sha):
                    "binary_sha256": digest(executable), "native_dependencies_sha256": native_identity(info["native_dependencies"])})
 
 
-def acceptance(report, identity, smoke=False):
+def unverified_target(row, accepted):
+    """Check a final smoke target that did not run, never as a pass or with step results."""
+    if not accepted:
+        raise ValueError("Unverified native targets require explicitly accepted OS compatibility risk")
+    if row.get("forced_kill") is not False or "steps" in row or row.get("reason") not in UNVERIFIED_REASONS:
+        raise ValueError("Unverified target must be an unrun smoke without step results or forced termination")
+    if any(not isinstance(row.get(key), str) or not row[key].strip() or "\n" in row[key] for key in ("detail", "evidence", "follow_up")):
+        raise ValueError("Unverified target requires single-line detail, evidence and follow-up")
+    hex_value(row.get("evidence_sha256"))
+
+
+def acceptance(report, identity, smoke=False, accept_unverified=False):
     if report.get("schema") != 1 or report.get("source_sha") != identity["source_sha"] or report.get("operation") != ("smoke" if smoke else "validate"):
         raise ValueError("Native evidence source/operation differs")
     if smoke and report.get("checksums_sha256") != identity["checksums_sha256"]:
@@ -133,8 +149,6 @@ def acceptance(report, identity, smoke=False):
             raise ValueError("Native report belongs to a different source commit")
         if smoke and row.get("checksums_sha256") != identity["checksums_sha256"]:
             raise ValueError("Native report package checksums differ")
-        if row.get("status") != "pass" or row.get("forced_kill") is not False:
-            raise ValueError("Native check failed or required forced termination")
         platform = "windows" if row["environment"].startswith("windows") else "linux"
         key = "asset_sha256" if smoke else "binary_sha256"
         if smoke:
@@ -144,6 +158,11 @@ def acceptance(report, identity, smoke=False):
             expected = identity["platforms"][platform]["binary_sha256"]
         if row.get(key) != expected:
             raise ValueError("Native evidence executable/package differs")
+        if smoke and row.get("status") == "unverified":
+            unverified_target(row, accept_unverified)
+            continue
+        if row.get("status") != "pass" or row.get("forced_kill") is not False:
+            raise ValueError("Native check failed or required forced termination")
         steps = row.get("steps", [])
         if [step.get("name") for step in steps] != ["launch", "render", "clean-exit"] or any(step.get("status") != "pass" for step in steps):
             raise ValueError("Native launch/render/clean-exit evidence is incomplete")
@@ -160,7 +179,24 @@ def acceptance(report, identity, smoke=False):
             raise ValueError("Native evidence lacks visible rendered pixels")
         if closed.get("exit_code") != 0 or closed.get("forced_cleanup", False) is not False or (platform == "linux" and closed.get("app_exited") is not True):
             raise ValueError("Native evidence requires normal application close with exit 0")
+    if not any(row["status"] == "pass" for row in rows):
+        raise ValueError("At least one native target must pass")
     return report
+
+
+def release_notes(version, root, report, report_sha256):
+    """Changelog notes, plus each unverified target as a known limitation of this publication."""
+    body = notes(version, root)
+    unverified = [row for row in report["reports"] if row["status"] == "unverified"]
+    if not unverified:
+        return body
+    passed = ", ".join(LABELS[row["environment"]] for row in report["reports"] if row["status"] == "pass")
+    lines = ["", "### Known limitations", "",
+             f"Published with accepted OS compatibility risk. The final package smoke passed on {passed}. "
+             "It did not run on these targets, which are unverified rather than passing:", ""]
+    lines += [f"- {LABELS[row['environment']]} (`{row['environment']}`, {row['reason']}): {row['detail']} Follow-up: {row['follow_up']}"
+              for row in sorted(unverified, key=lambda row: row["environment"])]
+    return body + "\n".join(lines) + f"\n\nFinal smoke evidence SHA-256: `{report_sha256}`\n"
 
 
 def validation(directory, source_sha, build_run_id, native_report, runtime_archive, output):
@@ -271,16 +307,18 @@ def existing_assets(existing, expected):
     return set(expected) - set(names)
 
 
-def publish(directory, package_path, smoke_path):
+def publish(directory, package_path, smoke_path, accept_unverified=False):
+    """Publish from the exact source checkout in the working directory, under these helpers' rules."""
     package = read(package_path)
     source_identity(package["source_sha"])
     if package.get("operation") != "package":
         raise ValueError("Package manifest required")
-    acceptance(read(smoke_path), package, smoke=True)
+    smoke = acceptance(read(smoke_path), package, smoke=True, accept_unverified=accept_unverified)
     if {p.name: digest(p) for p in directory.iterdir() if p.is_file()} != package["assets"]:
         raise ValueError("Publish directory differs from tested package")
     verify(directory, package["version"], package["source_sha"], root=Path.cwd())
-    verify_signatures(directory)
+    verify_signatures(directory, root=Path.cwd())
+    body = release_notes(package["version"], Path.cwd(), smoke, digest(smoke_path))
     tag = "v" + package["version"]
     ref = json.loads(gh("api", f"repos/{REPO}/git/ref/tags/{tag}"))["object"]
     while ref["type"] == "tag":
@@ -297,7 +335,7 @@ def publish(directory, package_path, smoke_path):
     else:
         release = json.loads(gh("api", f"repos/{REPO}/releases", "--method", "POST",
                                 "-f", "tag_name=" + tag, "-f", "name=Aperture " + package["version"],
-                                "-f", "body=" + notes(package["version"]), "-F", "draft=true"))
+                                "-f", "body=" + body, "-F", "draft=true"))
     missing = existing_assets(release["assets"], package["assets"])
     if not release["draft"] and not release["prerelease"] and not missing:
         print(release["html_url"])
@@ -313,7 +351,9 @@ def publish(directory, package_path, smoke_path):
     after = json.loads(gh("api", f"repos/{REPO}/releases/{release['id']}"))
     if existing_assets(after["assets"], package["assets"]):
         raise ValueError("Release upload incomplete; rerun publish with these same bytes")
-    gh("release", "edit", tag, "--repo", REPO, "--draft=false", "--prerelease=false", "--latest", "--title", "Aperture " + package["version"])
+    # Replace any earlier draft body so the notes match this publication's evidence.
+    gh("release", "edit", tag, "--repo", REPO, "--draft=false", "--prerelease=false", "--latest",
+       "--title", "Aperture " + package["version"], "--notes", body)
     final = json.loads(gh("api", f"repos/{REPO}/releases/{release['id']}"))
     if final["draft"] or final["prerelease"] or existing_assets(final["assets"], package["assets"]):
         raise ValueError("Published release identity differs")
@@ -361,6 +401,8 @@ def main():
     p.add_argument("directory", type=Path)
     p.add_argument("package", type=Path)
     p.add_argument("smoke", type=Path)
+    p.add_argument("--accept-unverified", action="store_true",
+                   help="Accept OS compatibility risk for final smoke targets reported unverified")
     args = parser.parse_args()
     if args.command == "build":
         automated(args.platform, args.executable, args.buildinfo, args.output, args.source_sha)
@@ -376,7 +418,7 @@ def main():
     elif args.command == "package":
         package_manifest(args.directory, args.validation, args.output)
     else:
-        publish(args.directory, args.package, args.smoke)
+        publish(args.directory, args.package, args.smoke, args.accept_unverified)
 
 
 if __name__ == "__main__":

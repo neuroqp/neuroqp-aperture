@@ -76,20 +76,23 @@ driver. Do not repair automation or build new tooling during the release.
 
 Never record an unverified target as a pass, relabel another environment's report
 or weaken integrity, signature or source checks. Release notes name each
-unverified target as a known limitation. The current `collect` and `publish.yml`
-path accepts only four passing reports, and the validation seal requires three
-passing development reports. Releasing with an unverified target therefore needs
-a reviewed workflow change that records it truthfully. Until that change exists,
-a release with an unverified target cannot publish.
+unverified target as a known limitation. `publish.yml` accepts an unverified
+final smoke target only with its explicit `accept_unverified_targets` input, which
+records the accepted risk. Each such row names the exact package asset, a reason
+(`os-unavailable` or `automation-failure`), diagnostics evidence and a follow-up,
+and carries no step results. At least one target must pass. The validation seal
+still requires three passing development reports.
 
 ## Publish
 
 Run `publish.yml` with the successful package run, exact source commit and the
-four passing native smoke reports. It rechecks source/package/report identities
-and updater signatures, then publishes those bytes with their notices, checksums,
-source composition and release notes. Existing matching assets may be reused;
-different bytes under an existing public asset identity fail. Never move a
-published tag or replace a public asset.
+four native smoke reports. It applies the dispatched `main` revision's publication
+rules to a checkout of the exact source commit. It rechecks source/package/report
+identities and updater signatures, then publishes those bytes with their notices,
+checksums, source composition and release notes, including any unverified
+targets. Existing matching assets may be reused; different bytes under an
+existing public asset identity fail. Never move a published tag or replace a
+public asset.
 
 Verify the public download routes, version, checksum files and production updater
 feed. Retain the compact validation/package/smoke reports in a durable PR or

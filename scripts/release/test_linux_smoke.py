@@ -86,6 +86,32 @@ class LinuxSmokeInvocationTests(unittest.TestCase):
             with self.assertRaisesRegex(ValueError, "forced termination"):
                 runner.collect("a" * 40, checksums, root / "invalid.json", rows)
 
+    def test_collect_keeps_unrun_targets_unverified_only_when_accepted(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            checksums = root / "SHA256SUMS"
+            checksums.write_text("candidate hashes")
+            identity = dict(source_sha="a" * 40, checksums_sha256=runner.sha(checksums))
+            unrun = dict(identity, status="unverified", forced_kill=False, reason="os-unavailable")
+            passing = dict(identity, status="pass", forced_kill=False,
+                           steps=[dict(name=name, status="pass") for name in ("launch", "render", "clean-exit")])
+            rows = []
+            for environment in ("windows11-setup", "windows11-portable", "debian12", "ubuntu24-wayland"):
+                rows.append(root / (environment + ".json"))
+                rows[-1].write_text(json.dumps(dict(passing if environment == "debian12" else unrun, environment=environment)))
+            with self.assertRaisesRegex(ValueError, "must pass"):
+                runner.collect("a" * 40, checksums, root / "refused.json", rows)
+            output = root / "smoke.json"
+            runner.collect("a" * 40, checksums, output, rows, accept_unverified=True)
+            self.assertEqual([row["status"] for row in json.loads(output.read_text())["reports"]],
+                             ["unverified", "unverified", "pass", "unverified"])
+            debian = rows[2].read_text()
+            for changed in (dict(unrun, steps=passing["steps"]), dict(unrun, forced_kill=True), unrun):
+                rows[2].write_text(json.dumps(dict(changed, environment="debian12")))
+                with self.assertRaisesRegex(ValueError, "pass"):
+                    runner.collect("a" * 40, checksums, root / "invalid.json", rows, accept_unverified=True)
+            rows[2].write_text(debian)
+
     def test_run_retains_desktop_environment_without_expiring_receipts(self):
         with tempfile.TemporaryDirectory() as directory:
             root = Path(directory)

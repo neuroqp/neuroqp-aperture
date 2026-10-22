@@ -15,8 +15,10 @@ Ubuntu 24 system `python3` is suitable, and Windows CI selects Python 3.12.
 - `package.yml` consumes the validated inputs and wraps/signs the final packages.
   Standard pinned packaging tools may be installed here. Application executables
   and runtime dependencies must match validation exactly.
-- `publish.yml` consumes package output and four passing native smoke reports,
-  verifies their identities and publishes without rebuilding.
+- `publish.yml` consumes package output and four native smoke reports, verifies
+  their identities and publishes without rebuilding. It runs the release helpers
+  from its own `main` revision with the exact `source_sha` checkout as the working
+  directory, so current publication rules apply to older validated sources.
 - Each starts with `trusted-inputs.yml`, which uses only the dispatched workflow
   revision to require the full `source_sha` in `main`. It also verifies any
   consumed `build_run_id`, `validation_run_id` or `package_run_id` as a successful
@@ -75,6 +77,16 @@ git push origin "v$version"
 gh workflow run publish.yml --ref main -f source_sha="$source_sha" \
   -f package_run_id="$package_run_id" -F smoke_json=@smoke.json
 ```
+
+A smoke that could not run because its OS or automation was unavailable is
+recorded, not passed. Write that target's report by hand with the same `schema`,
+`operation: "smoke"`, `source_sha`, `checksums_sha256`, `environment` and exact
+`asset_sha256` as a real report, plus `status: "unverified"`, `forced_kill: false`,
+`reason` (`os-unavailable` or `automation-failure`), single-line `detail`,
+`evidence`, `follow_up` and the evidence file's `evidence_sha256`. Omit `steps`.
+Add `--accept-unverified` to `collect` and `-f accept_unverified_targets=true` to the
+publish dispatch. Publication requires at least one passing target and appends the
+unverified targets and the smoke report SHA-256 to the release notes.
 
 `validated-inputs` contains `validation.json`, native results, tested runtime
 archives and source files. `release-files` and `package-manifest` contain the
