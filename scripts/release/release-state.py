@@ -89,15 +89,23 @@ def trusted_run(run_id, workflow):
 
 
 def trusted_inputs(source_sha, run_workflow, run_id):
-    """Verify dispatched inputs with the calling workflow revision before any source checkout."""
-    outputs = {"revision": main_commit(source_sha), "run_id": ""}
+    """Verify dispatched inputs with the calling workflow revision before any source checkout.
+
+    Raises unless every input holds; returns nothing, so the gate publishes only gate_outputs.
+    """
+    main_commit(source_sha)
     # The caller states whether a referenced run is required; an empty run ID never makes it optional.
     if run_workflow:
         trusted_run(run_id, run_workflow)
-        outputs["run_id"] = run_id
     elif run_id:
         raise ValueError("Workflow run ID supplied without its expected workflow")
-    return outputs
+
+
+def gate_outputs(source_sha, run_id):
+    """Format the gate's only step outputs: the verified commit and the run ID or empty."""
+    if not re.fullmatch(r"(?:[1-9][0-9]*)?", run_id):
+        raise ValueError("Expected a workflow run ID or none")
+    return f"revision={hex_value(source_sha, 40)}\nrun_id={run_id}\n"
 
 
 def automated(platform, executable, info_path, output, source_sha):
@@ -357,8 +365,8 @@ def main():
     if args.command == "build":
         automated(args.platform, args.executable, args.buildinfo, args.output, args.source_sha)
     elif args.command == "trusted-source":
-        outputs = trusted_inputs(args.source_sha, args.run_workflow, args.run_id)
-        print("".join(f"{key}={value}\n" for key, value in outputs.items()), end="")
+        trusted_inputs(args.source_sha, args.run_workflow, args.run_id)
+        print(gate_outputs(args.source_sha, args.run_id), end="")
     elif args.command == "validate":
         validation(args.directory, args.source_sha, args.build_run_id, args.native_report, args.runtime, args.output)
     elif args.command == "extract":

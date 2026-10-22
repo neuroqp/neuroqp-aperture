@@ -234,6 +234,22 @@ class ReleaseStateTests(unittest.TestCase):
             trusted_preflight(SOURCE, "", "", [main_ref(), comparison("diverged")])
         self.assertEqual(trusted_preflight.output, "")
 
+    def test_trusted_source_command_emits_only_fixed_public_fields(self):
+        # Stdout becomes GITHUB_OUTPUT: it carries the verified arguments, never a verifier result.
+        extra = {"revision": "d" * 40, "run_id": "99", "token": "sentinel"}
+        for run_workflow, run_id in (("", ""), ("validate.yml", "17")):
+            argv = ["release-state.py", "trusted-source", SOURCE, "--run-workflow", run_workflow, "--run-id", run_id]
+            output = io.StringIO()
+            with self.subTest(run_workflow=run_workflow), patch("sys.argv", argv), \
+                    patch.object(state, "trusted_inputs", return_value=extra) as verify, contextlib.redirect_stdout(output):
+                state.main()
+            verify.assert_called_once_with(SOURCE, run_workflow, run_id)
+            self.assertEqual(output.getvalue(), f"revision={SOURCE}\nrun_id={run_id}\n")
+        for source_sha, run_id in ((SOURCE, "017"), (SOURCE, "17\ntoken=x"), (SOURCE, " 17"), ("main", ""),
+                                   (SOURCE + "\ntoken=x", ""), (None, "")):
+            with self.subTest(source_sha=source_sha, run_id=run_id), self.assertRaises(ValueError):
+                state.gate_outputs(source_sha, run_id)
+
     def test_trusted_preflight_verifies_referenced_run_from_calling_revision(self):
         accepted = [main_ref(), comparison(), json.dumps(run_row()), main_ref(), comparison(base=WORKFLOW)]
         self.assertEqual(trusted_preflight(SOURCE, "validate.yml", "17", accepted), f"revision={SOURCE}\nrun_id=17\n")
