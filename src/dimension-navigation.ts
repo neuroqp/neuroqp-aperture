@@ -21,7 +21,6 @@ export const dimensionPanelMarkup = `
     </div>
     <p id="dimension-projection-status" class="dimension-scope" role="status" hidden></p>
     <p id="dimension-calibration" class="dimension-scope" hidden></p>
-    <p id="dimension-display" class="dimension-scope" hidden>16-bit display ranges adapt to each frame and channel. Brightness across frames is not quantitative.</p>
     <p id="dimension-scope" class="dimension-scope" hidden>Browsing only. Annotation editing and saving are unavailable.</p>
   </section>`;
 
@@ -93,20 +92,30 @@ export function bindDimensionNavigation(
     get("dimension-projections").hidden = !spatial;
     maxZ.checked = projectsAxis(planeNavigation.projection, "z");
     maxTime.checked = projectsAxis(planeNavigation.projection, "time");
+    // A position whose frame is too large to project offers no projections.
+    const unavailable =
+      planeNavigation.projection === "none"
+        ? image?.projectionUnavailable
+        : null;
     maxZ.disabled =
-      !spatial || (!maxZ.checked && (image?.dimensions?.z ?? 1) <= 1);
+      !spatial ||
+      Boolean(unavailable) ||
+      (!maxZ.checked && (image?.dimensions?.z ?? 1) <= 1);
     maxTime.disabled =
-      !spatial || (!maxTime.checked && (image?.dimensions?.time ?? 1) <= 1);
+      !spatial ||
+      Boolean(unavailable) ||
+      (!maxTime.checked && (image?.dimensions?.time ?? 1) <= 1);
     const projectionStatus = get("dimension-projection-status");
-    projectionStatus.hidden = planeNavigation.projection === "none";
-    projectionStatus.textContent =
-      maxZ.checked && maxTime.checked
+    projectionStatus.hidden =
+      planeNavigation.projection === "none" && !unavailable;
+    projectionStatus.textContent = unavailable
+      ? unavailable
+      : maxZ.checked && maxTime.checked
         ? "Maximum intensity across Z and Time"
         : maxZ.checked
           ? "Maximum intensity across Z"
           : "Maximum intensity across Time";
     get("dimension-scope").hidden = !image?.readOnly;
-    get("dimension-display").hidden = !image?.displayRanges?.length;
     const calibration = image?.calibration;
     const calibrationText = [
       calibration?.pixelWidthUm

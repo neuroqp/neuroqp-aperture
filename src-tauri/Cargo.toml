@@ -24,8 +24,10 @@ openreadout-core = "=0.3.0"
 openreadout-nd2 = "=0.3.0"
 openreadout-czi = "=0.3.0"
 openreadout-jpegxr = "=0.3.0"
+roxmltree = "=0.21.1"
 rayon = "1"
 flate2 = "=1.1.10"
+png = "=0.18.1"
 
 [target.'cfg(windows)'.dependencies]
 windows-sys = { version = "0.61", features = ["Win32_Foundation", "Win32_Storage_FileSystem"] }

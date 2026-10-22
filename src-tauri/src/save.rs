@@ -286,6 +286,31 @@ mod tests {
     use std::{collections::HashMap, sync::Mutex};
 
     #[test]
+    fn ome_tiff_annotation_commands_are_rejected_as_browsing_only() {
+        use crate::backend::ome::tests::{image, ome, page, root, write_tiff};
+        let root = root("read-only");
+        let source = root.join("cells.ome.tif");
+        let xml = ome(
+            "urn:uuid:a",
+            &image("A", "uint8", (4, 3), [1, 1, 1], "", "<TiffData/>"),
+        );
+        write_tiff(
+            &source,
+            &[page((4, 3), 1, 8, |x, _, _| x as u16)],
+            Some(&xml),
+        );
+        let original = std::fs::read(&source).unwrap();
+        let backend = Backend::new(root.join("cache")).unwrap();
+        let state = backend.open(&source).unwrap();
+        assert!(state.read_only);
+        let error = annotation_job(&backend, &state.id).err().unwrap();
+        assert!(error.contains("browsing-only"), "{error}");
+        backend.shutdown();
+        assert_eq!(std::fs::read(&source).unwrap(), original);
+        std::fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
     fn overwrite_warnings_follow_live_windows_and_disk_changes() {
         let root = std::env::temp_dir().join(format!(
             "aperture-save-warning-{}-{}",

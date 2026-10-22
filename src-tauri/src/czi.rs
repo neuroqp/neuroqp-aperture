@@ -1024,7 +1024,7 @@ mod tests {
             assert_eq!(calibration.z_step_um, Some(1.5));
             assert_eq!(calibration.time_increment_seconds, Some(2.5));
         }
-        // The shared-budget cache normalizes each 16-bit channel for display only.
+        // The shared-budget cache keeps original 16-bit samples for display.
         let budget = Budget::new(temp.join("budget")).unwrap();
         let mut cache = Cache::new(Format::Czi, source.clone(), Arc::clone(&budget)).unwrap();
         let output = temp.join("display.tif");
@@ -1042,7 +1042,10 @@ mod tests {
             result.display_ranges,
             [[first, first + 1], [second, second + 1]]
         );
-        assert_eq!(strip(&output), [0, 0, 255, 255]);
+        assert_eq!(
+            strip(&output),
+            samples(&[first, second, first + 1, second + 1])
+        );
         assert!(cache.geometry(selection).unwrap().decode_peak_bytes > 2 * 8 + 8 * MIB);
         assert_eq!(std::fs::read(&source).unwrap(), bytes);
         drop(cache);
@@ -1087,7 +1090,11 @@ mod tests {
             )
             .unwrap();
             let (frame, metadata) = raw(&source, Selection::default()).unwrap();
-            assert!(frame.rgb);
+            assert!(frame.rgb && metadata.rgb);
+            // Bgr48 becomes three lossless 16-bit display channels.
+            let bits = if pixel_type == 4 { 16 } else { 8 };
+            assert_eq!(metadata.sample_bits, bits);
+            assert_eq!(metadata.channels[0].domain, crate::channels::domain(bits));
             assert_eq!(frame.pixels, expected);
             assert_eq!(
                 metadata
@@ -1144,7 +1151,10 @@ mod tests {
             result.display_ranges,
             [[first, first + 1], [second, second + 1]]
         );
-        assert_eq!(strip(&output), [0, 0, 255, 255]);
+        assert_eq!(
+            strip(&output),
+            samples(&[first, second, first + 1, second + 1])
+        );
         assert_eq!(
             (result.dimensions.position, result.dimensions.time_index),
             (1, 1)

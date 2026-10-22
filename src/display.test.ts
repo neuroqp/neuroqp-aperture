@@ -111,3 +111,90 @@ test("0–100 uses occupied histogram endpoints without clipping rare intensitie
   }
   assert.deepEqual(percentileRange(Array(256).fill(0), 0), defaults);
 });
+
+test("16-bit histograms keep every source value and presets stay in the domain", async () => {
+  const { percentileRange } = await import("./display.ts");
+  const wide: [number, number] = [0, 65535];
+  const plane = Uint16Array.of(1000, 1001, 1001, 40000);
+  const [bins] = channelHistograms([plane], 2, 2, undefined, 16);
+  assert.equal(bins.length, 65536);
+  assert.equal(bins[1000], 1);
+  assert.equal(bins[1001], 2);
+  assert.equal(bins[40000], 1);
+  assert.deepEqual(percentileRange(bins, 0, wide), {
+    minimum: 1000,
+    maximum: 40000,
+  });
+  assert.deepEqual(percentileRange(bins, 30, wide), {
+    minimum: 1001,
+    maximum: 1001 + 1,
+  });
+  const constant = new Uint32Array(65536);
+  constant[300] = 9;
+  assert.deepEqual(percentileRange(constant, 0, wide), {
+    minimum: 300,
+    maximum: 301,
+  });
+  constant.fill(0)[65535] = 9;
+  assert.deepEqual(percentileRange(constant, 0, wide), {
+    minimum: 65534,
+    maximum: 65535,
+  });
+  assert.deepEqual(percentileRange(new Uint32Array(65536), 1, wide), {
+    minimum: 0,
+    maximum: 65535,
+  });
+});
+
+test("display ranges clamp to the channel domain", () => {
+  const wide: [number, number] = [0, 65535];
+  const range = { minimum: 1000, maximum: 1001 };
+  assert.equal(adjustDisplay(range, "maximum", 70000, wide).maximum, 65535);
+  assert.equal(adjustDisplay(range, "minimum", 5000, wide).minimum, 1000);
+  assert.equal(adjustDisplay(range, "maximum", 2, wide).maximum, 1001);
+  assert.equal(adjustDisplay(range, "minimum", -9, wide).minimum, 0);
+  assert.equal(adjustDisplay(defaults, "maximum", 999).maximum, 255);
+});
+
+test("the histogram axis keeps dim 16-bit data readable and 8-bit unchanged", async () => {
+  const { displayBins, histogramAxis } = await import("./display.ts");
+  const bins = new Uint32Array(65536);
+  bins[10] = 5;
+  bins[3000] = 7;
+  assert.deepEqual(histogramAxis(bins, [0, 65535], 3000), [0, 4095]);
+  assert.deepEqual(histogramAxis(bins, [0, 65535], 9000), [0, 16383]);
+  assert.deepEqual(histogramAxis(bins, [0, 65535], 65535), [0, 65535]);
+  assert.deepEqual(histogramAxis(null, [0, 65535], 1), [0, 255]);
+  const narrow = new Uint32Array(256);
+  narrow[3] = 1;
+  assert.deepEqual(histogramAxis(narrow, [0, 255], 4), [0, 255]);
+  const shown = displayBins(bins, [0, 4095]);
+  assert.equal(shown.length, 256);
+  assert.equal(shown[0], 5);
+  assert.equal(shown[Math.floor(3000 / 16)], 7);
+  assert.equal(
+    shown.reduce((sum, count) => sum + count, 0),
+    12,
+  );
+  assert.deepEqual([...displayBins(narrow, [0, 255])], [...narrow]);
+});
+
+test("16-bit histograms count every preview pixel, including sparse bright spots", async () => {
+  const { percentileRange } = await import("./display.ts");
+  const plane = new Uint16Array(1024 * 1024).fill(100);
+  // Off the 4-pixel stride used for 8-bit sampling.
+  plane[5 * 1024 + 7] = 50000;
+  const [bins] = channelHistograms([plane], 1024, 1024, undefined, 16);
+  assert.equal(bins[50000], 1);
+  assert.equal(bins[100], 1024 * 1024 - 1);
+  assert.deepEqual(percentileRange(bins, 0, [0, 65535]), {
+    minimum: 100,
+    maximum: 50000,
+  });
+  const [sampled] = channelHistograms([plane], 1024, 1024);
+  assert.equal(sampled.length, 256);
+  assert.equal(
+    sampled.reduce((sum, count) => sum + count, 0),
+    256 * 256,
+  );
+});

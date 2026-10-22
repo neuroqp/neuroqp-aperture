@@ -1,6 +1,6 @@
 //! Selected acquisition frames, decoded in Rust into a lossless cache TIFF.
 
-use crate::channels::{Channel, MAX_CHANNELS};
+use crate::channels::{domain, Channel, MAX_CHANNELS};
 use openreadout_core::{Dataset, ImageInfo, PixelType, PlaneIndex};
 use serde::{Deserialize, Serialize};
 use std::fs::OpenOptions;
@@ -15,11 +15,14 @@ pub(crate) const MAX_ENCODED_FRAME_BYTES: u64 = MAX_FRAME_BYTES + 1024 * 1024;
 pub(crate) const CANCEL_CHUNK_SAMPLES: usize = 65536;
 const MAX_NAME_CHARS: usize = 256;
 
-/// Microscopy containers browsed one selected frame at a time.
+/// Microscopy containers browsed one selected frame at a time. ND2 and CZI
+/// decode whole frames in Rust; OME-TIFF planes are TIFF pages read by libvips.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
 pub enum Format {
     Nd2,
     Czi,
+    /// Detected by content, never by extension alone.
+    OmeTiff,
 }
 
 impl Format {
@@ -33,8 +36,9 @@ impl Format {
     /// Display-cache salt; change it when decoding or normalization changes.
     pub fn cache_version(self) -> &'static str {
         match self {
-            Self::Nd2 => "nd2-openreadout-0.3.0-v2-normalized",
-            Self::Czi => "czi-openreadout-0.3.0-v1",
+            Self::Nd2 => "nd2-openreadout-0.3.0-v3-16bit",
+            Self::Czi => "czi-openreadout-0.3.0-v2-16bit",
+            Self::OmeTiff => "ome-tiff-v1",
         }
     }
 }
@@ -44,6 +48,7 @@ impl std::fmt::Display for Format {
         formatter.write_str(match self {
             Self::Nd2 => "ND2",
             Self::Czi => "CZI",
+            Self::OmeTiff => "OME-TIFF",
         })
     }
 }
@@ -107,6 +112,8 @@ pub struct ExtractedFrame {
     pub calibration: Option<Calibration>,
     #[serde(default)]
     pub display_ranges: Vec<[u16; 2]>,
+    pub sample_bits: u8,
+    pub rgb: bool,
 }
 
 #[derive(Clone, Debug, Deserialize, Serialize)]
@@ -173,6 +180,7 @@ pub(crate) fn description(
         return Err(format!("{format} mixed RGB acquisition channels and non-grayscale/non-RGB sample layouts are unsupported. Export individual channels as TIFF."));
     }
     let bands = if rgb { 3 } else { image.size_c };
+    let sample_bits = 8 * image.pixel_type.bytes_per_sample() as u8;
     frame_bytes(
         format,
         image.size_x,
@@ -190,6 +198,7 @@ pub(crate) fn description(
         .map(|(name, color)| Channel {
             name: name.into(),
             color: color.into(),
+            domain: domain(sample_bits),
         })
         .collect()
     } else {
@@ -214,6 +223,7 @@ pub(crate) fn description(
                             colors[c as usize % colors.len()]
                         })
                         .into(),
+                    domain: domain(sample_bits),
                 }
             })
             .collect()
@@ -250,6 +260,8 @@ pub(crate) fn description(
             time_increment_seconds: image.time_increment_s,
         }),
         display_ranges: Vec::new(),
+        sample_bits,
+        rgb,
     };
     if serde_json::to_vec(&result)
         .map_err(|e| format!("{format}: {e}"))?
@@ -340,28 +352,21 @@ pub(crate) fn write_frame(
     frame: &RawFrame,
     description: ExtractedFrame,
     output: &Path,
-    display: bool,
     cancel: Option<&AtomicBool>,
 ) -> Result<ExtractedFrame, String> {
     check_cancel(cancel)?;
     let mut result = description;
-    // Normalize only the disposable display cache; original frame samples stay intact.
-    let normalized;
-    let (pixels, output_bits) = if display && frame.bytes == 2 {
-        let (samples, ranges) =
-            display_samples(&frame.pixels, frame.bands as usize, frame.rgb, cancel)?;
-        normalized = samples;
-        result.display_ranges = ranges;
-        (normalized.as_slice(), 8)
-    } else {
-        (frame.pixels.as_slice(), (frame.bytes * 8) as u16)
-    };
-    check_cancel(cancel)?;
+    // The display cache keeps original samples; 16-bit ranges are image metadata.
+    if frame.bytes == 2 {
+        result.display_ranges =
+            sample_ranges(&frame.pixels, frame.bands as usize, frame.rgb, cancel)?;
+    }
+    let pixels = frame.pixels.as_slice();
     let header = tiff_header(
         frame.width,
         frame.height,
         frame.bands as u16,
-        output_bits,
+        (frame.bytes * 8) as u16,
         frame.rgb,
         pixels.len() as u32,
     );
@@ -375,7 +380,7 @@ pub(crate) fn write_frame(
         .map_err(error)?;
     let written = (|| {
         file.write_all(&header).map_err(error)?;
-        for block in pixels.chunks(CANCEL_CHUNK_SAMPLES * usize::from(output_bits / 8)) {
+        for block in pixels.chunks(CANCEL_CHUNK_SAMPLES * frame.bytes) {
             check_cancel(cancel)?;
             file.write_all(block).map_err(error)?;
         }
@@ -389,12 +394,13 @@ pub(crate) fn write_frame(
     Ok(result)
 }
 
-fn display_samples(
+/// Sampled minimum and maximum per channel; RGB shares one range.
+fn sample_ranges(
     pixels: &[u8],
     bands: usize,
     rgb: bool,
     cancel: Option<&AtomicBool>,
-) -> Result<(Vec<u8>, Vec<[u16; 2]>), String> {
+) -> Result<Vec<[u16; 2]>, String> {
     let mut ranges = vec![[u16::MAX, 0]; if rgb { 1 } else { bands }];
     for (index, sample) in pixels.as_chunks::<2>().0.iter().enumerate() {
         if index % CANCEL_CHUNK_SAMPLES == 0 {
@@ -405,28 +411,11 @@ fn display_samples(
         range[0] = range[0].min(value);
         range[1] = range[1].max(value);
     }
-    let mut display = Vec::with_capacity(pixels.len() / 2);
-    for (index, sample) in pixels.as_chunks::<2>().0.iter().enumerate() {
-        if index % CANCEL_CHUNK_SAMPLES == 0 {
-            check_cancel(cancel)?;
-        }
-        let value = u32::from(u16::from_le_bytes(*sample));
-        let [minimum, maximum] = ranges[if rgb { 0 } else { index % bands }].map(u32::from);
-        display.push(if maximum == minimum {
-            if value == 0 {
-                0
-            } else {
-                255
-            }
-        } else {
-            (((value - minimum) * 255 + (maximum - minimum) / 2) / (maximum - minimum)) as u8
-        });
-    }
     check_cancel(cancel)?;
     if rgb {
         ranges = vec![ranges[0]; bands];
     }
-    Ok((display, ranges))
+    Ok(ranges)
 }
 
 fn interleave(output: &mut [u8], plane: &[u8], bands: usize, channel: usize, bytes: usize) {
@@ -561,29 +550,35 @@ pub(crate) mod tests {
             .iter()
             .flat_map(|sample| sample.to_le_bytes())
             .collect();
-        let (display, ranges) = display_samples(&low_signal, 2, false, None).unwrap();
-        assert_eq!(display, [0, 0, 128, 128, 255, 255]);
-        assert_eq!(ranges, [[83, 97], [1000, 2000]]);
-        let (rgb, ranges) = display_samples(
-            &[10u16, 20, 30]
-                .iter()
-                .flat_map(|v| v.to_le_bytes())
-                .collect::<Vec<_>>(),
-            3,
-            true,
-            None,
-        )
-        .unwrap();
-        assert_eq!(rgb, [0, 128, 255]);
-        assert_eq!(ranges, [[10, 30]; 3]);
         assert_eq!(
-            display_samples(&[0, 0, 0, 0], 1, false, None).unwrap().0,
-            [0, 0]
+            sample_ranges(&low_signal, 2, false, None).unwrap(),
+            [[83, 97], [1000, 2000]]
         );
-        assert_eq!(
-            display_samples(&[83, 0, 83, 0], 1, false, None).unwrap().0,
-            [255, 255]
-        );
+        let rgb = [10u16, 20, 30]
+            .iter()
+            .flat_map(|v| v.to_le_bytes())
+            .collect::<Vec<_>>();
+        assert_eq!(sample_ranges(&rgb, 3, true, None).unwrap(), [[10, 30]; 3]);
+        // The display TIFF stores the original 16-bit samples unchanged.
+        let temp = temporary();
+        let output = temp.join("display.tif");
+        let mut image = ImageInfo::new(0, 3, 1, PixelType::Uint16);
+        image.size_c = 2;
+        let described = description(Format::Nd2, &[image], Selection::default()).unwrap();
+        assert_eq!((described.sample_bits, described.rgb), (16, false));
+        assert!(described.channels.iter().all(|c| c.domain == [0, 65535]));
+        let frame = RawFrame {
+            width: 3,
+            height: 1,
+            bands: 2,
+            bytes: 2,
+            rgb: false,
+            pixels: low_signal.clone(),
+        };
+        let written = write_frame(&frame, described, &output, None).unwrap();
+        assert_eq!(written.display_ranges, [[83, 97], [1000, 2000]]);
+        assert_eq!(strip(&output), low_signal);
+        std::fs::remove_dir_all(temp).unwrap();
         let mut pixels = vec![0; 8];
         interleave(&mut pixels, &[0x34, 0x12, 0xcd, 0xab], 2, 0, 2);
         interleave(&mut pixels, &[0xff, 0x00, 0x00, 0x80], 2, 1, 2);

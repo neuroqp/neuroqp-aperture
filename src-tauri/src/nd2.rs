@@ -599,7 +599,7 @@ pub(crate) mod tests {
         let frame = frames::decode_frame(Format::Nd2, dataset.as_mut(), &images, selection)?;
         drop(dataset);
         let description = frames::description(Format::Nd2, &images, selection)?;
-        frames::write_frame(&frame, description, output, false, None)
+        frames::write_frame(&frame, description, output, None)
     }
 
     pub(crate) fn synthetic(bits: u32, rgb: bool) -> Vec<u8> {

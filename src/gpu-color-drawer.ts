@@ -1,6 +1,6 @@
 import type OpenSeadragon from "openseadragon";
 import type { ColorSettings } from "./color-settings";
-import { colorLookup, planeType, type Planes } from "./color-renderer.ts";
+import { colorRoutes, planeType, type Planes } from "./color-renderer.ts";
 
 const vertex = `#version 300 es
 in vec2 position;
@@ -11,41 +11,45 @@ void main() {
   gl_Position = vec4((transform * vec3(position, 1.0)).xy, 0.0, 1.0);
   uv = mix(textureBounds.xy, textureBounds.zw, position);
 }`;
-const fragment = `#version 300 es
+// Channel tiles hold integer source samples; ordinary RGB(A)8 tiles stay normalized.
+const fragment = (integer: boolean) => {
+  const sampler = integer ? "usampler2DArray" : "sampler2DArray";
+  return `#version 300 es
 precision highp float;
-precision highp sampler2DArray;
+precision highp int;
+precision highp ${sampler};
 precision highp sampler2D;
-uniform sampler2DArray samples;
-uniform sampler2D lookup;
+uniform ${sampler} samples;
+uniform sampler2D routes;
+uniform int routeCount;
 uniform int channels;
-uniform bool rgb;
 uniform float opacity;
 in vec2 uv;
 out vec4 pixel;
+// Route i: texel 2i holds channel, minimum, maximum and brightness; 2i+1 its color.
+vec4 route(int texel) {
+  int width = textureSize(routes, 0).x;
+  return texelFetch(routes, ivec2(texel % width, texel / width), 0);
+}
 void main() {
   ivec2 size = textureSize(samples, 0).xy;
   ivec2 coordinate = clamp(ivec2(uv * vec2(size)), ivec2(0), size - 1);
+  ${integer ? "" : "vec4 original = texelFetch(samples, ivec3(coordinate, 0), 0);"}
   vec3 sum = vec3(0.0);
-  float alpha = opacity;
-  if (rgb) {
-    vec4 original = texelFetch(samples, ivec3(coordinate, 0), 0);
-    for (int channel = 0; channel < 3; channel++) {
-      if (channel >= channels) break;
-      int value = int(round(original[channel] * 255.0));
-      sum += texelFetch(lookup, ivec2(value, channel), 0).rgb;
-    }
-    alpha *= original.a;
-  } else {
-    for (int channel = 0; channel < channels; channel++) {
-      float sampleValue = texelFetch(samples, ivec3(coordinate, channel), 0).r;
-      int value = int(round(sampleValue * 255.0));
-      sum += texelFetch(lookup, ivec2(value, channel), 0).rgb;
-    }
+  for (int i = 0; i < routeCount; i++) {
+    vec4 range = route(2 * i);
+    int channel = int(range.x);
+    if (channel >= channels) continue;
+    float value = ${integer ? "float(texelFetch(samples, ivec3(coordinate, channel), 0).r)" : "round(original[channel] * 255.0)"};
+    sum += clamp((value - range.y) / (range.z - range.y), 0.0, 1.0) * range.w *
+      route(2 * i + 1).rgb;
   }
+  float alpha = opacity${integer ? "" : " * original.a"};
   // Match the 8-bit CPU composite.
   vec3 color = roundEven(clamp(sum, 0.0, 1.0) * 255.0) / 255.0;
   pixel = vec4(color * alpha, alpha);
 }`;
+};
 
 type TextureTile = {
   texture: WebGLTexture;
@@ -61,24 +65,34 @@ type DrawPacket = {
   bounds: number[];
   opacity: number;
 };
+type Program = {
+  program: WebGLProgram;
+  uniforms: Record<string, WebGLUniformLocation | null>;
+};
 
-/** Float lookups preserve each route's clamp and clamp only the final sum. */
-export function gpuColorLookup(settings: ColorSettings, count = 32) {
-  const result = new Float32Array(256 * count * 4);
-  colorLookup(count, settings).forEach((table, channel) => {
-    for (let value = 0; value < 256; value++) {
-      const at = (channel * 256 + value) * 4;
-      for (let component = 0; component < 3; component++)
-        result[at + component] = table[value * 3 + component] / 255;
-    }
+/**
+ * Pack two RGBA32F texels per route, row-major in rows of `width` texels:
+ * (channel, minimum, maximum, brightness) then (red, green, blue, 0).
+ */
+export function routeTexture(settings: ColorSettings, width: number) {
+  const routes = colorRoutes(settings, 32);
+  const height = Math.max(1, Math.ceil((routes.length * 2) / width));
+  const data = new Float32Array(width * height * 4);
+  routes.forEach((route, index) => {
+    const { channel, minimum, maximum, brightness, color } = route;
+    data.set([channel, minimum, maximum, brightness / 100], index * 8);
+    data.set(
+      color.map((component) => component / 255),
+      index * 8 + 4,
+    );
   });
-  return result;
+  return { count: routes.length, width, height, data };
 }
 
-function program(gl: WebGL2RenderingContext) {
+function program(gl: WebGL2RenderingContext, integer: boolean) {
   const shaders = [
     [gl.VERTEX_SHADER, vertex],
-    [gl.FRAGMENT_SHADER, fragment],
+    [gl.FRAGMENT_SHADER, fragment(integer)],
   ].map(([kind, source]) => {
     const shader = gl.createShader(kind as number)!;
     gl.shaderSource(shader, source as string);
@@ -92,6 +106,8 @@ function program(gl: WebGL2RenderingContext) {
   });
   const result = gl.createProgram()!;
   for (const shader of shaders) gl.attachShader(result, shader);
+  // Both programs share the quad buffer's attribute location.
+  gl.bindAttribLocation(result, 0, "position");
   gl.linkProgram(result);
   for (const shader of shaders) gl.deleteShader(shader);
   if (!gl.getProgramParameter(result, gl.LINK_STATUS)) {
@@ -110,10 +126,11 @@ export function createGpuColorDrawer(
 ): OpenSeadragon.DrawerConstructor {
   return class GpuColorDrawer extends osd.DrawerBase {
     private gl!: WebGL2RenderingContext;
-    private shader!: WebGLProgram;
+    private programs: Program[] = [];
     private buffer!: WebGLBuffer;
-    private lookup!: WebGLTexture;
-    private uniforms!: Record<string, WebGLUniformLocation | null>;
+    private routes: WebGLTexture | null = null;
+    private routeRows = 0;
+    private routeCount = 0;
     private dirty = true;
     private revision = 0;
     private fallbackFrame = 0;
@@ -131,8 +148,8 @@ export function createGpuColorDrawer(
       if (!gl) return false;
       let supported = false;
       try {
-        const shader = program(gl);
-        gl.deleteProgram(shader);
+        for (const integer of [true, false])
+          gl.deleteProgram(program(gl, integer));
         supported = true;
       } catch (error) {
         console.warn(error);
@@ -154,38 +171,35 @@ export function createGpuColorDrawer(
         })!;
         const gl = this.gl;
         if (!gl) throw new Error("WebGL2 context is unavailable.");
-        this.shader = program(gl);
+        // programs[0] samples integer channel tiles, programs[1] RGB(A)8 tiles.
+        for (const integer of [true, false]) {
+          const shader = program(gl, integer);
+          this.programs.push({
+            program: shader,
+            uniforms: Object.fromEntries(
+              [
+                "transform",
+                "textureBounds",
+                "routeCount",
+                "channels",
+                "opacity",
+              ].map((name) => [name, gl.getUniformLocation(shader, name)]),
+            ),
+          });
+          gl.useProgram(shader);
+          gl.uniform1i(gl.getUniformLocation(shader, "samples"), 0);
+          gl.uniform1i(gl.getUniformLocation(shader, "routes"), 1);
+        }
         this.buffer = gl.createBuffer()!;
-        this.lookup = gl.createTexture()!;
-        if (!this.buffer || !this.lookup)
-          throw new Error("GPU resource allocation failed.");
-        this.uniforms = Object.fromEntries(
-          [
-            "transform",
-            "textureBounds",
-            "samples",
-            "lookup",
-            "channels",
-            "rgb",
-            "opacity",
-          ].map((name) => [name, gl.getUniformLocation(this.shader, name)]),
-        );
-        gl.useProgram(this.shader);
+        if (!this.buffer) throw new Error("GPU resource allocation failed.");
         gl.bindBuffer(gl.ARRAY_BUFFER, this.buffer);
         gl.bufferData(
           gl.ARRAY_BUFFER,
           new Float32Array([0, 0, 1, 0, 0, 1, 0, 1, 1, 0, 1, 1]),
           gl.STATIC_DRAW,
         );
-        const position = gl.getAttribLocation(this.shader, "position");
-        gl.enableVertexAttribArray(position);
-        gl.vertexAttribPointer(position, 2, gl.FLOAT, false, 0, 0);
-        gl.uniform1i(this.uniforms.samples, 0);
-        gl.uniform1i(this.uniforms.lookup, 1);
-        gl.activeTexture(gl.TEXTURE1);
-        gl.bindTexture(gl.TEXTURE_2D, this.lookup);
-        this.textureParameters(gl.TEXTURE_2D);
-        gl.texStorage2D(gl.TEXTURE_2D, 1, gl.RGBA32F, 256, 32);
+        gl.enableVertexAttribArray(0);
+        gl.vertexAttribPointer(0, 2, gl.FLOAT, false, 0, 0);
         gl.pixelStorei(gl.UNPACK_ALIGNMENT, 1);
         gl.pixelStorei(gl.UNPACK_PREMULTIPLY_ALPHA_WEBGL, false);
         gl.pixelStorei(gl.UNPACK_COLORSPACE_CONVERSION_WEBGL, gl.NONE);
@@ -240,11 +254,14 @@ export function createGpuColorDrawer(
       try {
         if (cache.type === planeType) {
           const data = cache.data as Planes;
+          const wide = data.bits === 16;
           if (
             !data.planes.length ||
             data.planes.length > 32 ||
             data.planes.some(
-              (plane) => plane.length !== data.width * data.height,
+              (plane) =>
+                plane.length !== data.width * data.height ||
+                !(plane instanceof (wide ? Uint16Array : Uint8Array)),
             )
           )
             throw new Error(
@@ -253,7 +270,7 @@ export function createGpuColorDrawer(
           gl.texStorage3D(
             gl.TEXTURE_2D_ARRAY,
             1,
-            gl.R8,
+            wide ? gl.R16UI : gl.R8UI,
             data.width,
             data.height,
             data.planes.length,
@@ -268,8 +285,8 @@ export function createGpuColorDrawer(
               data.width,
               data.height,
               1,
-              gl.RED,
-              gl.UNSIGNED_BYTE,
+              gl.RED_INTEGER,
+              wide ? gl.UNSIGNED_SHORT : gl.UNSIGNED_BYTE,
               plane,
             ),
           );
@@ -309,7 +326,7 @@ export function createGpuColorDrawer(
           texture,
           width,
           height,
-          channels: source.apertureChannelCount || 3,
+          channels: Math.min(3, source.apertureChannelCount || 3),
           rgb: true,
           alive: true,
         };
@@ -432,30 +449,30 @@ export function createGpuColorDrawer(
       gl.viewport(0, 0, this.canvas.width, this.canvas.height);
       gl.clearColor(0, 0, 0, 0);
       gl.clear(gl.COLOR_BUFFER_BIT);
-      gl.useProgram(this.shader);
       gl.activeTexture(gl.TEXTURE1);
-      gl.bindTexture(gl.TEXTURE_2D, this.lookup);
+      gl.bindTexture(gl.TEXTURE_2D, this.routes);
       if (this.dirty) {
-        gl.texSubImage2D(
-          gl.TEXTURE_2D,
-          0,
-          0,
-          0,
-          256,
-          32,
-          gl.RGBA,
-          gl.FLOAT,
-          gpuColorLookup(getSettings()),
-        );
+        try {
+          this.uploadRoutes();
+        } catch (error) {
+          this.fallback(`Could not upload GPU color routes: ${error}`);
+          return;
+        }
         this.dirty = false;
       }
       gl.activeTexture(gl.TEXTURE0);
+      let active: Program | undefined;
       for (const { data, transform, bounds, opacity } of this.packets!) {
-        gl.uniformMatrix3fv(this.uniforms.transform, false, transform);
-        gl.uniform4fv(this.uniforms.textureBounds, bounds);
-        gl.uniform1i(this.uniforms.channels, data.channels);
-        gl.uniform1i(this.uniforms.rgb, data.rgb ? 1 : 0);
-        gl.uniform1f(this.uniforms.opacity, opacity);
+        const next = this.programs[data.rgb ? 1 : 0];
+        if (next !== active) {
+          active = next;
+          gl.useProgram(active.program);
+          gl.uniform1i(active.uniforms.routeCount, this.routeCount);
+        }
+        gl.uniformMatrix3fv(active.uniforms.transform, false, transform);
+        gl.uniform4fv(active.uniforms.textureBounds, bounds);
+        gl.uniform1i(active.uniforms.channels, data.channels);
+        gl.uniform1f(active.uniforms.opacity, opacity);
         gl.bindTexture(gl.TEXTURE_2D_ARRAY, data.texture);
         gl.drawArrays(gl.TRIANGLES, 0, 6);
       }
@@ -465,6 +482,43 @@ export function createGpuColorDrawer(
           detail: { revision: this.revision, mode: "webgl2" },
         }),
       );
+    }
+
+    /** Expects TEXTURE1 active; storage grows only with the route count. */
+    private uploadRoutes() {
+      const gl = this.gl;
+      const packed = routeTexture(
+        getSettings(),
+        Math.min(1024, gl.getParameter(gl.MAX_TEXTURE_SIZE)),
+      );
+      if (!this.routes || packed.height > this.routeRows) {
+        if (this.routes) gl.deleteTexture(this.routes);
+        this.routes = gl.createTexture();
+        if (!this.routes) throw new Error("texture allocation failed");
+        gl.bindTexture(gl.TEXTURE_2D, this.routes);
+        this.textureParameters(gl.TEXTURE_2D);
+        gl.texStorage2D(
+          gl.TEXTURE_2D,
+          1,
+          gl.RGBA32F,
+          packed.width,
+          packed.height,
+        );
+        this.routeRows = packed.height;
+      }
+      gl.texSubImage2D(
+        gl.TEXTURE_2D,
+        0,
+        0,
+        0,
+        packed.width,
+        packed.height,
+        gl.RGBA,
+        gl.FLOAT,
+        packed.data,
+      );
+      this.checkUpload();
+      this.routeCount = packed.count;
     }
 
     private contextLost = (event: Event) => {
@@ -498,9 +552,9 @@ export function createGpuColorDrawer(
       this.canvas.removeEventListener("webglcontextlost", this.contextLost);
       this.destroyInternalCache();
       if (this.gl) {
-        if (this.lookup) this.gl.deleteTexture(this.lookup);
+        if (this.routes) this.gl.deleteTexture(this.routes);
         if (this.buffer) this.gl.deleteBuffer(this.buffer);
-        if (this.shader) this.gl.deleteProgram(this.shader);
+        for (const { program } of this.programs) this.gl.deleteProgram(program);
       }
       this.canvas.remove();
       super.destroy();
