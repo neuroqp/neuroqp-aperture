@@ -1530,13 +1530,18 @@ pub(crate) mod tests {
             .unwrap();
         backend.open(&source).unwrap();
         wait_ready(&backend);
-        // Leave less than the accumulator, two pages and the read chunk.
-        let available = backend.memory.status().unwrap().available_bytes;
-        let full = backend
-            .memory
-            .try_reserve(available - 1024, false)
-            .unwrap()
-            .unwrap();
+        // Optional preloading changes available memory; let it settle, then
+        // leave less than the accumulator, two pages and the read chunk.
+        let settled = std::time::Instant::now() + std::time::Duration::from_secs(60);
+        while backend.preload_status().running && std::time::Instant::now() < settled {
+            std::thread::sleep(std::time::Duration::from_millis(50));
+        }
+        let full = loop {
+            let available = backend.memory.status().unwrap().available_bytes;
+            if let Some(full) = backend.memory.try_reserve(available - 1024, false).unwrap() {
+                break full;
+            }
+        };
         let failed = select(&backend, 0, 0, Some(Projection::Z));
         assert_eq!(failed.phase, Phase::Error);
         assert!(
