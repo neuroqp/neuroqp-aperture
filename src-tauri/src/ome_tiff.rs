@@ -1983,6 +1983,15 @@ mod tests {
         );
         write_tiff(&path, false, true, 1, Some(&edge));
         assert!(detect(&path, &budget(&dir)).unwrap());
+        // A comment ending just before the limit, with the root name cut after
+        // one to four bytes, also takes the OME path.
+        for cut in 1..=4 {
+            let fill = MAX_XML_BYTES as usize - 7 - cut;
+            let text = format!("<!--{}--><OME xmlns=\"{NS}\"/>", "x".repeat(fill));
+            write_tiff(&path, false, true, 1, Some(&text));
+            assert!(detect(&path, &budget(&dir)).unwrap(), "cut {cut}");
+            assert!(open(&path, &budget(&dir)).is_err());
+        }
         // Many short prolog items are read once, not once per item.
         let items = format!("{}<OME xmlns=\"{NS}\"/>", "<?p?><!---->".repeat(1 << 20));
         write_tiff(&path, false, true, 1, Some(&items));
