@@ -1,7 +1,8 @@
 #!/usr/bin/env python3
 """Check update failure/unsaved guards in the native Linux app via tauri-driver.
 
-Start tauri-driver with isolated XDG_CACHE_HOME/XDG_CONFIG_HOME and an owned TMPDIR.
+Run inside scripts/headless-session --driver 4444, which isolates XDG_CACHE_HOME,
+XDG_CONFIG_HOME and TMPDIR.
 Only chooser/confirmation responses and update feed/download are supplied by this
 check. Pointer edits, TIFF saving and development-mode install rejection are real.
 This does not install an update or validate native dialog rendering.
@@ -14,15 +15,18 @@ import shutil
 import time
 from urllib.request import Request, urlopen
 
+import compositor
+
 ROOT = Path(__file__).resolve().parents[1]
 
 
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument('binary', type=Path)
-    parser.add_argument('--driver-url', default='http://127.0.0.1:4444')
+    parser.add_argument('--driver-url', help='defaults to the session driver; must match it')
     parser.add_argument('--output', type=Path, default=ROOT / 'artifacts/update-recovery/result.json')
     args = parser.parse_args()
+    args.driver_url = compositor.driver_url(args.driver_url)
     args.output = args.output.resolve()
     args.output.parent.mkdir(parents=True, exist_ok=True)
     source = ROOT / 'tests/fixtures/gray16-stripped.tif'
@@ -40,7 +44,7 @@ def main():
         return value
 
     session = request('POST', '/session', {'capabilities': {'alwaysMatch': {
-        'browserName': 'wry', 'tauri:options': {'application': str(args.binary.resolve())}}}})
+        'browserName': 'wry', 'tauri:options': {'application': str(compositor.application(args.binary))}}}})
     route = '/session/' + session['sessionId']
 
     def js(code):

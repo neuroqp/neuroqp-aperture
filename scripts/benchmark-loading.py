@@ -1,9 +1,9 @@
 #!/usr/bin/env python3
 """Measure first image draw in the native Tauri app, using its real renderer/IPC.
 
-Start tauri-driver with XDG_CACHE_HOME pointing inside --output's directory.
-The chooser response alone is supplied by the harness; Open still uses the real
-frontend and backend. No source pixels or annotations are changed. Cache-cold
+Run inside scripts/headless-session --driver 4448 --keep DIR, with DIR inside
+--output's directory. The chooser response alone is supplied by the harness;
+Open still uses the real frontend and backend. No source pixels or annotations are changed. Cache-cold
 means no completed app cache, not a cold operating-system filesystem cache.
 """
 
@@ -20,6 +20,8 @@ import threading
 import time
 from urllib.request import Request, urlopen
 
+import compositor
+
 
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
@@ -27,7 +29,7 @@ def main():
     parser.add_argument("images", type=Path, nargs="+")
     parser.add_argument("--output", type=Path, required=True)
     parser.add_argument("--cache-root", type=Path, required=True)
-    parser.add_argument("--driver-url", default="http://127.0.0.1:4445")
+    parser.add_argument("--driver-url", help="defaults to the session driver; must match it")
     parser.add_argument("--driver-pid", type=int, help="Linux process-tree RSS sampling through preview and pyramid completion")
     parser.add_argument("--rounds", type=int, default=3)
     parser.add_argument("--warm-only", action="store_true", help="Reuse existing app caches without clearing them")
@@ -36,6 +38,7 @@ def main():
     parser.add_argument("--timeout", type=float, default=180)
     parser.add_argument("--cancel-after-preview", type=Path, action="append", default=[])
     args = parser.parse_args()
+    args.driver_url = compositor.driver_url(args.driver_url)
     if args.warm_only and args.fresh_only:
         parser.error("--warm-only and --fresh-only are mutually exclusive")
     args.output.parent.mkdir(parents=True, exist_ok=True)
@@ -76,7 +79,7 @@ def main():
 
     sid = request("POST", "/session", {"capabilities": {"alwaysMatch": {
         "browserName": "wry",
-        "tauri:options": {"application": str(args.binary.resolve())},
+        "tauri:options": {"application": str(compositor.application(args.binary))},
     }}})["sessionId"]
     args.output.with_suffix(".session.json").write_text(json.dumps({"sessionId": sid}) + "\n")
     route = f"/session/{sid}"

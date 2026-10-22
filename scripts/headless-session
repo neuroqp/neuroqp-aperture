@@ -1,0 +1,113 @@
+#!/usr/bin/env bash
+# Run a command inside a private, invisible Sway session (the default for native
+# GUI checks). Nothing reaches the user's desktop, clipboard or input devices.
+#
+#   scripts/headless-session [--driver PORT] [--keep DIR] -- COMMAND...
+#
+# --driver PORT  also start tauri-driver on PORT (native port PORT+1)
+# --keep DIR     keep config/cache/data/state/tmp and logs in DIR
+set -euo pipefail
+
+usage() {
+	echo "usage: $0 [--driver PORT] [--keep DIR] -- COMMAND..." >&2
+	exit 2
+}
+
+driver_port='' keep=''
+while (($#)); do
+	case $1 in
+	--driver) driver_port=${2:?--driver needs a port} && shift 2 ;;
+	--keep) keep=${2:?--keep needs a directory} && shift 2 ;;
+	--) shift && break ;;
+	*) usage ;;
+	esac
+done
+(($#)) || usage
+
+here=$(cd "$(dirname "$0")" && pwd)
+# shellcheck source=scripts/session-lib.sh
+source "$here/session-lib.sh"
+child='' driver='' sway='' root=''
+
+cleanup() {
+	trap - EXIT
+	trap '' INT TERM # A second Ctrl-C must not abort the teardown.
+	[[ -n $root ]] || return 0
+	# shellcheck disable=SC2086 # Empty IDs are intentionally dropped.
+	stop_groups $child $driver
+	# Stop clients before the compositor, then everything else marked.
+	sweep_all $sway
+	# shellcheck disable=SC2086
+	stop_groups $sway
+	sweep_all
+	remove_root
+	[[ -z $keep ]] || echo "Kept test data in $data" >&2
+}
+trap cleanup EXIT
+trap 'exit 130' INT
+trap 'exit 143' TERM
+
+root=$(mktemp -d "${TMPDIR:-/tmp}/aperture-headless.XXXXXX")
+data=${keep:-$root}
+mkdir -p "$data"/{config,cache,data,state,tmp}
+data=$(cd "$data" && pwd)
+runtime=$root/runtime
+mkdir -m 0700 "$runtime"
+# Every process started in the session carries this unique marker, so cleanup
+# also finds descendants that left their process group.
+marker=APERTURE_TEST_RUN=$root
+
+# Nothing from the user's display, input or scale settings leaks in.
+clean_env=(env -u DISPLAY -u WAYLAND_DISPLAY -u WAYLAND_SOCKET -u SWAYSOCK
+	-u HYPRLAND_INSTANCE_SIGNATURE -u YDOTOOL_SOCKET -u DBUS_SESSION_BUS_ADDRESS
+	-u GDK_SCALE -u GDK_DPI_SCALE -u APERTURE_DRIVER_URL "$marker" XDG_RUNTIME_DIR="$runtime")
+
+setsid "${clean_env[@]}" WLR_BACKENDS=headless WLR_LIBINPUT_NO_DEVICES=1 WLR_RENDERER=pixman \
+	sway -c "$here/headless/sway.conf" >"$data/sway.log" 2>&1 &
+sway=$!
+
+socket='' ipc=''
+for _ in {1..100}; do
+	[[ -n $socket && -n $ipc ]] && swaymsg -s "$ipc" -t get_version >/dev/null 2>&1 && break
+	kill -0 "$sway" 2>/dev/null || break
+	sleep 0.1
+	for path in "$runtime"/wayland-*; do
+		[[ -S $path ]] && socket=${path##*/}
+	done
+	for path in "$runtime"/sway-ipc.*.sock; do
+		[[ -S $path ]] && ipc=$path
+	done
+done
+swaymsg -s "$ipc" -t get_version >/dev/null 2>&1 || {
+	cat "$data/sway.log" >&2
+	echo "Nested Sway did not start within 10 s" >&2
+	exit 1
+}
+
+path=$PATH
+command -v tauri-driver >/dev/null || path=$PATH:$HOME/.cargo/bin
+session_env=("${clean_env[@]}" PATH="$path" WAYLAND_DISPLAY="$socket" SWAYSOCK="$ipc"
+	GDK_BACKEND=wayland GTK_USE_PORTAL=0 NO_AT_BRIDGE=1 APERTURE_SESSION=headless
+	APERTURE_TEST_ROOT="$data" XDG_CONFIG_HOME="$data/config" XDG_CACHE_HOME="$data/cache"
+	XDG_DATA_HOME="$data/data" XDG_STATE_HOME="$data/state" TMPDIR="$data/tmp")
+
+if [[ -n $driver_port ]]; then
+	require_free_ports "$driver_port"
+	setsid "${session_env[@]}" dbus-run-session -- \
+		tauri-driver --port "$driver_port" --native-port "$((driver_port + 1))" \
+		>"$data/tauri-driver.log" 2>&1 &
+	driver=$!
+	wait_for_driver "$driver_port" kill -0 "$driver" || {
+		cat "$data/tauri-driver.log" >&2
+		exit 1
+	}
+	# Native scripts accept only this verified driver.
+	session_env+=(APERTURE_DRIVER_URL="http://127.0.0.1:$driver_port")
+fi
+
+setsid "${session_env[@]}" dbus-run-session -- "$@" &
+child=$!
+status=0
+wait "$child" || status=$?
+child='' # Reaped; the sweep stops anything it left behind.
+exit "$status"

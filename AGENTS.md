@@ -7,6 +7,16 @@
 - Keep real microscopy datasets, generated caches and validation artifacts out of
   Git. Never modify source test images.
 
+# Native GUI tests
+
+- Run native scripts, GUI checks and computer-use validation headless by default:
+  `scripts/headless-session [--driver PORT] -- COMMAND`. Take screenshots with
+  `grim` inside that session; never on the user's display.
+- Never send `ydotool`, `wtype`, `hyprctl` input, focus or clipboard changes to
+  the user's desktop. Drive windows through `scripts/compositor.py`.
+- Use `scripts/visible-session` only when the user asks or a problem cannot be
+  reproduced headless. See `VALIDATION.md`.
+
 # Releases
 
 - Follow `RELEASING.md`: validate, package, publish.

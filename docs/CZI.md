@@ -128,8 +128,8 @@ JPEG XR preview. It also checks that the two whole-slide fixtures are rejected.
 ```sh
 cargo test --manifest-path src-tauri/Cargo.toml --locked -- --test-threads=1
 cargo test --manifest-path src-tauri/Cargo.toml --locked public_czi -- --ignored
-# Start tauri-driver with owned XDG_CACHE_HOME and TMPDIR, then:
-python3 scripts/native-czi.py src-tauri/target/debug/aperture
+# Each native check runs in a headless session (see VALIDATION.md):
+scripts/headless-session --driver 4446 -- python3 scripts/native-czi.py src-tauri/target/debug/aperture
 ```
 
 Public fixtures, their sources, licences and reference script stay in ignored

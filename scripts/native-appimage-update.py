@@ -5,8 +5,8 @@ The prior package must be a RELEASE build with version 0.0.9, the production
 public key, requireSignedVersion=true, and a test-only endpoint matching
 http://127.0.0.1:8763/latest.json. Only this prior package permits local HTTP.
 Serve the exact production candidate and its signature; neither input is edited.
-Start tauri-driver with isolated XDG_CACHE_HOME/XDG_CONFIG_HOME, an owned TMPDIR,
-and APPIMAGE_EXTRACT_AND_RUN=1. Run this check as a regular desktop user.
+Run as a regular user inside APPIMAGE_EXTRACT_AND_RUN=1 scripts/headless-session
+--driver 4444, which isolates XDG_CACHE_HOME/XDG_CONFIG_HOME and TMPDIR.
 
 Only chooser/confirmation responses are supplied. Update IPC, signature checks,
 annotation editing/saving, replacement, failure recovery and restart are real.
@@ -26,6 +26,8 @@ import stat
 import threading
 import time
 from urllib.request import Request, urlopen
+
+import compositor
 
 ROOT = Path(__file__).resolve().parents[1]
 
@@ -73,9 +75,10 @@ def main():
     parser.add_argument('--version', required=True, help='Exact signed candidate version')
     parser.add_argument('--prior-version', default='0.0.9')
     parser.add_argument('--feed-port', type=int, default=8763)
-    parser.add_argument('--driver-url', default='http://127.0.0.1:4444')
+    parser.add_argument('--driver-url', help='defaults to the session driver; must match it')
     parser.add_argument('--output', type=Path, default=ROOT / 'artifacts/appimage-update/result.json')
     args = parser.parse_args()
+    args.driver_url = compositor.driver_url(args.driver_url)
     if os.geteuid() == 0:
         raise RuntimeError('Run as a regular user so read-only directory permissions are enforced')
     args.candidate = args.candidate.resolve()
