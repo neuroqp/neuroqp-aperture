@@ -17,6 +17,9 @@ Ubuntu 24 system `python3` is suitable, and Windows CI selects Python 3.12.
   and runtime dependencies must match validation exactly.
 - `publish.yml` consumes package output and four passing native smoke reports,
   verifies their identities and publishes without rebuilding.
+- Each starts with `trusted-source.yml`, which uses only the dispatched workflow
+  revision to require the full `source_sha` in `main`. No job checks out,
+  executes or caches the source commit before that gate passes.
 
 Inspect a run with `gh run view RUN_ID`. Download exact artifacts with
 `gh run download RUN_ID --name ARTIFACT --dir OWNED_DIRECTORY`. Use the workflow

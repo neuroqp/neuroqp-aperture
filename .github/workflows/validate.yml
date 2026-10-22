@@ -25,9 +25,14 @@ permissions:
   actions: read
 
 jobs:
+  trust:
+    uses: ./.github/workflows/trusted-source.yml
+    with:
+      source_sha: ${{ inputs.source_sha }}
+
   linux:
-    needs: source
-    if: inputs.mode == 'build'
+    needs: [trust, source]
+    if: inputs.mode == 'build' && needs.trust.outputs.revision == inputs.source_sha
     runs-on: ubuntu-24.04
     timeout-minutes: 45
     container:
@@ -41,7 +46,7 @@ jobs:
       - run: apt-get update && apt-get install -y --no-install-recommends git ca-certificates curl gstreamer1.0-plugins-good=1.22.0-5+deb12u3
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
-          ref: ${{ inputs.source_sha }}
+          ref: ${{ needs.trust.outputs.revision }}
           persist-credentials: false
       - run: bash scripts/release/prepare-linux.sh
       - uses: pnpm/action-setup@b906affcce14559ad1aafd4ab0e942779e9f58b1 # v4
@@ -103,8 +108,8 @@ jobs:
           retention-days: 90
 
   windows:
-    needs: source
-    if: inputs.mode == 'build'
+    needs: [trust, source]
+    if: inputs.mode == 'build' && needs.trust.outputs.revision == inputs.source_sha
     runs-on: windows-2022
     timeout-minutes: 45
     env:
@@ -114,7 +119,7 @@ jobs:
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
-          ref: ${{ inputs.source_sha }}
+          ref: ${{ needs.trust.outputs.revision }}
           persist-credentials: false
       - uses: ilammy/msvc-dev-cmd@0b201ec74fa43914dc39ae48a89fd1d8cb592756 # v1
         with:
@@ -193,13 +198,14 @@ jobs:
           retention-days: 90
 
   seal:
-    if: inputs.mode == 'seal' && github.ref == 'refs/heads/main'
+    needs: trust
+    if: inputs.mode == 'seal' && github.ref == 'refs/heads/main' && needs.trust.outputs.revision == inputs.source_sha
     runs-on: ubuntu-24.04
     timeout-minutes: 20
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
-          ref: ${{ inputs.source_sha }}
+          ref: ${{ needs.trust.outputs.revision }}
           persist-credentials: false
       - name: Verify successful exact-source build workflow
         env:
@@ -245,13 +251,14 @@ jobs:
           compression-level: 0
 
   source:
-    if: inputs.mode == 'build'
+    needs: trust
+    if: inputs.mode == 'build' && needs.trust.outputs.revision == inputs.source_sha
     runs-on: ubuntu-24.04
     timeout-minutes: 30
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
-          ref: ${{ inputs.source_sha }}
+          ref: ${{ needs.trust.outputs.revision }}
           persist-credentials: false
       - uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
         with:

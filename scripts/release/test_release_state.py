@@ -1,10 +1,13 @@
 #!/usr/bin/env python3
 """Critical release identity and idempotency checks."""
+import contextlib
 import copy
 import importlib.util
 import io
 import json
 from pathlib import Path
+import re
+import subprocess
 import tarfile
 import tempfile
 import unittest
@@ -13,6 +16,23 @@ from unittest.mock import patch
 spec = importlib.util.spec_from_file_location("state", Path(__file__).with_name("release-state.py"))
 state = importlib.util.module_from_spec(spec)
 spec.loader.exec_module(state)
+
+SOURCE, MAIN, WORKFLOW = "a" * 40, "b" * 40, "c" * 40
+WORKFLOWS = Path(__file__).resolve().parents[2] / ".github" / "workflows"
+
+
+def main_ref(sha=MAIN, kind="commit", ref="refs/heads/main"):
+    return json.dumps({"ref": ref, "object": {"type": kind, "sha": sha}})
+
+
+def comparison(status="ahead", base=SOURCE, merge_base=None, behind=0):
+    return json.dumps({"status": status, "behind_by": behind, "base_commit": {"sha": base},
+                       "merge_base_commit": {"sha": base if merge_base is None else merge_base}})
+
+
+def workflow_jobs(name):
+    body = (WORKFLOWS / name).read_text(encoding="utf-8").split("\njobs:\n", 1)[1]
+    return dict(re.findall(r"(?ms)^  ([\w-]+):\n(.*?)(?=^  [\w-]+:\n|\Z)", body))
 
 
 class ReleaseStateTests(unittest.TestCase):
@@ -112,6 +132,96 @@ class ReleaseStateTests(unittest.TestCase):
                     output.addfile(item)
                 with self.assertRaises(ValueError):
                     state.extract(archive, root / "out")
+
+    def test_trusted_source_accepts_main_ancestors_and_current_main(self):
+        for head, status in ((MAIN, "ahead"), (SOURCE, "identical")):
+            with patch.object(state, "gh", side_effect=[main_ref(head), comparison(status)]) as github:
+                self.assertEqual(state.main_commit(SOURCE), SOURCE)
+            # The comparison is pinned to the resolved main head, never to a ref name.
+            self.assertEqual([call.args for call in github.call_args_list],
+                             [("api", f"repos/{state.REPO}/git/ref/heads/main"),
+                              ("api", f"repos/{state.REPO}/compare/{SOURCE}...{head}")])
+
+    def test_trusted_source_rejects_unreviewed_or_redirected_commits(self):
+        cases = {
+            "diverged branch": (main_ref(), comparison("diverged", merge_base="d" * 40)),
+            "newer than main": (main_ref(), comparison("behind", merge_base=MAIN, behind=1)),
+            "reported behind main": (main_ref(), comparison(behind=1)),
+            "compare resolved another commit": (main_ref(), comparison(base="d" * 40)),
+            "different merge base": (main_ref(), comparison(merge_base="d" * 40)),
+            "missing comparison fields": (main_ref(), "{}"),
+            "main is not a commit": (main_ref(kind="tag"),),
+            "unexpected main reference": (main_ref(ref="refs/heads/main-old"),),
+            "malformed main head": (main_ref(sha="main"),),
+        }
+        for name, responses in cases.items():
+            with self.subTest(name), patch.object(state, "gh", side_effect=responses):
+                with self.assertRaises(ValueError):
+                    state.main_commit(SOURCE)
+
+    def test_trusted_source_rejects_moving_or_abbreviated_refs_without_api_calls(self):
+        for value in (None, "", "main", "HEAD", "refs/heads/main", "v0.3.0", "a" * 39, "a" * 41,
+                      "A" * 40, "a" * 39 + "g", " " + "a" * 40, "a" * 40 + "\n"):
+            with self.subTest(value=value), patch.object(state, "gh") as github:
+                with self.assertRaises(ValueError):
+                    state.main_commit(value)
+                github.assert_not_called()
+
+    def test_trusted_source_fails_closed_on_api_errors(self):
+        failures = (subprocess.CalledProcessError(1, ["gh"]), subprocess.TimeoutExpired(["gh"], 600))
+        for failure in failures:
+            for responses in ([failure], [main_ref(), failure], ["not json"], [main_ref(), "<html>"]):
+                with self.subTest(responses=responses), patch.object(state, "gh", side_effect=responses):
+                    with self.assertRaises((subprocess.SubprocessError, ValueError)):
+                        state.main_commit(SOURCE)
+
+    def test_trusted_source_command_prints_only_verified_commits(self):
+        argv = ["release-state.py", "trusted-source", SOURCE]
+        for responses, expected in (([main_ref(), comparison()], SOURCE + "\n"),
+                                    ([main_ref(), comparison("diverged")], "")):
+            output = io.StringIO()
+            with patch("sys.argv", argv), patch.object(state, "gh", side_effect=responses), contextlib.redirect_stdout(output):
+                if expected:
+                    state.main()
+                else:
+                    with self.assertRaises(ValueError):
+                        state.main()
+            self.assertEqual(output.getvalue(), expected)
+
+    def test_trusted_run_requires_workflow_revision_in_main(self):
+        row = {"repository": {"full_name": state.REPO}, "head_branch": "main", "head_sha": WORKFLOW,
+               "event": "workflow_dispatch", "path": ".github/workflows/validate.yml",
+               "status": "completed", "conclusion": "success"}
+        accepted = [json.dumps(row), main_ref(), comparison(base=WORKFLOW), main_ref(), comparison()]
+        with patch.object(state, "gh", side_effect=accepted):
+            self.assertEqual(state.trusted_run("1", "validate.yml", SOURCE), row)
+        # For example a tag named main at an unreviewed commit with a modified workflow.
+        rejected = [json.dumps(row), main_ref(), comparison("diverged", base=WORKFLOW, merge_base="d" * 40)]
+        with patch.object(state, "gh", side_effect=rejected):
+            with self.assertRaises(ValueError):
+                state.trusted_run("1", "validate.yml", SOURCE)
+
+    def test_dispatched_source_is_checked_out_only_after_main_containment(self):
+        guard = "needs.trust.outputs.revision == inputs.source_sha"
+        trusted = (WORKFLOWS / "trusted-source.yml").read_text(encoding="utf-8")
+        # The gate runs only the calling workflow revision's code and writes no cache.
+        self.assertNotRegex(trusted, r"\bref:")
+        self.assertEqual([action.split("@")[0] for action in re.findall(r"uses: (\S+)", trusted)], ["actions/checkout"])
+        self.assertIn('revision="$(python3 scripts/release/release-state.py trusted-source "$SOURCE_SHA")"', trusted)
+        for name in ("validate.yml", "package.yml", "publish.yml"):
+            jobs = workflow_jobs(name)
+            self.assertIn("uses: ./.github/workflows/trusted-source.yml", jobs["trust"])
+            guarded = {job for job, body in jobs.items() if re.search(r"^    if: .*" + re.escape(guard) + r"$", body, re.M)}
+            for job, body in jobs.items():
+                if job == "trust" or "actions/checkout@" not in body:
+                    continue
+                with self.subTest(workflow=name, job=job):
+                    needs = re.search(r"^    needs: \[?([^\]\n]*)", body, re.M)
+                    needed = {item.strip() for item in needs.group(1).split(",")} if needs else set()
+                    self.assertIn("trust", needed)
+                    self.assertTrue(job in guarded or needed & guarded)
+                    self.assertEqual(body.count("actions/checkout@"), body.count("ref: ${{ needs.trust.outputs.revision }}"))
+                    self.assertNotRegex(body, r"ref: \$\{\{ *(github\.event\.)?inputs\.")
 
 
 if __name__ == "__main__":

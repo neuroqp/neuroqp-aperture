@@ -48,6 +48,22 @@ def gh(*args):
     return subprocess.check_output(["gh", *args], text=True, timeout=600)
 
 
+def main_commit(commit):
+    """Return a full commit SHA only when the current main branch contains it."""
+    hex_value(commit, 40)
+    head = json.loads(gh("api", f"repos/{REPO}/git/ref/heads/main"))
+    if head.get("ref") != "refs/heads/main" or head.get("object", {}).get("type") != "commit":
+        raise ValueError("Unexpected main branch reference")
+    # Compare with the pinned head so tags or branches named like either side cannot redirect it.
+    main = hex_value(head["object"].get("sha"), 40)
+    comparison = json.loads(gh("api", f"repos/{REPO}/compare/{commit}...{main}"))
+    if (comparison.get("status") not in ("ahead", "identical") or comparison.get("behind_by") != 0
+            or comparison.get("base_commit", {}).get("sha") != commit
+            or comparison.get("merge_base_commit", {}).get("sha") != commit):
+        raise ValueError("Source commit must be contained in main")
+    return commit
+
+
 def trusted_run(run_id, workflow, source_sha=None):
     if not re.fullmatch(r"[1-9][0-9]*", str(run_id)):
         raise ValueError("Expected a workflow run ID")
@@ -56,10 +72,10 @@ def trusted_run(run_id, workflow, source_sha=None):
             or row.get("event") != "workflow_dispatch" or row.get("path") != ".github/workflows/" + workflow
             or row.get("status") != "completed" or row.get("conclusion") != "success"):
         raise ValueError("Successful trusted main workflow required")
+    # Tags report their name as head_branch, so also require the workflow revision in main.
+    main_commit(row.get("head_sha"))
     if source_sha:
-        comparison = json.loads(gh("api", f"repos/{REPO}/compare/{source_sha}...main"))
-        if comparison.get("status") not in ("ahead", "identical"):
-            raise ValueError("Source commit must be contained in main")
+        main_commit(source_sha)
     return row
 
 
@@ -290,6 +306,8 @@ def main():
     for name in ("executable", "buildinfo", "output"):
         p.add_argument(name, type=Path)
     p.add_argument("--source-sha", required=True)
+    p = commands.add_parser("trusted-source")
+    p.add_argument("source_sha")
     p = commands.add_parser("trusted-run")
     p.add_argument("run_id")
     p.add_argument("workflow", choices=("validate.yml", "package.yml"))
@@ -319,6 +337,8 @@ def main():
     args = parser.parse_args()
     if args.command == "build":
         automated(args.platform, args.executable, args.buildinfo, args.output, args.source_sha)
+    elif args.command == "trusted-source":
+        print(main_commit(args.source_sha))
     elif args.command == "trusted-run":
         trusted_run(args.run_id, args.workflow, args.source_sha)
     elif args.command == "validate":

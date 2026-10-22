@@ -1,0 +1,36 @@
+name: Trusted source
+
+# Runs only the calling workflow revision's code, before any job checks out,
+# executes or caches the dispatched source commit.
+on:
+  workflow_call:
+    inputs:
+      source_sha:
+        type: string
+        required: true
+    outputs:
+      revision:
+        description: Full source commit verified to be contained in main
+        value: ${{ jobs.verify.outputs.revision }}
+
+permissions:
+  contents: read
+
+jobs:
+  verify:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 5
+    outputs:
+      revision: ${{ steps.verify.outputs.revision }}
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - id: verify
+        name: Require exact source commit contained in main
+        env:
+          GH_TOKEN: ${{ github.token }}
+          SOURCE_SHA: ${{ inputs.source_sha }}
+        run: |
+          revision="$(python3 scripts/release/release-state.py trusted-source "$SOURCE_SHA")"
+          echo "revision=$revision" >> "$GITHUB_OUTPUT"

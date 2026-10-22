@@ -22,8 +22,14 @@ concurrency:
   cancel-in-progress: false
 
 jobs:
+  trust:
+    uses: ./.github/workflows/trusted-source.yml
+    with:
+      source_sha: ${{ inputs.source_sha }}
+
   publish:
-    if: github.ref == 'refs/heads/main'
+    needs: trust
+    if: github.ref == 'refs/heads/main' && needs.trust.outputs.revision == inputs.source_sha
     runs-on: ubuntu-24.04
     timeout-minutes: 25
     permissions:
@@ -32,7 +38,7 @@ jobs:
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
-          ref: ${{ inputs.source_sha }}
+          ref: ${{ needs.trust.outputs.revision }}
           persist-credentials: false
       - name: Require successful package workflow
         env:
