@@ -37,8 +37,6 @@ const MAX_MEMBERS: usize = 4096;
 /// Main-chain IFDs walked over all members.
 const MAX_IFDS: u64 = 1 << 21;
 const MAX_IFD_ENTRIES: u64 = 1 << 16;
-/// Bounded read of a member's ImageDescription for its root UUID.
-const MEMBER_PROBE_BYTES: u64 = 1024 * 1024;
 /// OME UUIDs are `urn:uuid:` plus 36 characters; longer values are rejected.
 const MAX_UUID_BYTES: usize = 256;
 /// Canonical member paths longer than this are rejected.
@@ -824,14 +822,14 @@ impl<'d> Members<'_, 'd> {
                 let tiff =
                     Tiff::open(&path)?.ok_or_else(|| error(format!("{label} is not a TIFF.")))?;
                 let index = self.files.len() as u16;
-                let root = match tiff.prefix(MEMBER_PROBE_BYTES, &self.budget)? {
+                let root = match tiff.prefix(MAX_XML_BYTES, &self.budget)? {
                     None => None,
                     Some(prefix) => match classify(&prefix.text, prefix.truncated)? {
                         Root::Ome(uuid) => uuid,
                         Root::Other => None,
                         Root::Unknown | Root::Truncated => {
                             return Err(error(format!(
-                                "the OME-XML root of {label} cannot be read within the first MiB of its description."
+                                "the OME-XML root of {label} cannot be read within its description."
                             )))
                         }
                     },
@@ -972,7 +970,9 @@ fn classify(text: &[u8], truncated: bool) -> Result<Root, String> {
         .strip_prefix(b"\xEF\xBB\xBF")
         .unwrap_or(text)
         .trim_ascii_start();
-    if body.is_empty() || body.iter().all(|b| *b == 0) {
+    // Only whitespace up to the probe limit may still precede a root; NUL
+    // padding and other text are not XML.
+    if body.is_empty() {
         return Ok(if truncated {
             Root::Truncated
         } else {
@@ -1992,6 +1992,19 @@ mod tests {
             assert!(detect(&path, &budget(&dir)).unwrap(), "cut {cut}");
             assert!(open(&path, &budget(&dir)).is_err());
         }
+        // NUL padding beyond the limit is not a prolog: the TIFF stays ordinary.
+        let padding = "\0".repeat(MAX_XML_BYTES as usize + 1024);
+        write_tiff(&path, false, true, 1, Some(&padding));
+        assert!(!detect(&path, &budget(&dir)).unwrap());
+        // A long whitespace prolog before a valid root opens, also as a member.
+        let body = image("A", "XYZCT", "uint8", [1, 1, 1], "", "<TiffData/>");
+        let spaced = format!(
+            r#"<?xml version="1.0"?>{}<OME xmlns="{NS}" UUID="urn:uuid:a">{body}</OME>"#,
+            " ".repeat(2 * 1024 * 1024)
+        );
+        write_tiff(&path, false, true, 1, Some(&spaced));
+        assert!(detect(&path, &budget(&dir)).unwrap());
+        assert!(open(&path, &budget(&dir)).is_ok());
         // Many short prolog items are read once, not once per item.
         let items = format!("{}<OME xmlns=\"{NS}\"/>", "<?p?><!---->".repeat(1 << 20));
         write_tiff(&path, false, true, 1, Some(&items));
