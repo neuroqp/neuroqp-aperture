@@ -1174,22 +1174,27 @@ impl Tiff {
         let Some((offset, len)) = self.description()? else {
             return Ok(false);
         };
-        for pattern in [&b"<OME"[..], b":OME"] {
-            let mut text = Text {
-                tiff: self,
-                at: offset,
-                end: offset + len.min(MAX_XML_BYTES),
-            };
-            // Only an element name counts, not words such as OMERO.
-            while text.skip_past(pattern)? {
-                if let [next] = text.window(1)?[..] {
-                    if next.is_ascii_whitespace() || matches!(next, b'>' | b'/') {
-                        return Ok(true);
-                    }
-                }
+        let mut text = Text {
+            tiff: self,
+            at: offset,
+            end: offset + len.min(MAX_XML_BYTES),
+        };
+        // Only an element name counts, not words such as OMERO; each window is
+        // scanned once, overlapping by four bytes for names across windows.
+        loop {
+            let window = text.window(HEADER_BYTES)?;
+            if window.windows(5).any(|w| {
+                matches!(w[0], b'<' | b':')
+                    && &w[1..4] == b"OME"
+                    && (w[4].is_ascii_whitespace() || matches!(w[4], b'>' | b'/'))
+            }) {
+                return Ok(true);
             }
+            if window.len() < HEADER_BYTES as usize {
+                return Ok(false);
+            }
+            text.at += (window.len() - 4) as u64;
         }
-        Ok(false)
     }
 }
 
@@ -2016,11 +2021,24 @@ mod tests {
         for text in [
             "<10 um scale bar",
             "<!DOCTYPE html><html>",
+            "<!DOCTYPE metadata><metadata/>",
             "<image width=100>",
         ] {
             write_tiff(&path, false, true, 1, Some(text));
             assert!(!detect(&path).unwrap(), "{text}");
         }
+        // Many near-miss names are scanned once, then a name across windows is found.
+        let near = "<OMEGA/>".repeat(4 * 1024 * 1024);
+        write_tiff(&path, false, true, 1, Some(&near));
+        let started = std::time::Instant::now();
+        assert!(!detect(&path).unwrap());
+        assert!(started.elapsed() < std::time::Duration::from_secs(5));
+        let across = format!(
+            "{}<OME xmlns=\"{NS}\"/>",
+            "x".repeat(HEADER_BYTES as usize - 2)
+        );
+        write_tiff(&path, false, true, 1, Some(&across));
+        assert!(detect(&path).unwrap());
         // Words that merely start with OME stay ordinary TIFF descriptions.
         write_tiff(
             &path,
