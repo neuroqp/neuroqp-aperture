@@ -73,6 +73,28 @@ def historical_trusted_run(gh, run_id, workflow, source_sha=None):
     return row
 
 
+def smoke_report():
+    """A four-target passing final smoke report and the package identity it binds."""
+    assets = {name: str(n) * 64 for n, name in enumerate(state.ASSETS.values(), 1)}
+    identity = {"source_sha": "a" * 40, "checksums_sha256": "b" * 64, "assets": assets}
+    report = {"schema": 1, "operation": "smoke", "source_sha": identity["source_sha"], "checksums_sha256": identity["checksums_sha256"], "reports": []}
+    for env in sorted(state.ENVIRONMENTS):
+        name = "Aperture-Setup-x64.exe" if env == "windows11-setup" else "Aperture-Portable-x64.exe" if env == "windows11-portable" else "Aperture-x86_64.AppImage"
+        report["reports"].append({"schema": 1, "operation": "smoke", "source_sha": identity["source_sha"], "checksums_sha256": identity["checksums_sha256"], "environment": env, "status": "pass", "forced_kill": False, "asset_sha256": assets[name], "steps": [
+            {"name": "launch", "status": "pass"},
+            {"name": "render", "status": "pass", "detail": {"observation": {"phase": "ready", "rendered_canvas": True, "state": {"phase": "ready", "previewReady": True}}, "pixel_observation": {"spread": 40, "samples": [0, 40]}}},
+            {"name": "clean-exit", "status": "pass", "detail": {"exit_code": 0, "forced_cleanup": False, "app_exited": True}}]})
+    return report, identity
+
+
+def unverified(row, **changes):
+    """Replace a passing row with an unrun target that keeps its exact package identity."""
+    row = {key: row[key] for key in ("schema", "operation", "source_sha", "checksums_sha256", "environment", "asset_sha256")}
+    return {**row, "status": "unverified", "forced_kill": False, "reason": "os-unavailable",
+            "detail": "Host memory was below the VM launch gate.", "evidence": "unavailable-targets-resource-receipt.json",
+            "evidence_sha256": "e" * 64, "follow_up": "Run the package smoke when the VM host has capacity.", **changes}
+
+
 def trusted_preflight(source_sha, run_workflow, run_id, responses):
     """Run the trusted-inputs workflow's command and return its GITHUB_OUTPUT lines."""
     argv = ["release-state.py", "trusted-source", source_sha, "--run-workflow", run_workflow, "--run-id", run_id]
@@ -105,14 +127,18 @@ class ReleaseStateTests(unittest.TestCase):
             published = {**uploaded, "draft": False}
             responses = [json.dumps({"object": {"type": "commit", "sha": package["source_sha"]}}), "[[]]",
                          json.dumps(draft), "", json.dumps(uploaded), "", json.dumps(published), json.dumps(published)]
-            with patch.object(state, "source_identity"), patch.object(state, "acceptance"), patch.object(state, "verify"), patch.object(state, "verify_signatures"), patch.object(state, "notes", return_value="Current notes\n"), patch.object(state, "gh", side_effect=responses) as github, patch("urllib.request.urlopen", return_value=io.BytesIO(b"{}")), patch("builtins.print"):
+            with patch.object(state, "source_identity"), patch.object(state, "acceptance", return_value={"reports": []}), patch.object(state, "verify"), patch.object(state, "verify_signatures") as signatures, patch.object(state, "notes", return_value="Current notes\n") as changelog, patch.object(state, "gh", side_effect=responses) as github, patch("urllib.request.urlopen", return_value=io.BytesIO(b"{}")), patch("builtins.print"):
                 state.publish(directory, package_path, smoke_path)
             calls = [call.args for call in github.call_args_list]
             self.assertTrue(calls[0][1].endswith("/git/ref/tags/v0.2.1"))
             for field in ("POST", "tag_name=v0.2.1", "draft=true", "body=Current notes\n"):
                 self.assertIn(field, calls[2])
             self.assertEqual(calls[4], ("api", f"repos/{state.REPO}/releases/123"))
+            self.assertEqual(calls[5][-2:], ("--notes", "Current notes\n"))
             self.assertFalse(any("/releases/tags/" in arg for call in calls for arg in call))
+            # Notes and the updater key come from the exact source checkout, not the helper checkout.
+            self.assertEqual(changelog.call_args.args, ("0.2.1", Path.cwd()))
+            self.assertEqual(signatures.call_args.kwargs, {"root": Path.cwd()})
 
     def test_existing_uploads_reuse_only_identical_bytes(self):
         expected = {"a.exe": "a" * 64, "b.sig": "b" * 64}
@@ -122,15 +148,7 @@ class ReleaseStateTests(unittest.TestCase):
                 state.existing_assets(rows, expected)
 
     def test_smoke_binds_packages_and_normal_visible_close(self):
-        assets = {name: str(n) * 64 for n, name in enumerate(state.ASSETS.values(), 1)}
-        identity = {"source_sha": "a" * 40, "checksums_sha256": "b" * 64, "assets": assets}
-        report = {"schema": 1, "operation": "smoke", "source_sha": identity["source_sha"], "checksums_sha256": identity["checksums_sha256"], "reports": []}
-        for env in sorted(state.ENVIRONMENTS):
-            name = "Aperture-Setup-x64.exe" if env == "windows11-setup" else "Aperture-Portable-x64.exe" if env == "windows11-portable" else "Aperture-x86_64.AppImage"
-            report["reports"].append({"schema": 1, "operation": "smoke", "source_sha": identity["source_sha"], "checksums_sha256": identity["checksums_sha256"], "environment": env, "status": "pass", "forced_kill": False, "asset_sha256": assets[name], "steps": [
-                {"name": "launch", "status": "pass"},
-                {"name": "render", "status": "pass", "detail": {"observation": {"phase": "ready", "rendered_canvas": True, "state": {"phase": "ready", "previewReady": True}}, "pixel_observation": {"spread": 40, "samples": [0, 40]}}},
-                {"name": "clean-exit", "status": "pass", "detail": {"exit_code": 0, "forced_cleanup": False, "app_exited": True}}]})
+        report, identity = smoke_report()
         state.acceptance(report, identity, smoke=True)
         for mutation in (lambda r: r.update(checksums_sha256="c" * 64),
                          lambda r: r["reports"].pop(),
@@ -141,6 +159,74 @@ class ReleaseStateTests(unittest.TestCase):
             mutation(invalid)
             with self.assertRaises(ValueError):
                 state.acceptance(invalid, identity, smoke=True)
+
+    def test_unverified_targets_need_accepted_risk_and_cannot_hide_failures(self):
+        report, identity = smoke_report()
+        rows = {row["environment"]: index for index, row in enumerate(report["reports"])}
+        for env in ("windows11-setup", "windows11-portable", "ubuntu24-wayland"):
+            report["reports"][rows[env]] = unverified(report["reports"][rows[env]])
+        self.assertIs(state.acceptance(report, identity, smoke=True, accept_unverified=True), report)
+        with self.assertRaisesRegex(ValueError, "explicitly accepted"):
+            state.acceptance(report, identity, smoke=True)
+        windows = rows["windows11-setup"]
+        debian = rows["debian12"]
+        for mutation in (lambda r: r["reports"][windows].update(status="skipped"),
+                         lambda r: r["reports"][windows].update(asset_sha256=r["reports"][debian]["asset_sha256"]),
+                         lambda r: r["reports"][windows].update(checksums_sha256="c" * 64),
+                         lambda r: r["reports"][windows].update(source_sha="d" * 40),
+                         lambda r: r["reports"][windows].update(forced_kill=True),
+                         lambda r: r["reports"][windows].update(steps=copy.deepcopy(r["reports"][debian]["steps"])),
+                         lambda r: r["reports"][windows].update(reason="application-failure"),
+                         lambda r: r["reports"][windows].pop("evidence"),
+                         lambda r: r["reports"][windows].update(evidence_sha256="not-a-digest"),
+                         lambda r: r["reports"][windows].update(follow_up=" "),
+                         lambda r: r["reports"][windows].update(detail="one\ntwo"),
+                         lambda r: r["reports"].pop(windows),
+                         lambda r: r["reports"].__setitem__(debian, copy.deepcopy(r["reports"][windows])),
+                         lambda r: r["reports"].__setitem__(debian, unverified(r["reports"][debian])),
+                         lambda r: r["reports"][debian].update(status="fail"),
+                         lambda r: r["reports"][debian]["steps"][2]["detail"].update(exit_code=1)):
+            invalid = copy.deepcopy(report)
+            mutation(invalid)
+            with self.subTest(mutation=mutation), self.assertRaises(ValueError):
+                state.acceptance(invalid, identity, smoke=True, accept_unverified=True)
+        # Validation evidence never accepts unverified rows.
+        with self.assertRaises(ValueError):
+            state.acceptance({**report, "operation": "validate"}, identity, accept_unverified=True)
+
+    def test_release_notes_name_unverified_targets_as_known_limitations(self):
+        report, _ = smoke_report()
+        with patch.object(state, "notes", return_value="Changelog notes\n"):
+            self.assertEqual(state.release_notes("0.3.0", Path.cwd(), report, "f" * 64), "Changelog notes\n")
+            for index, row in enumerate(report["reports"]):
+                if row["environment"] != "debian12":
+                    report["reports"][index] = unverified(row)
+            body = state.release_notes("0.3.0", Path.cwd(), report, "f" * 64)
+        self.assertTrue(body.startswith("Changelog notes\n\n### Known limitations\n"))
+        self.assertIn("accepted OS compatibility risk. The final package smoke passed on Debian 12.", body)
+        for env in ("windows11-setup", "windows11-portable", "ubuntu24-wayland"):
+            self.assertIn(f"(`{env}`, os-unavailable): Host memory was below the VM launch gate. Follow-up:", body)
+        self.assertNotIn("debian12", body)
+        self.assertTrue(body.endswith(f"Final smoke evidence SHA-256: `{'f' * 64}`\n"))
+
+    def test_source_identity_reads_the_working_directory_checkout(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            (root / "src-tauri").mkdir()
+            (root / "package.json").write_text('{"version": "9.8.7"}')
+            (root / "src-tauri/tauri.conf.json").write_text('{"version": "9.8.7"}')
+            (root / "src-tauri/Cargo.toml").write_text('[package]\nname = "aperture"\nversion = "9.8.7"\n')
+            (root / "src-tauri/Cargo.lock").write_text('[[package]]\nname = "aperture"\nversion = "9.8.7"\n')
+            (root / "pnpm-lock.yaml").write_text("lockfileVersion: '9.0'\n")
+            git = ["git", "-C", temporary, "-c", "user.name=Test", "-c", "user.email=test@example.com"]
+            subprocess.run([*git, "init", "-q"], check=True)
+            subprocess.run([*git, "add", "."], check=True)
+            subprocess.run([*git, "commit", "-qm", "Source"], check=True)
+            head = subprocess.check_output([*git, "rev-parse", "HEAD"], text=True).strip()
+            with contextlib.chdir(root):
+                identity = state.source_identity(head)
+            self.assertEqual(identity["version"], "9.8.7")
+            self.assertEqual(identity["lockfiles"]["pnpm-lock.yaml"], state.digest(root / "pnpm-lock.yaml"))
 
     def test_validation_rejects_pass_stubs_and_missing_native_observations(self):
         identity = {"source_sha": "a" * 40, "platforms": {platform: {"binary_sha256": digit * 64} for platform, digit in (("windows", "1"), ("linux", "2"))}}
@@ -365,8 +451,25 @@ class ReleaseStateTests(unittest.TestCase):
                     needed = {item.strip() for item in needs.group(1).split(",")} if needs else set()
                     self.assertIn("trust", needed)
                     self.assertTrue(job in guarded or needed & guarded)
-                    self.assertEqual(body.count("actions/checkout@"), body.count("ref: ${{ needs.trust.outputs.revision }}"))
+                    # Each checkout is the verified source or this dispatched main workflow revision.
+                    for step in re.findall(r"(?ms)^      - uses: actions/checkout@.*?(?=^      - |\Z)", body):
+                        self.assertRegex(step, r"\n          ref: \$\{\{ (needs\.trust\.outputs\.revision|github\.sha) \}\}\n")
                     self.assertNotRegex(body, r"ref: \$\{\{ *(github\.event\.)?inputs\.")
+
+    def test_publish_runs_main_rules_against_the_exact_source_checkout(self):
+        body = workflow_jobs("publish.yml")["publish"]
+        self.assertIn("github.ref == 'refs/heads/main'", job_condition(body))
+        checkouts = re.findall(r"(?ms)^      - uses: actions/checkout@.*?(?=^      - |\Z)", body)
+        self.assertEqual(len(checkouts), 2)
+        self.assertIn("ref: ${{ needs.trust.outputs.revision }}", checkouts[0])
+        self.assertNotIn("path:", checkouts[0])
+        self.assertIn("ref: ${{ github.sha }}", checkouts[1])
+        self.assertIn("path: .publish-policy", checkouts[1])
+        self.assertIn("python3 .publish-policy/scripts/release/release-state.py publish ", body)
+        self.assertIn('if [ "$ACCEPT_UNVERIFIED" = true ]; then accepted=(--accept-unverified); fi', body)
+        self.assertIn("ACCEPT_UNVERIFIED: ${{ inputs.accept_unverified_targets }}", body)
+        self.assertIn("      accept_unverified_targets:\n        description: Accept OS compatibility risk for smoke targets reported unverified\n"
+                      "        type: boolean\n        default: false\n", (WORKFLOWS / "publish.yml").read_text(encoding="utf-8"))
 
     def test_referenced_runs_are_consumed_only_after_trusted_verification(self):
         expected = {"validate.yml": ("build_run_id", "${{ inputs.mode == 'seal' && 'validate.yml' || '' }}",

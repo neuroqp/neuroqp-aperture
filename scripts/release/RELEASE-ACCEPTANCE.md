@@ -118,8 +118,8 @@ an application failure and blocks publication. Automation failure or an
 unavailable OS leaves that target unverified with a recorded follow-up.
 
 Retain source/package/fixture/helper hashes, OS/user/backend, start/end/duration,
-screenshot hashes and process outcomes. Combine the four actual reports with
-`linux-smoke.py collect`, as shown in the command reference; it accepts only four
-passing reports. Submit that compact result to `publish.yml`; retain the raw
-reports separately. After a package or source change, rerun all affected checks
-against the new hashes.
+screenshot hashes and process outcomes. Combine the four reports with
+`linux-smoke.py collect`, as shown in the command reference. It accepts unrun
+`unverified` reports only with `--accept-unverified`. Submit that compact result
+to `publish.yml`; retain the raw reports separately. After a package or source
+change, rerun all affected checks against the new hashes.
