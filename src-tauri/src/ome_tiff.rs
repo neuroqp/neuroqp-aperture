@@ -30,6 +30,9 @@ const MAX_XMLNS: usize = 64;
 const NODE_BYTES: u64 = 96;
 const ATTRIBUTE_BYTES: u64 = 64;
 const NAMESPACE_BYTES: u64 = 64 * 1024;
+/// First read of a description; longer prefixes are reserved and read only
+/// when this one is cut off without a conclusive root.
+const PROBE_BYTES: u64 = 64 * 1024;
 const MAX_IMAGES: usize = 4096;
 /// Plane entries over all series and `TiffData`/`Plane` elements.
 const MAX_PLANES: u64 = 1 << 20;
@@ -115,10 +118,10 @@ pub(crate) fn detect(path: &Path, budget: &Arc<Budget>) -> Result<bool, String> 
     let Some(tiff) = Tiff::open(path)? else {
         return Ok(false);
     };
-    let Some(prefix) = tiff.prefix(MAX_XML_BYTES, budget)? else {
+    let Some((root, prefix)) = tiff.probe(budget, |root| matches!(root, Ok(Root::Ome(_))))? else {
         return Ok(false);
     };
-    Ok(match classify(&prefix.text, prefix.truncated) {
+    Ok(match root {
         // A prolog that runs past the probe limit is never treated as ordinary.
         Ok(Root::Ome(_) | Root::Truncated) => true,
         _ => mentions_ome(&prefix.text, prefix.truncated),
@@ -822,9 +825,11 @@ impl<'d> Members<'_, 'd> {
                 let tiff =
                     Tiff::open(&path)?.ok_or_else(|| error(format!("{label} is not a TIFF.")))?;
                 let index = self.files.len() as u16;
-                let root = match tiff.prefix(MAX_XML_BYTES, &self.budget)? {
+                let conclusive =
+                    |root: &Result<Root, String>| matches!(root, Ok(Root::Ome(_) | Root::Other));
+                let root = match tiff.probe(&self.budget, conclusive)? {
                     None => None,
-                    Some(prefix) => match classify(&prefix.text, prefix.truncated)? {
+                    Some((root, _)) => match root? {
                         Root::Ome(uuid) => uuid,
                         Root::Other => None,
                         Root::Unknown | Root::Truncated => {
@@ -963,6 +968,9 @@ struct Prefix {
     text: Vec<u8>,
     truncated: bool,
 }
+
+/// A classified description prefix.
+type Probed = (Result<Root, String>, Prefix);
 
 /// The root element of a description prefix, read whole in one pass.
 fn classify(text: &[u8], truncated: bool) -> Result<Root, String> {
@@ -1137,6 +1145,26 @@ impl Tiff {
         Ok(None)
     }
 
+    /// The first description's root from a `PROBE_BYTES` prefix, or from the
+    /// whole XML allowance when that prefix is cut off and not `conclusive`.
+    fn probe(
+        &self,
+        budget: &Arc<Budget>,
+        conclusive: impl Fn(&Result<Root, String>) -> bool,
+    ) -> Result<Option<Probed>, String> {
+        let Some(mut prefix) = self.prefix(PROBE_BYTES, budget)? else {
+            return Ok(None);
+        };
+        let mut root = classify(&prefix.text, prefix.truncated);
+        if prefix.truncated && !conclusive(&root) {
+            prefix = self
+                .prefix(MAX_XML_BYTES, budget)?
+                .ok_or_else(|| error("the description changed while it was read."))?;
+            root = classify(&prefix.text, prefix.truncated);
+        }
+        Ok(Some((root, prefix)))
+    }
+
     /// The first description's first `limit` bytes, read once, and whether the
     /// description is longer. Prefixes above 64 KiB are reserved first.
     fn prefix(&self, limit: u64, budget: &Arc<Budget>) -> Result<Option<Prefix>, String> {
@@ -1144,7 +1172,7 @@ impl Tiff {
             return Ok(None);
         };
         let size = len.min(limit);
-        let reservation = (size > 64 * 1024)
+        let reservation = (size > PROBE_BYTES)
             .then(|| budget.require(size, &budget_error()))
             .transpose()?;
         let mut text = vec![0; size as usize];
