@@ -1,22 +1,26 @@
 # Releases
 
 A release has three operations: validate, package, publish. One operator owns the
-sequence and its reports. Finish behavior testing and corresponding-source
-preparation first. After packaging, check only package identity and the small
-native smoke matrix, then publish the same bytes.
+sequence and its reports. Full functional testing happens in feature PRs. A
+release freezes scope and reuses that accepted evidence; it adds no feature test
+matrices, harnesses, capture tooling or repeated review loops. Finish
+corresponding-source preparation first. After packaging, check only package
+identity and the small native smoke matrix, then publish the same bytes.
 
 ## Validate
 
-1. Finish changes on a feature branch and review them. Keep the version in
+1. Finish and functionally test changes in their feature PRs, using
+   [the acceptance guide](scripts/release/RELEASE-ACCEPTANCE.md). Keep the version in
    `MAJOR.MINOR.PATCH` form and write short release notes. During `0.x`, features
    use a minor bump and fixes use a patch bump. Use a higher version after a public
    release defect. Merge only with user authorization; never push `main` directly.
 2. Run `validate.yml` in build mode for the exact reviewed commit. It runs the
    frontend, Rust, release-helper and actual-worker regressions, compiles the
    release-profile Windows/Linux executables and records their runtime inputs.
-3. Run the affected-area [native functional checks](scripts/release/RELEASE-ACCEPTANCE.md)
-   with those executables. Restore and check desktop sessions, observers and the fixed small
-   TIFF. Record actual results, executable/runtime hashes and relevant screenshots.
+3. Record launch, fixed small-TIFF render and normal-close results for those
+   executables on Windows 11, Debian 12 and Ubuntu 24 Wayland. Reuse existing
+   development-binary smoke reports whose executable/runtime hashes match exactly;
+   otherwise run only that smoke. Do not rerun functional suites.
 4. Prepare and verify [corresponding source](scripts/release/SOURCE-MATERIAL.md).
    Dependencies, patches, recipes and notices must cover the actual shipped
    runtime. Dependency changes require refreshed coverage.
@@ -53,9 +57,30 @@ They are outside the routine release matrix and carry no per-release guarantee.
 Windows 10 is unverified. Windows publisher signing is pending. macOS, ARM,
 stores and distro packages are outside the current scope.
 
-Test AppImage extraction fallback, upgrades and detailed installer behavior during
-validation when those paths change. Do not expand final smoke into format,
+Test AppImage extraction fallback, upgrades and detailed installer behavior in the
+feature PR that changes those paths. Do not expand final smoke into format,
 annotation, save, concurrency, cancellation, performance or upgrade suites.
+
+### Smoke attempts and unverified targets
+
+Give each environment one smoke attempt. Allow at most one bounded retry, and only
+for an obvious setup issue such as a failed transfer, locked desktop or stale
+driver. Do not repair automation or build new tooling during the release.
+
+- An application failure, where the delivered application crashes, shows an
+  error, renders the wrong image or dimensions, or does not close normally, blocks
+  publication until fixed and revalidated.
+- An automation failure or unavailable OS is not an application result. Record
+  that target as unverified with its diagnostics and a follow-up. This
+  OS-specific compatibility risk is accepted; it need not block other targets.
+
+Never record an unverified target as a pass, relabel another environment's report
+or weaken integrity, signature or source checks. Release notes name each
+unverified target as a known limitation. The current `collect` and `publish.yml`
+path accepts only four passing reports, and the validation seal requires three
+passing development reports. Releasing with an unverified target therefore needs
+a reviewed workflow change that records it truthfully. Until that change exists,
+a release with an unverified target cannot publish.
 
 ## Publish
 
@@ -79,8 +104,9 @@ not expire successful validation, source archives or completed packages. Check
 source, executable, runtime dependency and package hashes before reusing them.
 Changes invalidate affected results, so rerun only those checks.
 
-Continue authorized repairs and retry the failed operation. Do not create a new
-release reservation, receipt deadline or special recovery workflow. A failure or
-inconclusive required check blocks publication until fixed and revalidated. The
+Continue authorized repairs and retry the failed operation; desktop smokes follow
+the attempt limit above. Do not create a new release reservation, receipt deadline
+or special recovery workflow. An application failure, or a failed identity,
+signature or source check, blocks publication until fixed and revalidated. The
 same release authorization covers this work unless the user limits it. Maintain
 VMs separately using [LAB.md](scripts/release/LAB.md); keep real datasets untouched.

@@ -1,17 +1,18 @@
 # Native validation and package smoke
 
-Use with [RELEASING.md](../../RELEASING.md). Test application behavior before
-packaging. Final smoke proves that the delivered package launches, renders and
+Use with [RELEASING.md](../../RELEASING.md). Test application behavior in feature
+PRs. A release reuses that accepted evidence by exact hashes and does not rerun
+functional suites. Final smoke proves that the delivered package launches, renders and
 closes normally. A typed approval, browser preview or forced cleanup is not a
 native test result.
 
-## Functional validation
+## Functional validation in feature PRs
 
 Run automated frontend, Rust, release-helper and actual-worker regressions in CI
 on Linux and Windows. Use the resulting release-profile development executable
 for changed-area native checks. Desktop VMs need not repeat automated suites.
 
-| Changed behavior   | Check before packaging                                                                                                              |
+| Changed behavior   | Check in the feature PR                                                                                                             |
 | ------------------ | ----------------------------------------------------------------------------------------------------------------------------------- |
 | Viewing            | Relevant TIFF/BigTIFF formats, dimensions and pixels; navigation, pan, zoom and display controls                                    |
 | Saving             | Annotation save/reopen; independently decoded pixels and encoded image data remain unchanged; errors preserve edits and destination |
@@ -31,8 +32,9 @@ The same native helpers support development validation. Linux identities add
 `AppRun`, and hash that launcher in `asset_sha256`. Windows uses
 `-Environment windows11`, `runtime_directory`, `version`, direct `aperture.exe`
 `asset_path` and `binary_sha256`. Development identities need no package checksum
-file. These reports have `operation: "validate"`; attach the changed-area
-observations as evidence before recording validation.
+file. These reports have `operation: "validate"`. At release, the validation seal
+needs only launch, small-TIFF render and normal-close reports for the exact
+release executables; reuse matching development-binary reports.
 
 Record source commit, tested areas, executable and dependency hashes, OS/user,
 native backend, command, outcome and evidence paths. Keep fixtures and reports
@@ -91,7 +93,8 @@ backend; a `WAYLAND_DISPLAY` variable alone does not prove native Wayland.
 If a prepared lab uses an idle guard, keep its supervised process and driver plan
 through smoke, then stop only that owned guard and retain its closure result.
 Never change host preferences or unlock a desktop silently to make a check pass.
-Desktop or observer repairs require a successful rehearsal before reuse.
+Desktop or observer repairs require a successful rehearsal before reuse. Make
+them outside a release; during one, follow the attempt limit below.
 
 ## Final package smoke
 
@@ -105,12 +108,18 @@ A pass requires a ready image without error, expected dimensions, observed image
 pixels in the native owned window, normal close and actual exit code 0. Preview
 pixels can remain after loading fails, so a screenshot alone is insufficient.
 A crash, timeout, forced kill, unavailable desktop or inconclusive observation
-fails the check. Keep failures and diagnostics before retrying. Never weaken an
+is not a pass. Keep failures and diagnostics before retrying. Never weaken an
 assertion or relabel a cleanup kill as normal closure.
+
+Use one attempt and at most one bounded retry for an obvious setup issue, as in
+[RELEASING.md](../../RELEASING.md#smoke-attempts-and-unverified-targets). Classify
+the result: an observed application crash, error, wrong render or abnormal exit is
+an application failure and blocks publication. Automation failure or an
+unavailable OS leaves that target unverified with a recorded follow-up.
 
 Retain source/package/fixture/helper hashes, OS/user/backend, start/end/duration,
 screenshot hashes and process outcomes. Combine the four actual reports with
-`linux-smoke.py collect`, as shown in the command reference. Submit that compact
-result to `publish.yml`; retain the raw reports separately. After an environment repair,
-repeat its rehearsal and failed check. After a package or source change, rerun
-all affected checks against the new hashes.
+`linux-smoke.py collect`, as shown in the command reference; it accepts only four
+passing reports. Submit that compact result to `publish.yml`; retain the raw
+reports separately. After a package or source change, rerun all affected checks
+against the new hashes.

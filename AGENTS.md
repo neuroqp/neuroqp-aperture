@@ -20,12 +20,20 @@
 # Releases
 
 - Follow `RELEASING.md`: validate, package, publish.
-- Finish functional tests, fixes, corresponding-source preparation and desktop
-  preparation before packaging. Package the exact validated executables and
-  runtime dependencies without recompilation or fresh dependency resolution.
+- Do full functional testing in feature PRs. A release freezes scope and reuses
+  accepted evidence by exact hashes. It adds no feature test matrices, harnesses,
+  capture tooling or repeated review loops, and does not rerun functional suites.
+  CI regressions and build, identity, source and cryptographic checks remain.
+- Finish fixes, corresponding-source preparation and desktop preparation before
+  packaging. Package the exact validated executables and runtime dependencies
+  without recompilation or fresh dependency resolution.
 - After packaging, verify hashes, updater signatures and source coverage. Run only
-  the fixed native launch, small-TIFF render and normal-close smoke checks, then
-  publish those exact bytes.
+  the four launch, small-TIFF render and normal-close package smokes on the exact
+  delivered bytes, then publish those bytes.
+- Give each smoke one attempt and at most one bounded retry for an obvious setup
+  issue. An application failure blocks publication. An automation failure or
+  unavailable OS leaves that target unverified with a recorded follow-up; never
+  report it as a pass. See `RELEASING.md` for the current four-report limit.
 - One operator owns orchestration. Give subagents explicit ownership; they must
   not independently start builds or VMs.
 - Preserve completed outputs and failed diagnostics. Per-step timeouts stop that
