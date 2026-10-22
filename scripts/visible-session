@@ -1,0 +1,131 @@
+#!/usr/bin/env bash
+# Run a native GUI check on the real Hyprland desktop, only when explicitly
+# needed. Hyprland starts the GUI process silently on workspace 9 without
+# initial focus. Input, desktop screenshots and clipboard access stay disabled
+# unless APERTURE_VISIBLE_INPUT=1. The desktop's own display scale is kept.
+#
+#   scripts/visible-session [--driver PORT] [--keep DIR] -- COMMAND...
+#
+# --driver PORT  start tauri-driver on the desktop (native port PORT+1) and run
+#                COMMAND here; without it COMMAND itself is the GUI process
+# --keep DIR     keep config/cache/data/state/tmp in DIR
+set -euo pipefail
+
+usage() {
+	echo "usage: $0 [--driver PORT] [--keep DIR] -- COMMAND..." >&2
+	exit 2
+}
+
+driver_port='' keep=''
+while (($#)); do
+	case $1 in
+	--driver) driver_port=${2:?--driver needs a port} && shift 2 ;;
+	--keep) keep=${2:?--keep needs a directory} && shift 2 ;;
+	--) shift && break ;;
+	*) usage ;;
+	esac
+done
+(($#)) || usage
+[[ -n ${HYPRLAND_INSTANCE_SIGNATURE:-} ]] || {
+	echo "Visible mode needs a Hyprland session; use scripts/headless-session" >&2
+	exit 1
+}
+
+here=$(cd "$(dirname "$0")" && pwd)
+# shellcheck source=scripts/session-lib.sh
+source "$here/session-lib.sh"
+child='' root=''
+
+cleanup() {
+	trap - EXIT
+	trap '' INT TERM # A second Ctrl-C must not abort the teardown.
+	[[ -n $root ]] || return 0
+	# shellcheck disable=SC2086 # An empty ID is intentionally dropped.
+	stop_groups $child
+	sweep_all
+	# The unmarked Hyprland launcher records a status once its command is gone.
+	for _ in {1..10}; do
+		[[ ! -e $root/started || -s $root/status ]] && break
+		sleep 0.1
+	done
+	remove_root
+	[[ -z $keep ]] || echo "Kept test data in $data" >&2
+}
+trap cleanup EXIT
+trap 'exit 130' INT
+trap 'exit 143' TERM
+
+root=$(mktemp -d "${TMPDIR:-/tmp}/aperture-visible.XXXXXX")
+[[ $root =~ ^[A-Za-z0-9_./-]+$ ]] || {
+	echo "Unsupported temporary path: $root" >&2
+	exit 1
+}
+data=${keep:-$root}
+mkdir -p "$data"/{config,cache,data,state,tmp}
+data=$(cd "$data" && pwd)
+# Every process started for the test carries this unique marker, including
+# those Hyprland launches, so cleanup finds them all.
+marker=APERTURE_TEST_RUN=$root
+
+path=$PATH
+command -v tauri-driver >/dev/null || path=$PATH:$HOME/.cargo/bin
+# A private bus keeps GTK dialogs in-process, so they share the app_id.
+session_env=(env -u DISPLAY -u WAYLAND_SOCKET -u YDOTOOL_SOCKET -u DBUS_SESSION_BUS_ADDRESS
+	-u APERTURE_DRIVER_URL "$marker" PATH="$path" GDK_BACKEND=wayland GTK_USE_PORTAL=0 NO_AT_BRIDGE=1
+	APERTURE_SESSION=visible APERTURE_TEST_ROOT="$data" XDG_CONFIG_HOME="$data/config"
+	XDG_CACHE_HOME="$data/cache" XDG_DATA_HOME="$data/data" XDG_STATE_HOME="$data/state"
+	TMPDIR="$data/tmp")
+
+# Hyprland starts the process with an exec rule; descendants inherit it.
+launch() {
+	{
+		echo '#!/usr/bin/env bash'
+		printf ': >%q\ncd %q\n' "$root/started" "$PWD"
+		printf '%q ' "${session_env[@]}" dbus-run-session -- "$@"
+		printf '>%q 2>&1\necho $? >%q\n' "$data/visible.log" "$root/status"
+	} >"$root/launch"
+	chmod +x "$root/launch"
+	local reply
+	reply=$(hyprctl dispatch "hl.dsp.exec_cmd(\"$root/launch\", {workspace = \"9 silent\", no_initial_focus = true})")
+	[[ $reply == ok ]] || {
+		echo "Hyprland refused the launch: $reply" >&2
+		exit 1
+	}
+	for _ in {1..100}; do
+		[[ -e $root/started ]] && return 0
+		sleep 0.1
+	done
+	echo "Hyprland did not start the command within 10 s" >&2
+	exit 1
+}
+
+if [[ -z $driver_port ]]; then
+	launch "$@"
+	gone=0
+	until [[ -s $root/status ]]; do
+		# The command may run for long; give up only once nothing of it is left.
+		if [[ -n $(marked) ]]; then gone=0; else gone=$((gone + 1)); fi
+		((gone < 10)) || {
+			echo "The command exited without reporting a status; see $data/visible.log" >&2
+			exit 1
+		}
+		sleep 0.2
+	done
+	exit "$(<"$root/status")"
+fi
+
+require_free_ports "$driver_port"
+launch tauri-driver --port "$driver_port" --native-port "$((driver_port + 1))"
+wait_for_driver "$driver_port" test ! -s "$root/status" || {
+	cat "$data/visible.log" >&2 2>/dev/null || true
+	exit 1
+}
+# Native scripts accept only this verified driver.
+session_env+=(APERTURE_DRIVER_URL="http://127.0.0.1:$driver_port")
+
+setsid "${session_env[@]}" "$@" &
+child=$!
+status=0
+wait "$child" || status=$?
+child='' # Reaped; the sweep stops anything it left behind.
+exit "$status"

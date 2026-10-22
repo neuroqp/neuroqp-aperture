@@ -13,6 +13,90 @@ records the tested source/checksum identities, upgrade fixtures, preserved asset
 production verification and observation limits. Windows 10 remains unverified
 and Windows publisher signing remains pending.
 
+# Native GUI test sessions
+
+Native scripts refuse to start outside one of two session wrappers. Older entries
+below that mention Hyprland, `ydotool` or starting `tauri-driver` by hand predate
+them.
+
+## Headless (default)
+
+```sh
+scripts/headless-session --driver 4444 -- python3 scripts/native-smoke.py \
+  src-tauri/target/debug/aperture tests/fixtures/gray16-stripped.tif --window-controls
+scripts/headless-session --driver 4446 --keep artifacts/folder-navigation/session -- \
+  python3 scripts/native-navigation.py src-tauri/target/debug/aperture --large-image ...
+```
+
+`headless-session` starts a nested Sway (`scripts/headless/sway.conf`, one
+1920 by 1080 virtual output, pixman renderer) with a private `XDG_RUNTIME_DIR`,
+then runs the command, and with `--driver PORT` also `tauri-driver` (native port
+PORT+1), under a private D-Bus. Without a portal, the GTK file chooser runs
+in-process inside the nested session. Display, input and scale variables of the
+user's desktop (`WAYLAND_DISPLAY`, `WAYLAND_SOCKET`, `DISPLAY`, `GDK_SCALE`,
+`GDK_DPI_SCALE`, ...) are removed. Both driver ports must be free, and the
+command starts only after both listeners are verified to belong to this session,
+so `tauri-driver` can never reach a driver on the user's desktop. The wrapper then
+exports `APERTURE_DRIVER_URL`; native scripts use only that driver and refuse to
+run without it or with a different `--driver-url`. Documented ports are spaced so
+pairs never overlap: 4444 (smoke, Settings, update checks, color benchmark), 4446
+(navigation, ND2, CZI, memory, projection) and 4448 (loading benchmark).
+`XDG_CONFIG_HOME`, `XDG_CACHE_HOME`, `XDG_DATA_HOME`, `XDG_STATE_HOME` and `TMPDIR`
+point into a temporary root, or into `--keep DIR` to keep caches and logs. Aperture's instance, image-presence and save
+locks live under `XDG_CACHE_HOME`, so a test instance never coordinates with an
+Aperture window the user has open. Exit, failure, Ctrl-C and TERM stop every
+process started in the session (TERM, then KILL after a grace period), then the
+compositor, and remove the temporary root. The command's exit status is returned.
+
+Scripts drive windows through `scripts/compositor.py`: window lists and
+float/resize/focus via `swaymsg`, screenshots with `grim` and the clipboard with
+`wl-copy`/`wl-paste`, all on the nested display. Headless Sway has no input
+devices, so keys and clicks add a temporary virtual keyboard (standard US
+keymap) or pointer. Scripts that launch the app through
+`compositor.application()` start it via an `aperture-test` symlink; GTK derives
+the Wayland app_id `aperture-test` from it for the main window and its dialogs.
+`native-appimage-update.py` launches an AppImage and keeps its own app_id. WebKit needs no extra environment: WebGL2 reports
+`WebKit WebGL` and the viewer uses its GPU renderer.
+
+To watch a run, install `wayvnc` (`sudo pacman -S wayvnc`), start it inside the
+session and connect a VNC viewer to `127.0.0.1:5900`:
+
+```sh
+scripts/headless-session --driver 4444 -- sh -c \
+  'wayvnc 127.0.0.1 5900 & python3 scripts/native-smoke.py ...'
+```
+
+## Visible (opt-in)
+
+Use the real desktop only when asked to, or when a problem does not reproduce
+headless:
+
+```sh
+scripts/visible-session --driver 4444 -- python3 scripts/... src-tauri/target/debug/aperture
+```
+
+`visible-session` asks Hyprland to start `tauri-driver` (or, without `--driver`,
+the command itself) with the exec rule `workspace 9 silent` and
+`no_initial_focus`, keeping the desktop's own display scale. The same isolated
+directories, private D-Bus and port checks apply. On October 21, 2026, one
+WebDriver launch put the first main window on workspace 9 while the active
+workspace and focus stayed unchanged. Dialogs, app restarts and AppImage
+relaunches were not verified in visible mode. Add this rule to
+`~/.config/hypr/hyprland.lua` so every `aperture-test` window, including dialogs
+and later windows, stays off the active workspace:
+
+```lua
+o.window("^aperture-test$", { workspace = "9 silent", no_initial_focus = true })
+```
+
+In visible mode, `compositor.py` lists windows and floats or resizes only
+`aperture-test` windows. Focus, keys, clicks, screenshots and the clipboard raise
+an error unless `APERTURE_VISIBLE_INPUT=1` is set. Then `ydotool` types into
+whatever window has focus, focusing the test window switches to workspace 9, and
+a clipboard restored by a script outlives the session.
+Windows on a hidden workspace do not paint, so WebDriver screenshots time out
+there unless workspace 9 is shown.
+
 # Linux validation
 
 Validated the real Tauri debug binary on October 8, 2026 using WebKitWebDriver,
@@ -463,8 +547,9 @@ python3 scripts/native-color-benchmark.py --session test-data/color-session.json
   --output test-data/gpu-benchmark.json --trials 40 --warmup 8 --gpu-fence
 ```
 
-The session file contains the WebKitWebDriver `sessionId`; the driver defaults
-to localhost:4444. Navigate the native webview to `tauri://localhost/?colorBenchmark`
+The session file contains the WebKitWebDriver `sessionId`; run the benchmark
+inside the same `scripts/headless-session --driver 4444` session, whose driver
+it uses. Navigate the native webview to `tauri://localhost/?colorBenchmark`
 for viewport diagnostics and sustained validation. Add `colorRenderer=cpu` for
 the previous CPU path. `--sustained --trials 120 --drag-interval-ms 16.6667`
 requests a continuous input stream and reports the cadence actually achieved,
@@ -617,8 +702,8 @@ the previous pre-preview root-budget behavior and avoids recursively walking
 every cached tile before first pixels. Active caches are pinned against eviction.
 
 Run `python3 scripts/benchmark-loading.py --help` for the reusable native benchmark.
-Start `tauri-driver` with a dedicated `XDG_CACHE_HOME` under the output directory,
-for example ports 4445 and 4446. Ignored evidence under `artifacts/` includes
+Run it in `scripts/headless-session --driver 4448 --keep DIR` with `DIR` under the
+output directory, so its `XDG_CACHE_HOME` is dedicated. Ignored evidence under `artifacts/` includes
 `baseline-final-native.json`, `final-native.json`, `baseline-big-native.json`,
 `final-big-native.json`, `final-big-complete-native.json`, `final-big-warm-native.json`,
 `final-channels-native.json`, screenshots and `final-loading-regressions.json`.
@@ -959,10 +1044,10 @@ retains annotations and navigation after saving needs no discard warning. All
 14 native checks passed, including pointer clicks within the title bar's drag
 region and a delayed annotation cancellation error after standalone Cancel.
 
-Repeat with `scripts/native-navigation.py`, a built debug binary and a dedicated
-`tauri-driver` session on port 4446. Supply `--large-image` for a local large TIFF;
-start the driver with `XDG_CACHE_HOME` under `artifacts/folder-navigation/cache`.
-Use an owned `TMPDIR` there too on systems with temporary-directory user quotas.
+Repeat with `scripts/native-navigation.py` and a built debug binary in
+`scripts/headless-session --driver 4446 --keep artifacts/folder-navigation/session`,
+which also owns `XDG_CACHE_HOME` and `TMPDIR`. Supply `--large-image` for a local
+large TIFF.
 Only the initial chooser result is supplied by the navigation harness; Rust IPC,
 image workers, assets, rendering and warning dialogs are native. The existing
 `native-smoke.py` separately exercises the real GTK Open picker. Owned test copies,

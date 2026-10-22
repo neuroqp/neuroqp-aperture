@@ -189,30 +189,26 @@ manifest. The application itself does not use Python. See
 Measured native application results and limitations are recorded in
 [VALIDATION.md](VALIDATION.md).
 
-For direct application checks in an active Linux desktop session, install
-`tauri-driver` and WebKitWebDriver, start `tauri-driver`, then run:
+Native application checks run in a private, invisible Sway session by default,
+so they never open windows or use the keyboard, mouse or clipboard of your
+desktop. Install `sway`, `grim`, `wl-clipboard`, `tauri-driver` and
+WebKitWebDriver, then run:
 
 ```sh
-python scripts/native-smoke.py src-tauri/target/debug/aperture \
-  tests/fixtures/rgb-65x49.png test-data/real-gray16-stripped-bigtiff.tif
+scripts/headless-session --driver 4444 -- python3 scripts/native-smoke.py \
+  src-tauri/target/debug/aperture tests/fixtures/rgb-65x49.png
+scripts/headless-session --driver 4444 -- \
+  python3 scripts/native-settings.py src-tauri/target/debug/aperture
+scripts/headless-session --driver 4444 -- \
+  python3 scripts/native-update-recovery.py src-tauri/target/debug/aperture
 ```
 
-The current native harness uses Hyprland, `ydotool`, `wl-copy`, and `grim` to
-operate the real file chooser and capture the application window. It uses the
-keyboard, clipboard, and window focus while running. Results and screenshots
-stay in ignored `artifacts/`.
-
-For Settings and update-restart regression checks, start `tauri-driver` with
-isolated `XDG_CONFIG_HOME`, `XDG_CACHE_HOME` and `TMPDIR`, then run:
-
-```sh
-python3 scripts/native-settings.py src-tauri/target/debug/aperture
-python3 scripts/native-update-recovery.py src-tauri/target/debug/aperture
-```
-
-These checks use real native image loading, annotations and saving where relevant,
-with supplied file-chooser and updater responses. They never install an update.
-Results and screenshots stay in ignored `artifacts/` directories.
+The smoke check operates the real GTK file chooser inside that session. The
+Settings and update-recovery checks use real native image loading, annotations
+and saving, with supplied file-chooser and updater responses; they never install
+an update. Results and screenshots stay in ignored `artifacts/` directories. See
+[VALIDATION.md](VALIDATION.md#native-gui-test-sessions) for isolation, watching a
+run and the opt-in visible mode.
 
 ## ImageJ annotation validation
 

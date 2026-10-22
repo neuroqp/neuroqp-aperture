@@ -1,7 +1,8 @@
 #!/usr/bin/env python3
 """Check shared image-memory settings and ND2 preload in an owned native session.
 
-Parent starts tauri-driver with isolated persistent cache/config directories.
+Run inside scripts/headless-session --driver 4446; its isolated cache/config
+directories persist across the app restarts in this check.
 Only the chooser response is substituted. Navigation, settings, pixels and Close
 use the application's real handlers. This script does not build or start a VM.
 """
@@ -14,6 +15,8 @@ import os
 from pathlib import Path
 import time
 from urllib.request import Request, urlopen
+
+import compositor
 
 ROOT = Path(__file__).resolve().parents[1]
 GIB = 1024 ** 3
@@ -30,7 +33,7 @@ def digest(path):
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument('binary', type=Path)
-    parser.add_argument('--driver-url', default='http://127.0.0.1:4446')
+    parser.add_argument('--driver-url', help='defaults to the session driver; must match it')
     parser.add_argument('--fixtures', type=Path, default=ROOT / 'test-data/nd2')
     parser.add_argument('--real', type=Path, help='Optional larger ND2 acquisition')
     parser.add_argument('--output', type=Path, default=ROOT / 'artifacts/nd2/native-memory.json')
@@ -38,6 +41,7 @@ def main():
     parser.add_argument('--expected-default-gib', type=float, default=4)
     parser.add_argument('--renderer', choices=('gpu', 'cpu'), default='gpu')
     args = parser.parse_args()
+    args.driver_url = compositor.driver_url(args.driver_url)
     binary = args.binary.resolve()
     primary = args.fixtures.resolve() / 'dims_p4z5t3c2y32x32.nd2'
     ordinary = [ROOT / f'tests/fixtures/rgb-65x49.{extension}'
@@ -100,7 +104,7 @@ def main():
         nonlocal route
         previous = processes()
         sid = request('POST', '/session', {'capabilities': {'alwaysMatch': {
-            'browserName': 'wry', 'tauri:options': {'application': str(binary)},
+            'browserName': 'wry', 'tauri:options': {'application': str(compositor.application(binary))},
         }}})['sessionId']
         route = f'/session/{sid}'
         output.with_suffix('.session.json').write_text(json.dumps({'sessionId': sid}) + '\n')

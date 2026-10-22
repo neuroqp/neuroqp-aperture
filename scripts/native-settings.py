@@ -1,7 +1,8 @@
 #!/usr/bin/env python3
-"""Validate Settings in a native app launched by an already running tauri-driver.
+"""Validate Settings in a native app launched through the session's tauri-driver.
 
-Run the driver with isolated XDG_CONFIG_HOME/XDG_CACHE_HOME and an owned TMPDIR.
+Run inside scripts/headless-session --driver 4444, which isolates XDG_CONFIG_HOME,
+XDG_CACHE_HOME and TMPDIR.
 Only the file chooser, confirmation and updater check/download responses are supplied. Image
 loading, pointer annotation, theme rendering, modal focus and keyboard input use
 the running app. This script neither builds nor installs an update.
@@ -12,9 +13,10 @@ import base64
 import json
 from pathlib import Path
 import shutil
-import subprocess
 import time
 from urllib.request import Request, urlopen
+
+import compositor
 
 ROOT = Path(__file__).resolve().parents[1]
 
@@ -22,9 +24,10 @@ ROOT = Path(__file__).resolve().parents[1]
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument('binary', type=Path)
-    parser.add_argument('--driver-url', default='http://127.0.0.1:4444')
+    parser.add_argument('--driver-url', help='defaults to the session driver; must match it')
     parser.add_argument('--output', type=Path, default=ROOT / 'artifacts/settings/result.json')
     args = parser.parse_args()
+    args.driver_url = compositor.driver_url(args.driver_url)
     args.output = args.output.resolve()
     args.output.parent.mkdir(parents=True, exist_ok=True)
     source = ROOT / 'tests/fixtures/gray16-stripped.tif'
@@ -46,15 +49,12 @@ def main():
         return value
 
     # Capture existing windows before starting the validation app.
-    previous_windows = None
-    if shutil.which('hyprctl'):
-        try:
-            previous_windows = json.loads(subprocess.check_output(['hyprctl', '-j', 'clients']))
-        except (OSError, subprocess.CalledProcessError, json.JSONDecodeError):
-            pass
+    desktop = compositor.session()
+    binary = compositor.application(args.binary)
+    previous_windows = desktop.windows()
 
     session = request('POST', '/session', {'capabilities': {'alwaysMatch': {
-        'browserName': 'wry', 'tauri:options': {'application': str(args.binary.resolve())}}}})
+        'browserName': 'wry', 'tauri:options': {'application': str(binary)}}}})
     route = '/session/' + session['sessionId']
     args.output.with_suffix('.session.json').write_text(json.dumps(session) + '\n')
     saved_theme = None
@@ -115,31 +115,23 @@ def main():
             return
         except TimeoutError:
             pass
-        assert previous_windows is not None, 'Window manager ignored resize and no Hyprland ownership snapshot is available'
         existing_pids = {w['pid'] for w in previous_windows}
-        existing_addresses = {w['address'] for w in previous_windows}
+        existing_ids = {w['id'] for w in previous_windows}
         candidates = []
-        for window in json.loads(subprocess.check_output(['hyprctl', '-j', 'clients'])):
-            if window['pid'] in existing_pids or window['address'] in existing_addresses:
+        for window in desktop.windows():
+            if window['pid'] in existing_pids or window['id'] in existing_ids:
                 continue
             try:
                 command = Path(f"/proc/{window['pid']}/cmdline").read_bytes().split(b'\0')
             except OSError:
                 continue
-            if command[0] == str(args.binary.resolve()).encode():
+            if command[0] == str(binary).encode():
                 candidates.append(window)
         assert len(candidates) == 1, f'Expected exactly one new validation window: {candidates}'
         window = candidates[0]
-        script = (
-            'local owned=nil;for _,w in ipairs(hl.get_windows({class="aperture"})) do '
-            f"if w.pid=={window['pid']} and w.address=={json.dumps(window['address'])} then owned=w end end;"
-            'assert(owned,"Owned validation window no longer exists");'
-            'hl.dispatch(hl.dsp.window.float({action="set",window=owned}));'
-            f'hl.dispatch(hl.dsp.window.resize({{x={width},y={height},relative=false,window=owned}}))'
-        )
-        subprocess.run(['hyprctl', 'eval', script], check=True, stdout=subprocess.DEVNULL)
+        desktop.resize(window, width, height)
         wait(condition)
-        report['checks']['nativeResizeOwnership'] = {'pid': window['pid'], 'address': window['address']}
+        report['checks']['nativeResizeOwnership'] = {'pid': window['pid'], 'id': window['id']}
 
     def screenshot(name):
         path = args.output.parent / f'{name}.png'

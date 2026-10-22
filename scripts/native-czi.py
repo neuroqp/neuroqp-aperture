@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """Validate Zeiss CZI in an owned native Aperture session using stdlib WebDriver.
 
-Parent orchestration starts tauri-driver. Only the chooser result is supplied;
+Run inside scripts/headless-session --driver 4446. Only the chooser result is supplied;
 real UI handlers, Rust IPC, CZI reader, cache and tile protocol handle the data.
 No Python CZI decoder is used. expected.json (czifile reference values) is read
 as plain data for geometry. Fixtures and reports stay outside Git.
@@ -13,10 +13,11 @@ import hashlib
 import json
 import os
 import shutil
-import subprocess
 from pathlib import Path
 import time
 from urllib.request import Request, urlopen
+
+import compositor
 
 ROOT = Path(__file__).resolve().parents[1]
 PRIMARY = 'S=2_4x2_T=2=Z=3_CH=2.czi'
@@ -36,12 +37,13 @@ def digest(path):
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument('binary', type=Path)
-    parser.add_argument('--driver-url', default='http://127.0.0.1:4446')
+    parser.add_argument('--driver-url', help='defaults to the session driver; must match it')
     parser.add_argument('--fixtures', type=Path, default=ROOT / 'test-data/czi')
     parser.add_argument('--output', type=Path, default=ROOT / 'artifacts/czi/native-czi.json')
     parser.add_argument('--timeout', type=float, default=90)
     parser.add_argument('--renderer', choices=('gpu', 'cpu'), default='gpu')
     args = parser.parse_args()
+    args.driver_url = compositor.driver_url(args.driver_url)
     args.output = args.output.absolute()
     args.output.parent.mkdir(parents=True, exist_ok=True)
     fixtures = args.fixtures.resolve()
@@ -73,6 +75,8 @@ def main():
                 pass
         return found
 
+    desktop = compositor.session()
+    binary = compositor.application(args.binary)
     previous_processes = app_processes()
 
     def request(method, path, body=None):
@@ -86,7 +90,7 @@ def main():
         return value
 
     sid = request('POST', '/session', {'capabilities': {'alwaysMatch': {
-        'browserName': 'wry', 'tauri:options': {'application': str(args.binary.resolve())},
+        'browserName': 'wry', 'tauri:options': {'application': str(binary)},
     }}})['sessionId']
     route = f'/session/{sid}'
     report = {'passed': False, 'checks': {}, 'sourceHashes': hashes, 'screenshots': []}
@@ -353,19 +357,10 @@ def main():
         rect = request('GET', route + '/window/rect')
         # A tiling compositor overrides client size requests. Float only this
         # harness-owned application's window, leaving other desktop clients alone.
-        if os.environ.get('HYPRLAND_INSTANCE_SIGNATURE'):
-            clients = json.loads(subprocess.check_output(['hyprctl', '-j', 'clients'], text=True))
-            owned = app_processes() - previous_processes
-            for client in clients:
-                if client.get('pid') not in owned:
-                    continue
-                selector = json.dumps('address:' + client['address'])
-                if not client.get('floating'):
-                    floating = subprocess.run(['hyprctl', 'dispatch', 'setfloating', 'address:' + client['address']], capture_output=True, text=True)
-                    if floating.returncode:
-                        # Hyprland 0.55+ exposes Lua dispatchers.
-                        subprocess.run(['hyprctl', 'dispatch', 'hl.dsp.window.float({action="set",window=' + selector + '})'], check=True, capture_output=True)
-                subprocess.run(['hyprctl', 'dispatch', 'hl.dsp.window.resize({x=640,y=400,window=' + selector + '})'], check=True, capture_output=True)
+        owned = app_processes() - previous_processes
+        for window in desktop.windows():
+            if window['pid'] in owned:
+                desktop.resize(window, 640, 400)
         request('POST', route + '/window/rect', {'width': 640, 'height': 400})
         wait(lambda: js('return innerWidth<=660 && innerHeight<=420;'), 'minimum native window size')
         layout = js("const r=document.getElementById('navigator-panel').getBoundingClientRect();return {left:r.left,right:r.right,bottom:r.bottom,width:innerWidth,height:innerHeight,overflow:document.documentElement.scrollWidth>innerWidth};")

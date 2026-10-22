@@ -1,9 +1,10 @@
 #!/usr/bin/env python3
 """Validate ND2 max projections in an owned native Aperture session.
 
-Parent starts tauri-driver with isolated cache/config directories and builds the
-application. Only the chooser response is supplied here. Numeric reduction is
-covered by Rust tests; this checks real UI, IPC, caches and displayed pixels.
+Build the application, then run inside scripts/headless-session --driver 4446,
+which isolates cache/config directories. Only the chooser response is supplied
+here. Numeric reduction is covered by Rust tests; this checks real UI, IPC,
+caches and displayed pixels.
 """
 
 import argparse
@@ -14,6 +15,8 @@ import os
 from pathlib import Path
 import time
 from urllib.request import Request, urlopen
+
+import compositor
 
 ROOT = Path(__file__).resolve().parents[1]
 GIB = 1024 ** 3
@@ -30,7 +33,7 @@ def digest(path):
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument('binary', type=Path)
-    parser.add_argument('--driver-url', default='http://127.0.0.1:4446')
+    parser.add_argument('--driver-url', help='defaults to the session driver; must match it')
     parser.add_argument('--fixtures', type=Path, default=ROOT / 'test-data/nd2')
     parser.add_argument('--real-z', type=Path)
     parser.add_argument('--real-time', type=Path)
@@ -38,6 +41,7 @@ def main():
     parser.add_argument('--timeout', type=float, default=180)
     parser.add_argument('--renderer', choices=('gpu', 'cpu'), default='gpu')
     args = parser.parse_args()
+    args.driver_url = compositor.driver_url(args.driver_url)
     binary = args.binary.resolve()
     primary = args.fixtures.resolve() / 'dims_p4z5t3c2y32x32.nd2'
     real_sources = [(mode, path.resolve()) for mode, path in
@@ -198,7 +202,7 @@ def main():
     try:
         previous_processes = processes()
         sid = request('POST', '/session', {'capabilities': {'alwaysMatch': {
-            'browserName': 'wry', 'tauri:options': {'application': str(binary)},
+            'browserName': 'wry', 'tauri:options': {'application': str(compositor.application(binary))},
         }}})['sessionId']
         route = f'/session/{sid}'
         output.with_suffix('.session.json').write_text(json.dumps({'sessionId': sid}) + '\n')
