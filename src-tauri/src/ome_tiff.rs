@@ -118,8 +118,8 @@ pub(crate) fn detect(path: &Path) -> Result<bool, String> {
         return Ok(false);
     };
     Ok(match tiff.root() {
-        // An XML prolog the probe cannot finish is never treated as ordinary.
-        Ok(Root::Ome(_) | Root::Unknown) => true,
+        // A prolog that runs past the probe limit is never treated as ordinary.
+        Ok(Root::Ome(_) | Root::Truncated) => true,
         _ => tiff.mentions_ome()?,
     })
 }
@@ -822,7 +822,7 @@ impl<'d> Members<'_, 'd> {
                 let root = match tiff.root()? {
                     Root::Ome(uuid) => uuid,
                     Root::Other => None,
-                    Root::Unknown => {
+                    Root::Unknown | Root::Truncated => {
                         return Err(error(format!(
                             "the OME-XML root of {label} cannot be read within its description."
                         )))
@@ -945,8 +945,10 @@ enum Root {
     Ome(Option<String>),
     /// Not XML, or XML with another root.
     Other,
-    /// XML whose prolog or root start tag does not end within the probe.
+    /// XML whose prolog or root start tag cannot be read.
     Unknown,
+    /// A prolog that continues past the 32 MiB probe limit.
+    Truncated,
 }
 
 /// A byte range of a TIFF read in windows of at most `HEADER_BYTES`.
@@ -1150,14 +1152,18 @@ impl Tiff {
                 });
             } else if window.is_empty() && len > MAX_XML_BYTES {
                 // Whitespace up to the XML limit; the rest is never read.
-                return Ok(Root::Unknown);
+                return Ok(Root::Truncated);
             } else {
                 // Empty or not XML.
                 return Ok(Root::Other);
             };
             text.at += 2;
             if !text.skip_past(terminator)? {
-                return Ok(Root::Unknown);
+                return Ok(if len > MAX_XML_BYTES {
+                    Root::Truncated
+                } else {
+                    Root::Unknown
+                });
             }
         }
     }
@@ -2006,6 +2012,15 @@ mod tests {
         }
         write_tiff(&path, false, true, 1, Some("ImageJ=1.54\nimages=1\n"));
         assert!(!detect(&path).unwrap());
+        // Malformed but complete descriptions without OME elements stay ordinary.
+        for text in [
+            "<10 um scale bar",
+            "<!DOCTYPE html><html>",
+            "<image width=100>",
+        ] {
+            write_tiff(&path, false, true, 1, Some(text));
+            assert!(!detect(&path).unwrap(), "{text}");
+        }
         // Words that merely start with OME stay ordinary TIFF descriptions.
         write_tiff(
             &path,
