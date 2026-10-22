@@ -1,12 +1,12 @@
 {
   "application_lockfiles_sha256": {
     "pnpm-lock.yaml": "ce391502197571c39a3558c88de3d7c701c91f9175404e9718c84b3e62e53f84",
-    "src-tauri/Cargo.lock": "8d329b44b0512cf8b5f72e8586cdf6dbd377e8de0307695ad8b1bac4acc61511"
+    "src-tauri/Cargo.lock": "934e7b1a4e14d2d7313113504756ed6e5114165162b28cb1776eafa3500bd6fc"
   },
   "application_source_inventory_sha256": "e52b8cb47e8bc84c0d395143b3a6ec312d63ded7d703d7ecc3448e2c47f6b3e9",
   "asset": "Aperture-Corresponding-Source.tar.xz",
   "dependency_inventories_sha256": {
-    "application/cargo-vendor-inventory.json": "276f3827e8e6dbe068ff4fb3c30b4ecf8f11936609ee071ec5b52c4331ccf6d9",
+    "application/cargo-vendor-inventory.json": "4fcdca445d1a9f8101fa10a4f99f5ad63717c8fc4ec4182682edcbd164c51a1f",
     "application/npm-inventory.json": "f6b68b3c9c5ff6f3fb44db88c2e2cbac97b298e527a51d83cb1b53d681e54d64"
   },
   "native_dependencies_sha256": {
@@ -14,7 +14,7 @@
     "windows": "a0c0dd5352e715e83696a73ca66444e5d60a045bd1a045d38fe1daee96f84a19"
   },
   "schema": 1,
-  "sha256": "f6c0d4778d6c30d06c62f17315c220f72499b5ed360441bcd528e8bdefa4783d",
+  "sha256": "695057c6a0f3262a7a7c64a79646977fd6726f51392a82ced60bf20bccb4f0c7",
   "status": "ready",
-  "url": "https://github.com/neuroqp/neuroqp-aperture/releases/download/source-v0.3.0-r1/Aperture-Corresponding-Source.tar.xz"
+  "url": "https://github.com/neuroqp/neuroqp-aperture/releases/download/source-v0.3.0-r2/Aperture-Corresponding-Source.tar.xz"
 }
