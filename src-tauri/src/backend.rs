@@ -57,7 +57,11 @@ fn openable(path: &Path) -> bool {
 }
 
 /// ND2 and CZI by extension; OME-TIFF by its first page's OME-XML or a companion.
-fn detect_format(path: &Path, source: &Path) -> Result<Option<crate::frames::Format>, String> {
+fn detect_format(
+    path: &Path,
+    source: &Path,
+    budget: &Arc<crate::memory::Budget>,
+) -> Result<Option<crate::frames::Format>, String> {
     if let Some(format) = crate::frames::Format::from_path(path) {
         return Ok(Some(format));
     }
@@ -70,7 +74,7 @@ fn detect_format(path: &Path, source: &Path) -> Result<Option<crate::frames::For
                 .any(|t| extension.eq_ignore_ascii_case(t))
         });
     Ok(
-        ((tiff || crate::ome_tiff::is_companion(path)) && crate::ome_tiff::detect(source)?)
+        ((tiff || crate::ome_tiff::is_companion(path)) && crate::ome_tiff::detect(source, budget)?)
             .then_some(crate::frames::Format::OmeTiff),
     )
 }
@@ -371,7 +375,7 @@ impl Backend {
                 *browser = Some(self.memory.require(BROWSER_BYTES, DISPLAY_MEMORY_ERROR)?);
             }
         }
-        let acquisition = if let Some(format) = detect_format(path, &source)? {
+        let acquisition = if let Some(format) = detect_format(path, &source, &self.memory)? {
             let identity =
                 crate::instances::fingerprint(&source).map_err(|error| error.to_string())?;
             let mut current = self.acquisition.lock().unwrap();

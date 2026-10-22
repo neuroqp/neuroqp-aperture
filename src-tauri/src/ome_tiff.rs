@@ -38,7 +38,7 @@ const MAX_MEMBERS: usize = 4096;
 const MAX_IFDS: u64 = 1 << 21;
 const MAX_IFD_ENTRIES: u64 = 1 << 16;
 /// Bounded read of a member's ImageDescription for its root UUID.
-const HEADER_BYTES: u64 = 64 * 1024;
+const MEMBER_PROBE_BYTES: u64 = 1024 * 1024;
 /// OME UUIDs are `urn:uuid:` plus 36 characters; longer values are rejected.
 const MAX_UUID_BYTES: usize = 256;
 /// Canonical member paths longer than this are rejected.
@@ -110,17 +110,20 @@ impl Series {
 /// A companion, a TIFF whose first description has an OME root, or one whose
 /// description mentions OME-XML that the root probe cannot place, so it gets
 /// the OME path's explicit errors instead of the editable ordinary-TIFF path.
-pub(crate) fn detect(path: &Path) -> Result<bool, String> {
+pub(crate) fn detect(path: &Path, budget: &Arc<Budget>) -> Result<bool, String> {
     if is_companion(path) {
         return Ok(true);
     }
     let Some(tiff) = Tiff::open(path)? else {
         return Ok(false);
     };
-    Ok(match tiff.root() {
+    let Some(prefix) = tiff.prefix(MAX_XML_BYTES, budget)? else {
+        return Ok(false);
+    };
+    Ok(match classify(&prefix.text, prefix.truncated) {
         // A prolog that runs past the probe limit is never treated as ordinary.
         Ok(Root::Ome(_) | Root::Truncated) => true,
-        _ => tiff.mentions_ome()?,
+        _ => mentions_ome(&prefix.text, prefix.truncated),
     })
 }
 
@@ -385,6 +388,7 @@ fn build(
     let workspace = budget.require(references * MEMBER_BYTES, &budget_error())?;
     let mut members = Members {
         origin,
+        budget: budget.clone(),
         files: Vec::new(),
         paths: HashMap::new(),
         uuids: HashMap::new(),
@@ -774,6 +778,7 @@ struct Member<'d> {
 
 struct Members<'o, 'd> {
     origin: &'o Origin,
+    budget: Arc<Budget>,
     files: Vec<Member<'d>>,
     paths: HashMap<PathBuf, u16>,
     uuids: HashMap<&'d str, u16>,
@@ -819,14 +824,17 @@ impl<'d> Members<'_, 'd> {
                 let tiff =
                     Tiff::open(&path)?.ok_or_else(|| error(format!("{label} is not a TIFF.")))?;
                 let index = self.files.len() as u16;
-                let root = match tiff.root()? {
-                    Root::Ome(uuid) => uuid,
-                    Root::Other => None,
-                    Root::Unknown | Root::Truncated => {
-                        return Err(error(format!(
-                            "the OME-XML root of {label} cannot be read within its description."
-                        )))
-                    }
+                let root = match tiff.prefix(MEMBER_PROBE_BYTES, &self.budget)? {
+                    None => None,
+                    Some(prefix) => match classify(&prefix.text, prefix.truncated)? {
+                        Root::Ome(uuid) => uuid,
+                        Root::Other => None,
+                        Root::Unknown | Root::Truncated => {
+                            return Err(error(format!(
+                                "the OME-XML root of {label} cannot be read within the first MiB of its description."
+                            )))
+                        }
+                    },
                 };
                 self.files.push(Member {
                     root,
@@ -951,35 +959,53 @@ enum Root {
     Truncated,
 }
 
-/// A byte range of a TIFF read in windows of at most `HEADER_BYTES`.
-struct Text<'a> {
-    tiff: &'a Tiff,
-    at: u64,
-    end: u64,
+/// The start of a first description and whether it continues past the probe.
+struct Prefix {
+    _reservation: Option<Reservation>,
+    text: Vec<u8>,
+    truncated: bool,
 }
 
-impl Text<'_> {
-    fn window(&self, len: u64) -> Result<Vec<u8>, String> {
-        let mut bytes = vec![0; len.min(self.end.saturating_sub(self.at)) as usize];
-        self.tiff.read(self.at, &mut bytes)?;
-        Ok(bytes)
+/// The root element of a description prefix, read whole in one pass.
+fn classify(text: &[u8], truncated: bool) -> Result<Root, String> {
+    let body = text
+        .strip_prefix(b"\xEF\xBB\xBF")
+        .unwrap_or(text)
+        .trim_ascii_start();
+    if body.is_empty() || body.iter().all(|b| *b == 0) {
+        return Ok(if truncated {
+            Root::Truncated
+        } else {
+            Root::Other
+        });
     }
+    if !body.starts_with(b"<") {
+        return Ok(Root::Other);
+    }
+    Ok(match root_start(text) {
+        Some((b"OME", uuid)) => Root::Ome(
+            uuid.map(|uuid| {
+                std::str::from_utf8(uuid)
+                    .map_err(|_| error("a root UUID is not UTF-8."))
+                    .and_then(checked_uuid)
+                    .map(str::to_owned)
+            })
+            .transpose()?,
+        ),
+        Some(_) => Root::Other,
+        None if truncated => Root::Truncated,
+        None => Root::Unknown,
+    })
+}
 
-    /// Advances past `pattern`; false when the range ends first.
-    fn skip_past(&mut self, pattern: &[u8]) -> Result<bool, String> {
-        loop {
-            let window = self.window(HEADER_BYTES)?;
-            if let Some(at) = window.windows(pattern.len()).position(|w| w == pattern) {
-                self.at += (at + pattern.len()) as u64;
-                return Ok(true);
-            }
-            if window.len() < HEADER_BYTES as usize {
-                return Ok(false);
-            }
-            // Keep an overlap so a pattern across windows is still found.
-            self.at += (window.len() - (pattern.len() - 1)) as u64;
-        }
-    }
+/// Whether a description prefix names an OME element anywhere, including
+/// prefixed names, but not words such as OMERO.
+fn mentions_ome(text: &[u8], truncated: bool) -> bool {
+    let name = |w: &[u8]| matches!(w[0], b'<' | b':') && &w[1..4] == b"OME";
+    text.windows(5)
+        .any(|w| name(w) && (w[4].is_ascii_whitespace() || matches!(w[4], b'>' | b'/')))
+        // A name cut off at the probe limit may still be an OME element.
+        || (truncated && text.len() >= 4 && name(&text[text.len() - 4..]))
 }
 
 struct Tiff {
@@ -1111,90 +1137,23 @@ impl Tiff {
         Ok(None)
     }
 
-    /// The first description's root element, read in bounded windows so that
-    /// a long prolog never needs the whole XML in memory.
-    fn root(&self) -> Result<Root, String> {
+    /// The first description's first `limit` bytes, read once, and whether the
+    /// description is longer. Prefixes above 64 KiB are reserved first.
+    fn prefix(&self, limit: u64, budget: &Arc<Budget>) -> Result<Option<Prefix>, String> {
         let Some((offset, len)) = self.description()? else {
-            return Ok(Root::Other);
+            return Ok(None);
         };
-        let mut text = Text {
-            tiff: self,
-            at: offset,
-            end: offset + len.min(MAX_XML_BYTES),
-        };
-        if text.window(3)? == b"\xEF\xBB\xBF" {
-            text.at += 3;
-        }
-        loop {
-            let window = text.window(HEADER_BYTES)?;
-            let blank = window.len() - window.trim_ascii_start().len();
-            if blank > 0 {
-                text.at += blank as u64;
-                continue;
-            }
-            let terminator: &[u8] = if window.starts_with(b"<?") {
-                b"?>"
-            } else if window.starts_with(b"<!--") {
-                b"-->"
-            } else if window.starts_with(b"<") {
-                return Ok(match root_start(&window) {
-                    Some((b"OME", uuid)) => Root::Ome(
-                        uuid.map(|uuid| {
-                            std::str::from_utf8(uuid)
-                                .map_err(|_| error("a root UUID is not UTF-8."))
-                                .and_then(checked_uuid)
-                                .map(str::to_owned)
-                        })
-                        .transpose()?,
-                    ),
-                    Some(_) => Root::Other,
-                    None => Root::Unknown,
-                });
-            } else if window.is_empty() && len > MAX_XML_BYTES {
-                // Whitespace up to the XML limit; the rest is never read.
-                return Ok(Root::Truncated);
-            } else {
-                // Empty or not XML.
-                return Ok(Root::Other);
-            };
-            text.at += 2;
-            if !text.skip_past(terminator)? {
-                return Ok(if len > MAX_XML_BYTES {
-                    Root::Truncated
-                } else {
-                    Root::Unknown
-                });
-            }
-        }
-    }
-
-    /// Whether the first description mentions an OME element anywhere in its
-    /// first 32 MiB, including prefixed names.
-    fn mentions_ome(&self) -> Result<bool, String> {
-        let Some((offset, len)) = self.description()? else {
-            return Ok(false);
-        };
-        let mut text = Text {
-            tiff: self,
-            at: offset,
-            end: offset + len.min(MAX_XML_BYTES),
-        };
-        // Only an element name counts, not words such as OMERO; each window is
-        // scanned once, overlapping by four bytes for names across windows.
-        loop {
-            let window = text.window(HEADER_BYTES)?;
-            if window.windows(5).any(|w| {
-                matches!(w[0], b'<' | b':')
-                    && &w[1..4] == b"OME"
-                    && (w[4].is_ascii_whitespace() || matches!(w[4], b'>' | b'/'))
-            }) {
-                return Ok(true);
-            }
-            if window.len() < HEADER_BYTES as usize {
-                return Ok(false);
-            }
-            text.at += (window.len() - 4) as u64;
-        }
+        let size = len.min(limit);
+        let reservation = (size > 64 * 1024)
+            .then(|| budget.require(size, &budget_error()))
+            .transpose()?;
+        let mut text = vec![0; size as usize];
+        self.read(offset, &mut text)?;
+        Ok(Some(Prefix {
+            _reservation: reservation,
+            text,
+            truncated: len > limit,
+        }))
     }
 }
 
@@ -1328,20 +1287,20 @@ mod tests {
         for (big, little) in [(false, true), (false, false), (true, true), (true, false)] {
             let path = dir.join(format!("{big}-{little}.tif"));
             write_tiff(&path, big, little, 2, Some(&xml));
-            assert!(detect(&path).unwrap());
+            assert!(detect(&path, &budget(&dir)).unwrap());
             let prefixed =
                 format!("<?xml version=\"1.0\"?><!-- x --><ome:OME xmlns:ome=\"{NS}\" UUID='u'/>");
             write_tiff(&path, big, little, 1, Some(&prefixed));
-            assert!(detect(&path).unwrap());
+            assert!(detect(&path, &budget(&dir)).unwrap());
             write_tiff(&path, big, little, 1, Some("ImageJ=1.54\nimages=1\n"));
-            assert!(!detect(&path).unwrap());
+            assert!(!detect(&path, &budget(&dir)).unwrap());
             write_tiff(&path, big, little, 1, None);
-            assert!(!detect(&path).unwrap());
+            assert!(!detect(&path, &budget(&dir)).unwrap());
         }
         let other = dir.join("plain.txt");
         std::fs::write(&other, "<OME/>").unwrap();
-        assert!(!detect(&other).unwrap());
-        assert!(detect(&dir.join("Set.Companion.OME")).unwrap());
+        assert!(!detect(&other, &budget(&dir)).unwrap());
+        assert!(detect(&dir.join("Set.Companion.OME"), &budget(&dir)).unwrap());
     }
 
     #[test]
@@ -1989,7 +1948,7 @@ mod tests {
         );
         let path = dir.join("late.tif");
         write_tiff(&path, false, true, 2, Some(&late));
-        assert!(detect(&path).unwrap());
+        assert!(detect(&path, &budget(&dir)).unwrap());
         let dataset = open(&path, &budget(&dir)).unwrap().0;
         assert_eq!(page(&dataset.series[0], 0, 1, 0), Some((0, 1)));
         // OME-XML the probe cannot place still takes the OME path and fails there.
@@ -2002,7 +1961,7 @@ mod tests {
             ),
         ] {
             write_tiff(&path, false, true, 1, Some(&text));
-            assert!(detect(&path).unwrap());
+            assert!(detect(&path, &budget(&dir)).unwrap());
             assert!(open(&path, &budget(&dir)).is_err());
         }
         // Prologs beyond the 32 MiB probe limit are refused, not opened as editable TIFFs.
@@ -2012,11 +1971,24 @@ mod tests {
             format!("{}<OME xmlns=\"{NS}\"/>", " ".repeat(huge)),
         ] {
             write_tiff(&path, false, true, 1, Some(&text));
-            assert!(detect(&path).unwrap());
+            assert!(detect(&path, &budget(&dir)).unwrap());
             assert!(open(&path, &budget(&dir)).is_err());
         }
         write_tiff(&path, false, true, 1, Some("ImageJ=1.54\nimages=1\n"));
-        assert!(!detect(&path).unwrap());
+        assert!(!detect(&path, &budget(&dir)).unwrap());
+        // A root cut off exactly at the probe limit still takes the OME path.
+        let edge = format!(
+            "{}<OME xmlns=\"{NS}\"/>",
+            " ".repeat(MAX_XML_BYTES as usize - 4)
+        );
+        write_tiff(&path, false, true, 1, Some(&edge));
+        assert!(detect(&path, &budget(&dir)).unwrap());
+        // Many short prolog items are read once, not once per item.
+        let items = format!("{}<OME xmlns=\"{NS}\"/>", "<?p?><!---->".repeat(1 << 20));
+        write_tiff(&path, false, true, 1, Some(&items));
+        let started = std::time::Instant::now();
+        assert!(detect(&path, &budget(&dir)).unwrap());
+        assert!(started.elapsed() < std::time::Duration::from_secs(5));
         // Malformed but complete descriptions without OME elements stay ordinary.
         for text in [
             "<10 um scale bar",
@@ -2025,20 +1997,17 @@ mod tests {
             "<image width=100>",
         ] {
             write_tiff(&path, false, true, 1, Some(text));
-            assert!(!detect(&path).unwrap(), "{text}");
+            assert!(!detect(&path, &budget(&dir)).unwrap(), "{text}");
         }
         // Many near-miss names are scanned once, then a name across windows is found.
         let near = "<OMEGA/>".repeat(4 * 1024 * 1024);
         write_tiff(&path, false, true, 1, Some(&near));
         let started = std::time::Instant::now();
-        assert!(!detect(&path).unwrap());
+        assert!(!detect(&path, &budget(&dir)).unwrap());
         assert!(started.elapsed() < std::time::Duration::from_secs(5));
-        let across = format!(
-            "{}<OME xmlns=\"{NS}\"/>",
-            "x".repeat(HEADER_BYTES as usize - 2)
-        );
+        let across = format!("{}<OME xmlns=\"{NS}\"/>", "x".repeat(64 * 1024 - 2));
         write_tiff(&path, false, true, 1, Some(&across));
-        assert!(detect(&path).unwrap());
+        assert!(detect(&path, &budget(&dir)).unwrap());
         // Words that merely start with OME stay ordinary TIFF descriptions.
         write_tiff(
             &path,
@@ -2047,7 +2016,7 @@ mod tests {
             1,
             Some("Exported from OMERO <OMEGA> x:OMERO"),
         );
-        assert!(!detect(&path).unwrap());
+        assert!(!detect(&path, &budget(&dir)).unwrap());
         // A member UUID after a long prolog is still compared with its reference.
         let reference = |uuid: &str| {
             ome(
