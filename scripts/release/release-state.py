@@ -13,6 +13,9 @@ import zipfile
 from release import ASSETS, current_version, digest, lockfile_hashes, native_identity, notes, source_plan, verify_source_material, verify, verify_signatures
 
 REPO = "neuroqp/neuroqp-aperture"
+# Producer runs must have called this gate. Rename it when older gate generations must stop
+# qualifying: the earlier trusted-source.yml did not verify the runs its callers consumed.
+TRUST_GATE = ".github/workflows/trusted-inputs.yml"
 ENVIRONMENTS = {"windows11-setup", "windows11-portable", "debian12", "ubuntu24-wayland"}
 FUNCTIONAL_ENVIRONMENTS = {"windows11", "debian12", "ubuntu24-wayland"}
 
@@ -72,8 +75,16 @@ def trusted_run(run_id, workflow):
             or row.get("event") != "workflow_dispatch" or row.get("path") != ".github/workflows/" + workflow
             or row.get("status") != "completed" or row.get("conclusion") != "success"):
         raise ValueError("Successful trusted main workflow required")
+    # GitHub records each reusable workflow a run called. Workflows predating the gate cannot
+    # add this record, unlike artifacts, logs or run names, so the producer verified its inputs.
+    head = row.get("head_sha")
+    gate = {"path": f"{REPO}/{TRUST_GATE}@{head}", "ref": "refs/heads/main", "sha": head}
+    calls = row.get("referenced_workflows")
+    if not isinstance(calls, list) or not any(
+            isinstance(call, dict) and all(call.get(key) == value for key, value in gate.items()) for call in calls):
+        raise ValueError("Workflow run did not call the trusted input gate at its own main revision")
     # Tags report their name as head_branch, so also require the workflow revision in main.
-    main_commit(row.get("head_sha"))
+    main_commit(head)
     return row
 
 

@@ -41,10 +41,20 @@ def job_condition(body):
     return " ".join((match.group(1) or match.group(2)).split()) if match else ""
 
 
+def gate_call(head=WORKFLOW, gate=None, repo=None, ref="refs/heads/main", sha=None):
+    """A referenced_workflows entry shaped like GitHub's for a local reusable workflow call.
+
+    Live python/cpython runs, including workflow_dispatch on main, report
+    {"path": "OWNER/REPO/.github/workflows/FILE.yml@HEAD_SHA", "ref": "refs/heads/main", "sha": HEAD_SHA}.
+    """
+    return {"path": f"{repo or state.REPO}/{gate or state.TRUST_GATE}@{head}", "ref": ref, "sha": sha or head}
+
+
 def run_row(**changes):
+    head = changes.get("head_sha", WORKFLOW)
     return {"repository": {"full_name": state.REPO}, "head_branch": "main", "head_sha": WORKFLOW,
             "event": "workflow_dispatch", "path": ".github/workflows/validate.yml",
-            "status": "completed", "conclusion": "success", **changes}
+            "status": "completed", "conclusion": "success", "referenced_workflows": [gate_call(head)], **changes}
 
 
 def historical_trusted_run(gh, run_id, workflow, source_sha=None):
@@ -64,7 +74,7 @@ def historical_trusted_run(gh, run_id, workflow, source_sha=None):
 
 
 def trusted_preflight(source_sha, run_workflow, run_id, responses):
-    """Run the trusted-source workflow's command and return its GITHUB_OUTPUT lines."""
+    """Run the trusted-inputs workflow's command and return its GITHUB_OUTPUT lines."""
     argv = ["release-state.py", "trusted-source", source_sha, "--run-workflow", run_workflow, "--run-id", run_id]
     output = io.StringIO()
     with patch("sys.argv", argv), patch.object(state, "gh", side_effect=responses) as github, \
@@ -256,6 +266,53 @@ class ReleaseStateTests(unittest.TestCase):
                 trusted_preflight(SOURCE, "validate.yml", "17", [main_ref(), comparison(), json.dumps(row)])
             self.assertEqual(trusted_preflight.output, "")
 
+    def test_trusted_preflight_rejects_producer_whose_workflow_predates_the_gate(self):
+        # A tag named main at historical main 8fafb1f dispatches its Validate without the gate. Its
+        # metadata passed every earlier check: main head_branch, success and a revision in main.
+        historical = "8fafb1fd42384355b6f220c15566c12be814919e"
+        row = run_row(head_sha=historical, referenced_workflows=[])
+        with self.assertRaisesRegex(ValueError, "trusted input gate"):
+            trusted_preflight(SOURCE, "validate.yml", "17", [main_ref(), comparison(), json.dumps(row)])
+        self.assertEqual(len(trusted_preflight.calls), 3)
+        self.assertEqual(trusted_preflight.output, "")
+        # Only the service-recorded gate call distinguishes a producer that verified its own inputs.
+        row["referenced_workflows"] = [gate_call(historical)]
+        accepted = [main_ref(), comparison(), json.dumps(row), main_ref(), comparison(base=historical)]
+        self.assertEqual(trusted_preflight(SOURCE, "validate.yml", "17", accepted), f"revision={SOURCE}\nrun_id=17\n")
+
+    def test_trusted_preflight_requires_recorded_gate_call_at_producer_revision(self):
+        other = "d" * 40
+        cases = {
+            "missing record": {key: value for key, value in run_row().items() if key != "referenced_workflows"},
+            "null record": run_row(referenced_workflows=None),
+            "object record": run_row(referenced_workflows=gate_call()),
+            "string record": run_row(referenced_workflows=gate_call()["path"]),
+            "malformed entries": run_row(referenced_workflows=[None, gate_call()["path"], []]),
+            "earlier gate generation": run_row(referenced_workflows=[gate_call(gate=".github/workflows/trusted-source.yml")]),
+            "other reusable workflow": run_row(referenced_workflows=[gate_call(gate=".github/workflows/check.yml")]),
+            "gate from a fork": run_row(referenced_workflows=[gate_call(repo="fork/neuroqp-aperture")]),
+            "gate at another revision": run_row(referenced_workflows=[gate_call(other)]),
+            "gate commit differs": run_row(referenced_workflows=[gate_call(sha=other)]),
+            "gate by moving ref": run_row(referenced_workflows=[{**gate_call(), "path": gate_call()["path"].split("@")[0]
+                                                                 + "@refs/heads/main"}]),
+            # Mocked: the tag-dispatch ref value is not observed live; any non-main ref is rejected.
+            "tag dispatch": run_row(referenced_workflows=[gate_call(ref="refs/tags/main")]),
+            "missing ref": run_row(referenced_workflows=[{"path": gate_call()["path"], "sha": WORKFLOW}]),
+            "missing commit": run_row(referenced_workflows=[{"path": gate_call()["path"], "ref": "refs/heads/main"}]),
+            "case variant": run_row(referenced_workflows=[gate_call(gate=state.TRUST_GATE.upper())]),
+        }
+        for name, row in cases.items():
+            with self.subTest(name), self.assertRaisesRegex(ValueError, "trusted input gate"):
+                trusted_preflight(SOURCE, "validate.yml", "17", [main_ref(), comparison(), json.dumps(row)])
+            self.assertEqual(len(trusted_preflight.calls), 3)
+            self.assertEqual(trusted_preflight.output, "")
+
+    def test_trusted_preflight_accepts_gated_producer_among_other_reusable_calls(self):
+        calls = [gate_call(gate=".github/workflows/check.yml"), {**gate_call(), "extra": True}]
+        row = run_row(path=".github/workflows/package.yml", referenced_workflows=calls)
+        accepted = [main_ref(), comparison(), json.dumps(row), main_ref(), comparison(base=WORKFLOW)]
+        self.assertEqual(trusted_preflight(SOURCE, "package.yml", "17", accepted), f"revision={SOURCE}\nrun_id=17\n")
+
     def test_trusted_preflight_requires_expected_run_ids(self):
         # A required run never becomes optional because its ID is empty or malformed.
         for workflow in ("validate.yml", "package.yml"):
@@ -275,14 +332,14 @@ class ReleaseStateTests(unittest.TestCase):
 
     def test_dispatched_source_is_checked_out_only_after_main_containment(self):
         guard = "needs.trust.outputs.revision == inputs.source_sha"
-        trusted = (WORKFLOWS / "trusted-source.yml").read_text(encoding="utf-8")
+        trusted = (WORKFLOWS.parents[1] / state.TRUST_GATE).read_text(encoding="utf-8")
         # The gate runs only the calling workflow revision's code and writes no cache.
         self.assertNotRegex(trusted, r"\bref:")
         self.assertEqual([action.split("@")[0] for action in re.findall(r"uses: (\S+)", trusted)], ["actions/checkout"])
         self.assertIn('trusted-source "$SOURCE_SHA" --run-workflow "$RUN_WORKFLOW" --run-id "$RUN_ID"', trusted)
         for name in ("validate.yml", "package.yml", "publish.yml"):
             jobs = workflow_jobs(name)
-            self.assertIn("uses: ./.github/workflows/trusted-source.yml", jobs["trust"])
+            self.assertIn(f"uses: ./{state.TRUST_GATE}\n", jobs["trust"])
             guarded = {job for job, body in jobs.items() if guard in job_condition(body)}
             for job, body in jobs.items():
                 if job == "trust" or "actions/checkout@" not in body:

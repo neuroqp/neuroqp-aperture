@@ -16,7 +16,7 @@ permissions:
 
 jobs:
   trust:
-    uses: ./.github/workflows/trusted-source.yml
+    uses: ./.github/workflows/trusted-inputs.yml
     with:
       source_sha: ${{ inputs.source_sha }}
       run_workflow: validate.yml

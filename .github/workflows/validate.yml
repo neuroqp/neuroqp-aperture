@@ -26,7 +26,7 @@ permissions:
 
 jobs:
   trust:
-    uses: ./.github/workflows/trusted-source.yml
+    uses: ./.github/workflows/trusted-inputs.yml
     with:
       source_sha: ${{ inputs.source_sha }}
       # Seal consumes build artifacts, so its run is verified with this revision's helper.

@@ -1,4 +1,4 @@
-name: Trusted source
+name: Trusted inputs
 
 # Runs only the calling workflow revision's code, before any job checks out,
 # executes or caches the dispatched source commit or consumes a referenced run.
