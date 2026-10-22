@@ -1174,8 +1174,13 @@ impl Tiff {
                 at: offset,
                 end: offset + len.min(MAX_XML_BYTES),
             };
-            if text.skip_past(pattern)? {
-                return Ok(true);
+            // Only an element name counts, not words such as OMERO.
+            while text.skip_past(pattern)? {
+                if let [next] = text.window(1)?[..] {
+                    if next.is_ascii_whitespace() || matches!(next, b'>' | b'/') {
+                        return Ok(true);
+                    }
+                }
             }
         }
         Ok(false)
@@ -2000,6 +2005,15 @@ mod tests {
             assert!(open(&path, &budget(&dir)).is_err());
         }
         write_tiff(&path, false, true, 1, Some("ImageJ=1.54\nimages=1\n"));
+        assert!(!detect(&path).unwrap());
+        // Words that merely start with OME stay ordinary TIFF descriptions.
+        write_tiff(
+            &path,
+            false,
+            true,
+            1,
+            Some("Exported from OMERO <OMEGA> x:OMERO"),
+        );
         assert!(!detect(&path).unwrap());
         // A member UUID after a long prolog is still compared with its reference.
         let reference = |uuid: &str| {
