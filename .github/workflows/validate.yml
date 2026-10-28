@@ -52,7 +52,7 @@ jobs:
           ref: ${{ needs.trust.outputs.revision }}
           persist-credentials: false
       - run: bash scripts/release/prepare-linux.sh
-      - uses: pnpm/action-setup@b906affcce14559ad1aafd4ab0e942779e9f58b1 # v4
+      - uses: pnpm/action-setup@ea17c68df8912ef543352723c149a84f56e3d413 # v6.1.0
         with:
           version: 9.15.9
       - uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1 # v7.1.0
@@ -63,7 +63,7 @@ jobs:
         with:
           toolchain: 1.98.0
           components: rustfmt, clippy
-      - uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2.9.2
+      - uses: Swatinem/rust-cache@d1527c8f67ef9af357290475d4af4b0fab8f12e0 # v2.9.3
         with:
           workspaces: src-tauri
           cache-on-failure: true
@@ -131,14 +131,14 @@ jobs:
         run: choco install nsis --version=3.11 --yes --no-progress --allow-downgrade
       - name: Check portable extraction and locking
         run: pwsh scripts/release/test-portable.ps1
-      - uses: pnpm/action-setup@b906affcce14559ad1aafd4ab0e942779e9f58b1 # v4
+      - uses: pnpm/action-setup@ea17c68df8912ef543352723c149a84f56e3d413 # v6.1.0
         with:
           version: 9.15.9
       - uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1 # v7.1.0
         with:
           node-version: 22.22.0
           cache: pnpm
-      - uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97 # v7.0.0
+      - uses: actions/setup-python@6d4fd22b20465ccc0f7354476588e8df7c9ca0e0 # v7.1.0
         with:
           python-version: "3.12"
       - uses: dtolnay/rust-toolchain@683b588c487a69d01f6c6ddf40f036ff682cc2c8
@@ -153,7 +153,7 @@ jobs:
         run: |
           "APERTURE_NATIVE_DIR=$env:GITHUB_WORKSPACE\build\windows\native" >> $env:GITHUB_ENV
           "$env:GITHUB_WORKSPACE\build\windows\payload" >> $env:GITHUB_PATH
-      - uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2.9.2
+      - uses: Swatinem/rust-cache@d1527c8f67ef9af357290475d4af4b0fab8f12e0 # v2.9.3
         with:
           workspaces: src-tauri
           cache-on-failure: true
